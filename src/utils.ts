@@ -241,14 +241,21 @@ export function hasDisablePropertyInFile(
   }
 }
 
-// Obsidian 1.14's highlight color markers in circle and square form, as its own lookup table accepts both; self-grouped so an interpolated `^` anchors every alternative, not just the first.
+// Obsidian 1.14's highlight color markers in circle and square form, as its own lookup table accepts both; self-grouped so the alternation stays inside the surrounding `==…==` pattern.
 const HIGHLIGHT_COLOR_MARKERS =
   '(?:\u{1F534}|\u{1F7E5}|\u{1F7E0}|\u{1F7E7}|\u{1F7E1}|\u{1F7E8}|\u{1F7E2}|\u{1F7E9}|\u{1F535}|\u{1F7E6}|\u{1F7E3}|\u{1F7EA})';
 
-// `u` matches whole code points: the markers share a high surrogate with unrelated emoji such as U+1F7E4, which a code-unit character class would split in half.
-const LEADING_HIGHLIGHT_COLOR_MARKER = new RegExp(
-  `^${HIGHLIGHT_COLOR_MARKERS}`,
-  'u'
+const HIGHLIGHT_CONTENT_SOLID_CHAR = String.raw`(?:(?!==)\S)`;
+const HIGHLIGHT_CONTENT_ANY_CHAR = String.raw`(?:(?!==).)`;
+
+// `u` so `.` and `\S` step over an emoji as one character.
+const MARKED_HIGHLIGHT = new RegExp(
+  String.raw`==${HIGHLIGHT_COLOR_MARKERS}(${HIGHLIGHT_CONTENT_ANY_CHAR}*)==`,
+  'gu'
+);
+const UNMARKED_HIGHLIGHT = new RegExp(
+  String.raw`==(${HIGHLIGHT_CONTENT_SOLID_CHAR}${HIGHLIGHT_CONTENT_ANY_CHAR}*)==`,
+  'gu'
 );
 
 export function extractTitle(
@@ -353,6 +360,16 @@ export function extractTitle(
       return false;
     };
 
+    // Obsidian reads a highlight's color from the raw first code point, so marked highlights unwrap before comment, bold, italic and strikethrough stripping can expose a marker.
+    if (settings.markupStripping.stripMarkupSettings.highlight) {
+      line = line.replace(
+        MARKED_HIGHLIGHT,
+        (match: string, content: string, offset: number) => {
+          return checkEscaped(match, offset) ? match : content;
+        }
+      );
+    }
+
     // Comment toggles cover Obsidian's %%…%% only — HTML comments are stripped by the htmlTags toggle instead.
     if (settings.markupStripping.stripCommentsEntirely) {
       // Strip comments entirely: remove everything
@@ -411,13 +428,11 @@ export function extractTitle(
 
     // Strip highlight markup
     if (settings.markupStripping.stripMarkupSettings.highlight) {
+      // Both renderers show `====` and `== x==` as literal text; Live Preview still highlights `==x ==`, so the closing marker stays lax.
       line = line.replace(
-        /==(.*?)==/g,
+        UNMARKED_HIGHLIGHT,
         (match: string, content: string, offset: number) => {
-          // Obsidian consumes a leading color marker without rendering it, so it must not reach the title; a space after it is highlighted text and stays.
-          return checkEscaped(match, offset)
-            ? match
-            : content.replace(LEADING_HIGHLIGHT_COLOR_MARKER, '');
+          return checkEscaped(match, offset) ? match : content;
         }
       );
     }

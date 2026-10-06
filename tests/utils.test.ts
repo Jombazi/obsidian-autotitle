@@ -820,6 +820,36 @@ describe('utils', () => {
       it('should keep the color marker when an escape inside the highlight blocks stripping', () => {
         expect(extractTitle('==🔴Ti\\*tle==', settings)).toBe('==🔴Ti*tle==');
       });
+
+      it('should leave a highlight opened by a space as literal text', () => {
+        expect(extractTitle('== x==', settings)).toBe('== x==');
+      });
+
+      it('should leave four equals signs as literal text', () => {
+        expect(extractTitle('====', settings)).toBe('====');
+      });
+
+      it('should strip a highlight whose closing marker follows a space', () => {
+        expect(extractTitle('==x ==', settings)).toBe('x');
+      });
+
+      it('should strip a color-marked highlight whose closing marker follows a space', () => {
+        expect(extractTitle('==🔴x ==', settings)).toBe('x');
+      });
+
+      it('should keep a color marker that only bold stripping exposes', () => {
+        expect(extractTitle('==**🔴**Title==', settings)).toBe('🔴Title');
+      });
+
+      it('should keep a color marker that only comment stripping exposes', () => {
+        expect(settings.markupStripping.stripCommentsEntirely).toBe(true);
+
+        expect(extractTitle('==%%c%%🔴Title==', settings)).toBe('🔴Title');
+      });
+
+      it('should strip the color marker of a highlight wrapped in bold', () => {
+        expect(extractTitle('**==🔴Title==**', settings)).toBe('Title');
+      });
     });
   });
 
