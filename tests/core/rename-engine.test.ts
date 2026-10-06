@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { getFrontMatterInfo } from 'obsidian';
+import { getFrontMatterInfo, parseYaml } from 'obsidian';
 import { RenameEngine } from '../../src/core/rename-engine';
 import { CacheManager } from '../../src/core/cache-manager';
 import {
@@ -693,6 +693,133 @@ describe('RenameEngine', () => {
 
         expect(await renameWith('# TODO: item')).toBe('Notes/Done item.md');
       });
+    });
+  });
+
+  // A note just created, or replaced by sync, reaches processFile before the metadata cache indexes it; the gate has to read the property from the text.
+  describe('rename-blocking property on an unindexed note', () => {
+    let noteInFolder: TFile;
+    // Raw YAML block -> parsed object. Blocks with no entry throw, modelling malformed YAML.
+    let yamlFixtures: Map<string, unknown>;
+
+    const BLOCKED_NOTE = '---\nno rename: true\n---\nTitle\n';
+
+    // Mirrors the new-note path: noDelay, automatic, no content handed in, editor assumed open
+    const processAsNewNote = () =>
+      renameEngine.processFile(
+        noteInFolder,
+        true,
+        false,
+        undefined,
+        false,
+        undefined,
+        true
+      );
+
+    beforeEach(() => {
+      yamlFixtures = new Map<string, unknown>([
+        ['no rename: true', { 'no rename': true }],
+        ['no rename: false', { 'no rename': false }],
+        ['status: draft', { status: 'draft' }],
+      ]);
+      // Cleared first: the read-error case asserts the gate never parsed anything, and earlier describes leave calls behind
+      vi.mocked(getFrontMatterInfo)
+        .mockClear()
+        .mockImplementation(
+          splitFrontMatter as unknown as typeof getFrontMatterInfo
+        );
+      vi.mocked(parseYaml).mockImplementation(((yaml: string) => {
+        if (!yamlFixtures.has(yaml)) {
+          throw new Error(`malformed YAML: ${yaml}`);
+        }
+        return yamlFixtures.get(yaml);
+      }) as typeof parseYaml);
+
+      noteInFolder = createMockFile('Notes/Source note.md');
+      noteInFolder.parent = createMockFolder('Notes');
+
+      // Only the note itself exists, so the conflict counter stays out of the asserted path
+      plugin.app.vault.getAbstractFileByPath = vi.fn((path: string) =>
+        path === noteInFolder.path ? noteInFolder : null
+      );
+      plugin.app.vault.getAllLoadedFiles = vi.fn().mockReturnValue([]);
+      plugin.app.metadataCache.getFileCache = vi.fn().mockReturnValue(null);
+    });
+
+    afterEach(() => {
+      vi.mocked(getFrontMatterInfo).mockReset();
+      vi.mocked(parseYaml).mockReset();
+    });
+
+    it('keeps the name when the property is in the text the cache has not indexed', async () => {
+      plugin.app.vault.read = vi.fn().mockResolvedValue(BLOCKED_NOTE);
+
+      const result = await processAsNewNote();
+
+      expect(result.reason).toBe('property-disabled');
+      expect(plugin.app.vault.read).toHaveBeenCalledTimes(1);
+      expect(plugin.app.vault.read).toHaveBeenCalledWith(noteInFolder);
+      expect(plugin.app.fileManager.renameFile).not.toHaveBeenCalled();
+    });
+
+    it('proceeds when the property in the text is switched off', async () => {
+      const content = `---\nno rename: false\n---\n${noteInFolder.basename}\n`;
+      plugin.app.vault.read = vi.fn().mockResolvedValue(content);
+      plugin.app.vault.cachedRead = vi.fn().mockResolvedValue(content);
+
+      const result = await processAsNewNote();
+
+      expect(result.reason).toBe('no-rename-needed');
+    });
+
+    it('stops before the gate when the note cannot be read', async () => {
+      const consoleErrorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+      plugin.app.vault.read = vi.fn().mockRejectedValue(new Error('gone'));
+
+      const result = await processAsNewNote();
+
+      expect(result.reason).toBe('read-error');
+      expect(getFrontMatterInfo).not.toHaveBeenCalled();
+      expect(plugin.app.metadataCache.getFileCache).not.toHaveBeenCalled();
+      consoleErrorSpy.mockRestore();
+    });
+
+    it('keeps the name when the text comes from the cached read', async () => {
+      plugin.settings.core.contentReadMethod = 'Cache';
+      plugin.app.vault.cachedRead = vi.fn().mockResolvedValue(BLOCKED_NOTE);
+
+      const result = await processAsNewNote();
+
+      expect(result.reason).toBe('property-disabled');
+    });
+
+    it('falls back to the cache on a manual command whose only content is another note in a hover popover', async () => {
+      const otherNote = createMockFile('Notes/Other note.md');
+      plugin.app.workspace.getLeavesOfType = vi.fn().mockReturnValue([
+        {
+          view: {
+            hoverPopover: {
+              targetEl: {},
+              file: otherNote,
+              editor: {
+                getValue: vi
+                  .fn()
+                  .mockReturnValue('---\nstatus: draft\n---\nOther note\n'),
+              },
+            },
+          },
+        },
+      ]);
+      plugin.app.metadataCache.getFileCache = vi
+        .fn()
+        .mockReturnValue({ frontmatter: { 'no rename': true } });
+
+      const result = await renameEngine.processFile(noteInFolder, true, true);
+
+      expect(result.reason).toBe('property-disabled');
+      expect(plugin.app.fileManager.renameFile).not.toHaveBeenCalled();
     });
   });
 

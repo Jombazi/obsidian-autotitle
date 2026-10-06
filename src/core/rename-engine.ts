@@ -524,7 +524,26 @@ export class RenameEngine {
     hasActiveEditor?: boolean,
     editor?: Editor
   ): Promise<RenameOutcome> {
-    // Central gate: check policy requirements and always-on safeguards
+    let initialContent: string;
+    try {
+      initialContent = await readFileContent(this.plugin, file, {
+        providedContent,
+        providedEditor: editor, // Use editor from manual command
+        preferFresh: true,
+        searchWorkspace: showNotices, // Manual commands search for popover editors
+      });
+    } catch (error) {
+      console.error(`Error reading file content: ${file.path}`, error);
+      return { success: false, reason: 'read-error' };
+    }
+
+    // With searchWorkspace and no editor, readFileContent can return the only live hover popover's content even when it shows another note, so the gate falls back to the cache there.
+    const gateContent =
+      providedContent !== undefined || editor !== undefined || !showNotices
+        ? initialContent
+        : undefined;
+
+    // Central gate: check policy requirements and always-on safeguards. It reads the rename-blocking property from the note's text, so a note the metadata cache has not indexed yet (just created, or replaced by sync) still counts it; the cache is the fallback when the text has no parseable frontmatter.
     const { canModify, reason } = canModifyFile(
       file,
       this.plugin.app,
@@ -532,23 +551,14 @@ export class RenameEngine {
       this.plugin.settings.exclusions.disableRenamingValue,
       showNotices, // showNotices indicates manual command
       hasActiveEditor, // From editor-change event or auto-detected
-      providedContent
+      gateContent
     );
 
     if (!canModify) {
       verboseLog(this.plugin, `Skipping file: ${reason}: ${file.path}`);
 
       // Output file content if debug setting enabled
-      try {
-        const content =
-          providedContent || (await this.plugin.app.vault.read(file));
-        this.plugin.outputDebugFileContent(file, 'BLOCKED', content);
-      } catch (error) {
-        console.error(
-          `Error reading file content for debug output: ${file.path}`,
-          error
-        );
-      }
+      this.plugin.outputDebugFileContent(file, 'BLOCKED', initialContent);
 
       if (showNotices && !isBatchOperation) {
         new Notice(
@@ -558,28 +568,8 @@ export class RenameEngine {
       return { success: false, reason: 'property-disabled' };
     }
 
-    let contentForRateLimit: string;
-    try {
-      contentForRateLimit = await readFileContent(this.plugin, file, {
-        providedContent,
-        providedEditor: editor, // Use editor from manual command
-        preferFresh: true,
-        searchWorkspace: showNotices, // Manual commands search for popover editors
-      });
-
-      // Output debug file content if enabled
-      this.plugin.outputDebugFileContent(
-        file,
-        'PROCESSING',
-        contentForRateLimit
-      );
-    } catch (error) {
-      console.error(
-        `Error reading file for rate limit check: ${file.path}`,
-        error
-      );
-      return { success: false, reason: 'read-error' };
-    }
+    // Output debug file content if enabled
+    this.plugin.outputDebugFileContent(file, 'PROCESSING', initialContent);
 
     // Skip processing when editing in footnote popover
     // When user types in footnote definition, providedContent contains only the footnote text
@@ -593,7 +583,7 @@ export class RenameEngine {
       if (diskContent.match(/\n\[\^[^\]]+\]:\s/)) {
         const ratio =
           diskContent.length > 0
-            ? contentForRateLimit.length / diskContent.length
+            ? initialContent.length / diskContent.length
             : 1;
         if (ratio < LIMITS.FOOTNOTE_SIZE_THRESHOLD) {
           verboseLog(
@@ -622,9 +612,6 @@ export class RenameEngine {
         return { success: false, reason: 'global-rate-limited' };
       }
     }
-
-    // Reuse contentForRateLimit instead of reading again
-    const initialContent = contentForRateLimit;
 
     // Runs before the content gate: this rule reads only the name, so paying for shouldProcessFile's YAML parses first would be wasted work. A file both name- and strategy-excluded therefore reports 'file-name-exclusion'.
     // Check if filename matches any file name exclusions and skip if enabled (always respected)
