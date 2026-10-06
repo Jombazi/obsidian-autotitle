@@ -1,5 +1,7 @@
 # first-line-is-title
 
+- **Reading view is the source of truth for titles**: A title MUST reproduce, as faithfully as possible, the text Obsidian's Reading view renders for the first line — markup, escapes and code spans included. Measure Reading view's rendering of a case BEFORE changing how titles are extracted, and treat every divergence from it as a defect.
+
 ***
 
 ## Guidelines
