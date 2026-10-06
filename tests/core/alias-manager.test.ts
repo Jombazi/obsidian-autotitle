@@ -10,8 +10,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { getFrontMatterInfo, parseYaml } from 'obsidian';
 import { AliasManager } from '../../src/core/alias-manager';
-import { createMockFile, createMockApp } from '../testUtils';
+import { createMockFile, createMockApp, splitFrontMatter } from '../testUtils';
 import { TFile, Editor, MarkdownView } from '../mockObsidian';
 import { DeepPartial, PluginSettings } from '../../src/types';
 import { DEFAULT_SETTINGS } from '../../src/constants';
@@ -231,6 +232,49 @@ describe('AliasManager', () => {
       );
 
       expect(plugin.app.fileManager.processFrontMatter).toHaveBeenCalled();
+    });
+  });
+
+  describe('updateAliasIfNeeded rename-blocking property', () => {
+    // Raw YAML block -> parsed object. Blocks with no entry throw, modelling malformed YAML.
+    let yamlFixtures: Map<string, unknown>;
+
+    beforeEach(() => {
+      yamlFixtures = new Map<string, unknown>();
+      vi.mocked(getFrontMatterInfo).mockImplementation(
+        splitFrontMatter as unknown as typeof getFrontMatterInfo
+      );
+      vi.mocked(parseYaml).mockImplementation(((yaml: string) => {
+        if (!yamlFixtures.has(yaml)) {
+          throw new Error(`malformed YAML: ${yaml}`);
+        }
+        return yamlFixtures.get(yaml);
+      }) as typeof parseYaml);
+      plugin.app.workspace.getActiveViewOfType = vi.fn().mockReturnValue(null);
+    });
+
+    afterEach(() => {
+      vi.mocked(getFrontMatterInfo).mockReset();
+      vi.mocked(parseYaml).mockReset();
+    });
+
+    it('should skip when the content blocks renaming before the cache does', async () => {
+      yamlFixtures.set('no rename: true', { 'no rename': true });
+      plugin.app.metadataCache.getFileCache = vi.fn().mockReturnValue({
+        frontmatter: { 'no rename': false },
+      });
+      const addAliasToFile = vi
+        .spyOn(aliasManager, 'addAliasToFile')
+        .mockResolvedValue(undefined);
+
+      const result = await aliasManager.updateAliasIfNeeded(
+        file,
+        '---\nno rename: true\n---\nFirst Line\nBody'
+      );
+
+      expect(result).toBe(false);
+      expect(addAliasToFile).not.toHaveBeenCalled();
+      expect(plugin.app.fileManager.processFrontMatter).not.toHaveBeenCalled();
     });
   });
 

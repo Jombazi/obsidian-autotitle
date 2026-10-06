@@ -21,7 +21,7 @@ function createMockPlugin(openLeaves: unknown[] = []) {
         onLayoutReady: vi.fn((callback: () => void) => callback()),
         getLeavesOfType: vi.fn(() => openLeaves),
       },
-      vault: { on: vi.fn() },
+      vault: { on: vi.fn(), cachedRead: vi.fn().mockResolvedValue('') },
       metadataCache: {
         on: vi.fn(),
         getFileCache: vi.fn((file: TFile) => ({
@@ -46,6 +46,10 @@ function createMockPlugin(openLeaves: unknown[] = []) {
       handleEditorChangeWithThrottle: vi.fn(),
     },
     cacheManager: { isLocked: vi.fn(() => false) },
+    fileStateManager: {
+      getLastSavedContent: vi.fn(),
+      setLastSavedContent: vi.fn(),
+    },
     isFullyLoaded: true,
     renameEngine: {
       processFile: vi.fn().mockResolvedValue({ success: true }),

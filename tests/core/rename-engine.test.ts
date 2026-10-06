@@ -40,11 +40,9 @@ function createMockPlugin() {
       getLastEditorContent: vi.fn().mockReturnValue(undefined),
       setLastEditorContent: vi.fn(),
       deleteLastEditorContent: vi.fn(),
-      isEditorContentStale: vi.fn().mockReturnValue(false),
       getLastSavedContent: vi.fn().mockReturnValue(undefined),
       setLastSavedContent: vi.fn(),
       deleteLastSavedContent: vi.fn(),
-      isSavedContentStale: vi.fn().mockReturnValue(false),
       // Title region cache
       getTitleRegionCache: vi.fn().mockReturnValue(undefined),
       setTitleRegionCache: vi.fn(),
@@ -55,10 +53,6 @@ function createMockPlugin() {
       needsFreshRead: vi.fn().mockReturnValue(false),
       markNeedsFreshRead: vi.fn(),
       clearNeedsFreshRead: vi.fn(),
-      // Alias update status
-      setLastAliasUpdateStatus: vi.fn(),
-      getLastAliasUpdateStatus: vi.fn().mockReturnValue(undefined),
-      isAliasStatusStale: vi.fn().mockReturnValue(true),
       // File lifecycle
       notifyFileRenamed: vi.fn(),
       notifyFileDeleted: vi.fn(),
@@ -249,6 +243,20 @@ describe('RenameEngine', () => {
       });
     });
 
+    afterEach(() => {
+      vi.mocked(getFrontMatterInfo).mockReset();
+    });
+
+    /** The cache says the frontmatter closes on `cachedEndLine`, while the editor already holds a different frontmatter. */
+    function mockCachedFrontmatterEndLine(cachedEndLine: number) {
+      plugin.app.metadataCache.getFileCache = vi.fn().mockReturnValue({
+        frontmatterPosition: {
+          start: { line: 0, col: 0, offset: 0 },
+          end: { line: cachedEndLine, col: 3, offset: 0 },
+        },
+      });
+    }
+
     it('should extract first non-empty line', () => {
       const content = 'First Line\nSecond Line';
       editor.getValue = vi.fn().mockReturnValue(content);
@@ -261,19 +269,47 @@ describe('RenameEngine', () => {
     });
 
     it('should skip frontmatter when extracting title', () => {
+      vi.mocked(getFrontMatterInfo).mockImplementation(
+        splitFrontMatter as unknown as typeof getFrontMatterInfo
+      );
       const content = '---\ntitle: Test\n---\nFirst Body Line\nSecond Line';
       editor.getValue = vi.fn().mockReturnValue(content);
-
-      plugin.app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatterPosition: {
-          start: { line: 0, col: 0, offset: 0 },
-          end: { line: 2, col: 3, offset: 23 },
-        },
-      });
 
       const result = renameEngine.extractTitleRegion(editor, file);
 
       expect(result.firstNonEmptyLine).toBe('First Body Line');
+    });
+
+    it('should find the first body line when a property line was deleted before the cache caught up', () => {
+      vi.mocked(getFrontMatterInfo).mockImplementation(
+        splitFrontMatter as unknown as typeof getFrontMatterInfo
+      );
+      mockCachedFrontmatterEndLine(3);
+      editor.getValue = vi
+        .fn()
+        .mockReturnValue('---\ntitle: Test\n---\nFirst Body Line\nSecond Line');
+
+      const result = renameEngine.extractTitleRegion(editor, file);
+
+      expect(result.firstNonEmptyLine).toBe('First Body Line');
+      expect(result.titleSourceLine).toBe('First Body Line');
+    });
+
+    it('should find the first body line when a property line was added before the cache caught up', () => {
+      vi.mocked(getFrontMatterInfo).mockImplementation(
+        splitFrontMatter as unknown as typeof getFrontMatterInfo
+      );
+      mockCachedFrontmatterEndLine(2);
+      editor.getValue = vi
+        .fn()
+        .mockReturnValue(
+          '---\ntitle: Test\nstatus: draft\n---\nFirst Body Line\nSecond Line'
+        );
+
+      const result = renameEngine.extractTitleRegion(editor, file);
+
+      expect(result.firstNonEmptyLine).toBe('First Body Line');
+      expect(result.titleSourceLine).toBe('First Body Line');
     });
 
     it('should skip empty lines', () => {

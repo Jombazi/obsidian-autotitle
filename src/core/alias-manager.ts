@@ -10,9 +10,10 @@ import {
   verboseLog,
   shouldProcessFile,
   extractTitle,
-  hasDisablePropertyInFile,
+  frontmatterHasDisableProperty,
   findTitleSourceLine,
 } from '../utils';
+import { resolveCurrentFrontmatter } from '../utils/file-exclusions';
 import { t } from '../i18n';
 import { readFileContent } from '../utils/content-reader';
 import FirstLineIsTitle from '../../main';
@@ -110,10 +111,14 @@ export class AliasManager {
       // The lock is already acquired by the time we reach this point
 
       // Check disable property FIRST - this cannot be overridden by any command
+      // Content first: the editor is ahead of the cache by up to Obsidian's autosave delay. The cache decides when content is absent or has no parseable frontmatter.
       if (
-        hasDisablePropertyInFile(
-          file,
-          this.app,
+        frontmatterHasDisableProperty(
+          resolveCurrentFrontmatter(
+            file,
+            this.app,
+            providedContent ?? editor?.getValue()
+          ) ?? {},
           this.settings.exclusions.disableRenamingKey,
           this.settings.exclusions.disableRenamingValue
         )

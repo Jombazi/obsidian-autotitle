@@ -8,6 +8,7 @@ import {
 import { PluginSettings, OSPreset } from './types';
 import { CHAR_TO_SETTING_KEY } from './types/char-replacement';
 import { isRootFolderPath } from './utils/string-processing';
+import { resolveCurrentFrontmatter } from './utils/file-exclusions';
 import { t } from './i18n';
 import { PropertyManager } from './core/property-manager';
 
@@ -136,11 +137,16 @@ export function canModifyFile(
   disableKey: string,
   disableValue: string,
   isManualCommand: boolean,
-  hasActiveEditor?: boolean
+  hasActiveEditor?: boolean,
+  content?: string
 ): { canModify: boolean; reason?: string } {
-  // Check 1: Disable property (ALWAYS-ON SAFEGUARD #4)
-  // Fastest check, absolute blocker for all operations
-  if (hasDisablePropertyInFile(file, app, disableKey, disableValue)) {
+  // Check 1: Disable property (ALWAYS-ON SAFEGUARD #4), absolute blocker for all operations
+  // Content first: the editor is ahead of the cache by up to Obsidian's autosave delay. The cache decides when content is absent or has no parseable frontmatter.
+  const frontmatter = resolveCurrentFrontmatter(file, app, content);
+  if (
+    frontmatter &&
+    frontmatterHasDisableProperty(frontmatter, disableKey, disableValue)
+  ) {
     return { canModify: false, reason: 'disable property present' };
   }
 

@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { getFrontMatterInfo, parseYaml } from 'obsidian';
 import {
   verboseLog,
   isValidHeading,
@@ -12,7 +13,12 @@ import {
   normalizeExclusionLists,
   reverseCharacterReplacements,
 } from '../src/utils';
-import { createTestSettings, createMockFile, createMockApp } from './testUtils';
+import {
+  createTestSettings,
+  createMockFile,
+  createMockApp,
+  splitFrontMatter,
+} from './testUtils';
 import { PluginSettings, FileNameExclusion } from '../src/types';
 import { CharKey, CharReplacementConfig } from '../src/types/char-replacement';
 import { TFile, App, Platform } from './mockObsidian';
@@ -534,6 +540,86 @@ describe('utils', () => {
       const result = await canModifyFile(file, app, 'no rename', 'true', true);
 
       expect(result.canModify).toBe(true);
+    });
+
+    // The editor runs ahead of the metadata cache by up to Obsidian's autosave delay.
+    describe('with the content being processed', () => {
+      // Raw YAML block -> parsed object. Blocks with no entry throw, modelling malformed YAML.
+      let yamlFixtures: Map<string, unknown>;
+
+      const checkWithContent = (content?: string) =>
+        canModifyFile(file, app, 'no rename', 'true', true, undefined, content);
+
+      const mockCachedDisableValue = (value: boolean) => {
+        app.metadataCache.getFileCache = vi.fn().mockReturnValue({
+          frontmatter: { 'no rename': value },
+        });
+      };
+
+      beforeEach(() => {
+        yamlFixtures = new Map<string, unknown>([
+          ['no rename: true', { 'no rename': true }],
+          ['no rename: false', { 'no rename': false }],
+        ]);
+        vi.mocked(getFrontMatterInfo).mockImplementation(
+          splitFrontMatter as unknown as typeof getFrontMatterInfo
+        );
+        vi.mocked(parseYaml).mockImplementation(((yaml: string) => {
+          if (!yamlFixtures.has(yaml)) {
+            throw new Error(`malformed YAML: ${yaml}`);
+          }
+          return yamlFixtures.get(yaml);
+        }) as typeof parseYaml);
+      });
+
+      afterEach(() => {
+        vi.mocked(getFrontMatterInfo).mockReset();
+        vi.mocked(parseYaml).mockReset();
+      });
+
+      it('should block when the content turns the property on before the cache does', () => {
+        mockCachedDisableValue(false);
+
+        const result = checkWithContent('---\nno rename: true\n---\nTitle');
+
+        expect(result.canModify).toBe(false);
+        expect(result.reason).toBe('disable property present');
+      });
+
+      it('should allow when the content turns the property off before the cache does', () => {
+        mockCachedDisableValue(true);
+
+        const result = checkWithContent('---\nno rename: false\n---\nTitle');
+
+        expect(result.canModify).toBe(true);
+      });
+
+      it('should fall back to the cache when the content has no frontmatter', () => {
+        // rename-engine passes only the footnote text when a footnote definition is edited
+        mockCachedDisableValue(true);
+
+        const result = checkWithContent('[^1]: A footnote definition');
+
+        expect(result.canModify).toBe(false);
+        expect(result.reason).toBe('disable property present');
+      });
+
+      it('should fall back to the cache when the content frontmatter is malformed', () => {
+        mockCachedDisableValue(true);
+
+        const result = checkWithContent('---\nno rename: [tru\n---\nTitle');
+
+        expect(result.canModify).toBe(false);
+        expect(result.reason).toBe('disable property present');
+      });
+
+      it('should let the cache decide when no content is passed', () => {
+        mockCachedDisableValue(true);
+        expect(checkWithContent().canModify).toBe(false);
+
+        mockCachedDisableValue(false);
+        expect(checkWithContent().canModify).toBe(true);
+      });
     });
   });
 

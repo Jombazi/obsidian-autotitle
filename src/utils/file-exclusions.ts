@@ -63,7 +63,7 @@ export function isFileInConfiguredFolders(
 }
 
 /**
- * Resolve the frontmatter to evaluate property exclusions against.
+ * Resolve the frontmatter to evaluate exclusions and the rename-blocking property against.
  *
  * Fails closed: callers can hand over partial editor content (rename-engine passes only the
  * footnote text when a footnote definition is edited), so content without parseable
@@ -71,7 +71,7 @@ export function isFileInConfiguredFolders(
  * renaming a protected file. A genuinely empty new note has no cached frontmatter either,
  * so the creation path still sees the live content.
  */
-function resolveFrontmatterForExclusions(
+export function resolveCurrentFrontmatter(
   file: TFile,
   app: App,
   content?: string
@@ -109,7 +109,7 @@ export function fileHasExcludedProperties(
   );
   if (nonEmptyProperties.length === 0) return false;
 
-  const frontmatter = resolveFrontmatterForExclusions(file, app, content);
+  const frontmatter = resolveCurrentFrontmatter(file, app, content);
   if (!frontmatter) return false;
 
   // Property matching folds case, so resolve each configured key against the frontmatter's own casing

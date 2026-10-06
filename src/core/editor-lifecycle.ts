@@ -1,4 +1,10 @@
-import { TFile, MarkdownView, ViewWithFileEditor, Editor } from 'obsidian';
+import {
+  TFile,
+  MarkdownView,
+  ViewWithFileEditor,
+  Editor,
+  getFrontMatterInfo,
+} from 'obsidian';
 import { verboseLog, findTitleSourceLine } from '../utils';
 import FirstLineIsTitle from '../../main';
 
@@ -531,17 +537,11 @@ export class EditorLifecycleManager {
   public extractFirstLineFromEditor(editor: Editor, file: TFile): string {
     try {
       const content = editor.getValue();
-      const lines = content.split('\n');
 
-      // Skip frontmatter to get actual first line
-      const metadata = this.app.metadataCache.getFileCache(file);
-      let firstLineIndex = 0;
-      if (metadata?.frontmatterPosition) {
-        firstLineIndex = metadata.frontmatterPosition.end.line + 1;
-      }
-
-      // Get lines after frontmatter
-      const contentLines = lines.slice(firstLineIndex);
+      // Frontmatter boundary from the editor content itself: the cached frontmatterPosition lags the editor by up to Obsidian's autosave delay, so after a property line is added or removed it points at the wrong line.
+      const contentLines = content
+        .slice(getFrontMatterInfo(content).contentStart)
+        .split('\n');
 
       // Find first non-empty line after frontmatter
       let firstNonEmptyLine = '';

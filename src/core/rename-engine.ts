@@ -1,4 +1,10 @@
-import { TFile, Editor, Notice, MarkdownView } from 'obsidian';
+import {
+  TFile,
+  Editor,
+  Notice,
+  MarkdownView,
+  getFrontMatterInfo,
+} from 'obsidian';
 import { TitleRegionCache, RenameOutcome, RenameOutcomeReason } from '../types';
 import { TIMING, LIMITS } from '../constants/timing';
 import {
@@ -96,10 +102,6 @@ export class RenameEngine {
         undefined,
         undefined,
         editor
-      );
-      this.plugin.fileStateManager.setLastAliasUpdateStatus(
-        file.path,
-        aliasResult
       );
       return aliasResult;
     } finally {
@@ -268,21 +270,17 @@ export class RenameEngine {
     providedContent?: string
   ): TitleRegionCache {
     const content = providedContent || editor.getValue();
-    const metadata = this.plugin.app.metadataCache.getFileCache(file);
 
-    // Skip frontmatter
-    let startLine = 0;
-    if (metadata?.frontmatterPosition) {
-      startLine = metadata.frontmatterPosition.end.line + 1;
-    }
-
-    const lines = content.split('\n');
+    // Frontmatter boundary from the content itself: the cached frontmatterPosition lags the editor by up to Obsidian's autosave delay.
+    const contentLines = content
+      .slice(getFrontMatterInfo(content).contentStart)
+      .split('\n');
 
     // Find first non-empty line
     let firstNonEmptyLine = '';
-    for (let i = startLine; i < lines.length; i++) {
-      if (lines[i].trim() !== '') {
-        firstNonEmptyLine = lines[i];
+    for (const line of contentLines) {
+      if (line.trim() !== '') {
+        firstNonEmptyLine = line;
         break;
       }
     }
@@ -294,9 +292,6 @@ export class RenameEngine {
         lastUpdated: Date.now(),
       };
     }
-
-    // Get lines after frontmatter for title source computation
-    const contentLines = lines.slice(startLine);
 
     // Use shared utility function to find title source line
     const titleSourceLine = findTitleSourceLine(
@@ -505,10 +500,10 @@ export class RenameEngine {
             })();
           }, TIMING.UI_SETTLE_DELAY_MS);
         } else {
-          // File in popover or not in view - preserve flag for modify/metadata handlers
+          // File in popover or not in view - the flag stays set and the next processFile on this file rechecks it
           verboseLog(
             this.plugin,
-            `Preserving pending alias flag for popover-close detection: ${newPath}`
+            `Pending alias flag stays set, next processFile on this file rechecks it: ${newPath}`
           );
         }
       }
@@ -536,7 +531,8 @@ export class RenameEngine {
       this.plugin.settings.exclusions.disableRenamingKey,
       this.plugin.settings.exclusions.disableRenamingValue,
       showNotices, // showNotices indicates manual command
-      hasActiveEditor // From editor-change event or auto-detected
+      hasActiveEditor, // From editor-change event or auto-detected
+      providedContent
     );
 
     if (!canModify) {

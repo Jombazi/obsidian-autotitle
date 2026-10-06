@@ -41,27 +41,6 @@ describe('FileStateManager', () => {
         manager.deleteLastEditorContent('nonexistent.md')
       ).not.toThrow();
     });
-
-    it('should track staleness correctly', () => {
-      manager.setLastEditorContent('test.md', 'content');
-      expect(manager.isEditorContentStale('test.md')).toBe(false);
-
-      // Advance time past default 5 min threshold
-      vi.advanceTimersByTime(6 * 60 * 1000);
-      expect(manager.isEditorContentStale('test.md')).toBe(true);
-    });
-
-    it('should use custom staleness threshold', () => {
-      manager.setLastEditorContent('test.md', 'content');
-
-      vi.advanceTimersByTime(2000);
-      expect(manager.isEditorContentStale('test.md', 1000)).toBe(true);
-      expect(manager.isEditorContentStale('test.md', 3000)).toBe(false);
-    });
-
-    it('should return stale for non-existent content', () => {
-      expect(manager.isEditorContentStale('nonexistent.md')).toBe(true);
-    });
   });
 
   describe('lastSavedContent', () => {
@@ -86,49 +65,15 @@ describe('FileStateManager', () => {
       ).not.toThrow();
     });
 
-    it('should track staleness correctly', () => {
-      manager.setLastSavedContent('test.md', 'content');
-      expect(manager.isSavedContentStale('test.md')).toBe(false);
-
-      // Advance time past default 5 min threshold
-      vi.advanceTimersByTime(6 * 60 * 1000);
-      expect(manager.isSavedContentStale('test.md')).toBe(true);
-    });
-
-    it('should use custom staleness threshold', () => {
+    it('should restart the purge clock when the same content is stored again', () => {
       manager.setLastSavedContent('test.md', 'content');
 
-      vi.advanceTimersByTime(2000);
-      expect(manager.isSavedContentStale('test.md', 1000)).toBe(true);
-      expect(manager.isSavedContentStale('test.md', 3000)).toBe(false);
-    });
+      vi.advanceTimersByTime(9 * 60 * 1000);
+      manager.setLastSavedContent('test.md', 'content');
+      vi.advanceTimersByTime(9 * 60 * 1000);
+      manager.runMaintenance();
 
-    it('should return stale for non-existent content', () => {
-      expect(manager.isSavedContentStale('nonexistent.md')).toBe(true);
-    });
-  });
-
-  describe('lastAliasUpdateStatus', () => {
-    it('should set and get alias update status', () => {
-      manager.setLastAliasUpdateStatus('test.md', true);
-      expect(manager.getLastAliasUpdateStatus('test.md')).toBe(true);
-
-      manager.setLastAliasUpdateStatus('test.md', false);
-      expect(manager.getLastAliasUpdateStatus('test.md')).toBe(false);
-    });
-
-    it('should return undefined for non-existent path', () => {
-      expect(
-        manager.getLastAliasUpdateStatus('nonexistent.md')
-      ).toBeUndefined();
-    });
-
-    it('should track staleness correctly', () => {
-      manager.setLastAliasUpdateStatus('test.md', true);
-      expect(manager.isAliasStatusStale('test.md')).toBe(false);
-
-      vi.advanceTimersByTime(6 * 60 * 1000);
-      expect(manager.isAliasStatusStale('test.md')).toBe(true);
+      expect(manager.getLastSavedContent('test.md')).toBe('content');
     });
   });
 
@@ -136,7 +81,6 @@ describe('FileStateManager', () => {
     it('should migrate state on file rename', () => {
       manager.setLastEditorContent('old.md', 'editor content');
       manager.setLastSavedContent('old.md', 'saved content');
-      manager.setLastAliasUpdateStatus('old.md', true);
 
       manager.notifyFileRenamed('old.md', 'new.md');
 
@@ -147,7 +91,6 @@ describe('FileStateManager', () => {
       // New path should have all state
       expect(manager.getLastEditorContent('new.md')).toBe('editor content');
       expect(manager.getLastSavedContent('new.md')).toBe('saved content');
-      expect(manager.getLastAliasUpdateStatus('new.md')).toBe(true);
     });
 
     it('should cleanup state on file delete', () => {
@@ -358,15 +301,6 @@ describe('FileStateManager', () => {
       manager.runMaintenance();
 
       expect(manager.getLastSavedContent('test.md')).toBeUndefined();
-    });
-
-    it('should cleanup stale alias status after 5 minutes', () => {
-      manager.setLastAliasUpdateStatus('test.md', true);
-
-      vi.advanceTimersByTime(6 * 60 * 1000);
-      manager.runMaintenance();
-
-      expect(manager.getLastAliasUpdateStatus('test.md')).toBeUndefined();
     });
 
     it('should cleanup stale locks', () => {

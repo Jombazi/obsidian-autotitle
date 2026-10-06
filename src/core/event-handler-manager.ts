@@ -353,6 +353,7 @@ export class EventHandlerManager {
         }
 
         this.rememberIfBlockingRename(info.file);
+        this.rememberSavedContentBaseline(info.file);
 
         // Early exit if still within creation delay window
         if (info.file && editor) {
@@ -390,7 +391,9 @@ export class EventHandlerManager {
   private registerDisablePropertyTransitionHandler(): void {
     this.plugin.registerEvent(
       this.plugin.app.workspace.on('file-open', (file) => {
-        if (file?.extension === 'md') this.rememberIfBlockingRename(file);
+        if (file?.extension !== 'md') return;
+        this.rememberIfBlockingRename(file);
+        this.rememberSavedContentBaseline(file);
       })
     );
 
@@ -401,6 +404,7 @@ export class EventHandlerManager {
       )) {
         if (leaf.view instanceof MarkdownView && leaf.view.file) {
           this.rememberIfBlockingRename(leaf.view.file);
+          this.rememberSavedContentBaseline(leaf.view.file);
         }
       }
     });
@@ -428,6 +432,26 @@ export class EventHandlerManager {
     ) {
       this.notesBlockingRename.add(file);
     }
+  }
+
+  /** Seeds the baseline the alias handlers compare a save against, so a properties-only save of an open note never writes an alias. */
+  private rememberSavedContentBaseline(file: TFile): void {
+    const { fileStateManager } = this.plugin;
+    const existingBaseline = fileStateManager.getLastSavedContent(file.path);
+    if (existingBaseline !== undefined) {
+      // Refreshes the timestamp so the 10-minute purge cannot fall between an edit and its save.
+      fileStateManager.setLastSavedContent(file.path, existingBaseline);
+      return;
+    }
+    // An edit fires before its save, so disk still holds the content the alias handlers compare that save against.
+    void this.plugin.app.vault.cachedRead(file).then(
+      (content) => {
+        if (fileStateManager.getLastSavedContent(file.path) === undefined) {
+          fileStateManager.setLastSavedContent(file.path, content);
+        }
+      },
+      () => {}
+    );
   }
 
   private handleDisablePropertyChange(
@@ -598,8 +622,7 @@ export class EventHandlerManager {
             const previousContent =
               this.plugin.fileStateManager.getLastSavedContent(file.path);
             if (
-              previousContent &&
-              !this.plugin.fileStateManager.isSavedContentStale(file.path) &&
+              previousContent !== undefined &&
               isOnlyFrontmatterChanged(currentContent, previousContent)
             ) {
               verboseLog(
@@ -629,16 +652,11 @@ export class EventHandlerManager {
               `// EDITOR_PASS (modify): Passing editor=${editor ? 'defined' : 'undefined'} to updateAliasIfNeeded`
             );
 
-            const aliasUpdateSucceeded =
-              await this.plugin.aliasManager.updateAliasIfNeeded(
-                file,
-                currentContent,
-                undefined,
-                editor
-              );
-            this.plugin.fileStateManager.setLastAliasUpdateStatus(
-              file.path,
-              aliasUpdateSucceeded
+            await this.plugin.aliasManager.updateAliasIfNeeded(
+              file,
+              currentContent,
+              undefined,
+              editor
             );
 
             // Update lastSavedContent after processing
@@ -707,38 +725,23 @@ export class EventHandlerManager {
           const previousContent =
             this.plugin.fileStateManager.getLastSavedContent(file.path);
 
-          // Check for stale content comparison - skip if previous content is too old
-          const contentIsStale =
-            this.plugin.fileStateManager.isSavedContentStale(file.path);
-
-          if (previousContent && !contentIsStale) {
-            // Only skip if body unchanged AND last alias update succeeded AND status not stale
-            // If last update was skipped (e.g., popover/canvas), retry now
-            const lastUpdateSucceeded =
-              this.plugin.fileStateManager.getLastAliasUpdateStatus(file.path);
-            const statusIsStale =
-              this.plugin.fileStateManager.isAliasStatusStale(file.path);
-            if (
-              isOnlyFrontmatterChanged(currentContent, previousContent) &&
-              lastUpdateSucceeded &&
-              !statusIsStale
-            ) {
-              if (this.plugin.settings.core.debug) {
-                console.debug(
-                  `Skipping metadata-alias update - only frontmatter edited: ${file.path}`
-                );
-              }
-              // Still update lastSavedContent even when skipping
-              this.plugin.fileStateManager.setLastSavedContent(
-                file.path,
-                currentContent
+          if (
+            previousContent !== undefined &&
+            isOnlyFrontmatterChanged(currentContent, previousContent)
+          ) {
+            if (this.plugin.settings.core.debug) {
+              console.debug(
+                `Skipping metadata-alias update - only frontmatter edited: ${file.path}`
               );
-              return;
             }
+            // Still update lastSavedContent even when skipping
+            this.plugin.fileStateManager.setLastSavedContent(
+              file.path,
+              currentContent
+            );
+            return;
           }
-          // If no previousContent, this is first save we're tracking
-          // Proceed with alias update since we can't determine if YAML-only edit
-          // If contentIsStale, proceed with alias update (don't rely on stale comparison)
+          // No previousContent means no baseline: a note never opened since load, or purged, so a YAML-only edit cannot be told apart and the alias update proceeds
 
           // Get editor if active view matches the file being updated
           const activeView =
@@ -755,16 +758,11 @@ export class EventHandlerManager {
             `// EDITOR_PASS (metadata): Passing editor=${editor ? 'defined' : 'undefined'} to updateAliasIfNeeded`
           );
 
-          const aliasUpdateSucceeded =
-            await this.plugin.aliasManager.updateAliasIfNeeded(
-              file,
-              currentContent,
-              undefined,
-              editor
-            );
-          this.plugin.fileStateManager.setLastAliasUpdateStatus(
-            file.path,
-            aliasUpdateSucceeded
+          await this.plugin.aliasManager.updateAliasIfNeeded(
+            file,
+            currentContent,
+            undefined,
+            editor
           );
 
           // Update lastSavedContent after processing

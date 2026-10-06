@@ -37,8 +37,6 @@ export interface FileState {
   lockTimestamp?: number; // When lock was acquired (for stale lock cleanup)
   pendingAliasRecheck?: boolean;
   pendingAliasEditor?: unknown; // Stored editor reference for popover detection
-  lastAliasUpdateSucceeded?: boolean; // Whether last alias update succeeded (true) or was skipped (false)
-  lastAliasUpdateTimestamp?: number; // When the alias update status was set (for staleness detection)
   isSyncingEditors?: boolean; // True when syncing background editors to prevent spurious rechecks
 
   // Rename tracking - prevents processing stale content after rename
@@ -184,26 +182,6 @@ export class FileStateManager {
   }
 
   /**
-   * Check if last editor content is stale (older than specified TTL).
-   *
-   * Staleness thresholds are intentionally layered:
-   * - 5 minutes (default): Content considered stale for comparison purposes
-   * - 10 minutes: Content actually deleted from memory in runMaintenance()
-   *
-   * @param path - File path
-   * @param maxAgeMs - Maximum age in milliseconds (default: 5 minutes)
-   * @returns true if content is stale or doesn't exist
-   */
-  isEditorContentStale(
-    path: string,
-    maxAgeMs: number = 5 * 60 * 1000
-  ): boolean {
-    const state = this.fileStates.get(path);
-    if (!state?.lastEditorContentTimestamp) return true;
-    return Date.now() - state.lastEditorContentTimestamp > maxAgeMs;
-  }
-
-  /**
    * Set last saved content with timestamp (for modify handler comparison)
    */
   setLastSavedContent(path: string, content: string): void {
@@ -228,54 +206,6 @@ export class FileStateManager {
       delete state.lastSavedContent;
       delete state.lastSavedContentTimestamp;
     }
-  }
-
-  /**
-   * Check if last saved content is stale (older than specified TTL).
-   *
-   * Staleness thresholds are intentionally layered:
-   * - 5 minutes (default): Content considered stale for comparison purposes
-   * - 10 minutes: Content actually deleted from memory in runMaintenance()
-   *
-   * This allows graceful degradation where stale content still exists
-   * but is treated as unreliable for frontmatter-only detection.
-   *
-   * @param path - File path
-   * @param maxAgeMs - Maximum age in milliseconds (default: 5 minutes)
-   * @returns true if content is stale or doesn't exist
-   */
-  isSavedContentStale(path: string, maxAgeMs: number = 5 * 60 * 1000): boolean {
-    const state = this.fileStates.get(path);
-    if (!state?.lastSavedContentTimestamp) return true;
-    return Date.now() - state.lastSavedContentTimestamp > maxAgeMs;
-  }
-
-  /**
-   * Set last alias update status with timestamp
-   */
-  setLastAliasUpdateStatus(path: string, succeeded: boolean): void {
-    const state = this.getOrCreateState(path);
-    state.lastAliasUpdateSucceeded = succeeded;
-    state.lastAliasUpdateTimestamp = Date.now();
-  }
-
-  /**
-   * Get last alias update status
-   */
-  getLastAliasUpdateStatus(path: string): boolean | undefined {
-    return this.fileStates.get(path)?.lastAliasUpdateSucceeded;
-  }
-
-  /**
-   * Check if last alias update status is stale (older than specified TTL)
-   * @param path - File path
-   * @param maxAgeMs - Maximum age in milliseconds (default: 5 minutes)
-   * @returns true if status is stale or doesn't exist
-   */
-  isAliasStatusStale(path: string, maxAgeMs: number = 5 * 60 * 1000): boolean {
-    const state = this.fileStates.get(path);
-    if (!state?.lastAliasUpdateTimestamp) return true;
-    return Date.now() - state.lastAliasUpdateTimestamp > maxAgeMs;
   }
 
   /**
@@ -639,7 +569,7 @@ export class FileStateManager {
       }
 
       // Clean up stale lastEditorContent (prevents memory leak from large notes)
-      // Cleanup after 10 minutes (staleThreshold) - staleness check uses 5 min default
+      // Cleanup after 10 minutes (staleThreshold)
       if (state.lastEditorContentTimestamp) {
         const age = now - state.lastEditorContentTimestamp;
         if (age > staleThreshold) {
@@ -649,22 +579,12 @@ export class FileStateManager {
       }
 
       // Clean up stale lastSavedContent (prevents memory leak from large notes)
-      // Cleanup after 10 minutes (staleThreshold) - staleness check uses 5 min default
+      // Cleanup after 10 minutes (staleThreshold)
       if (state.lastSavedContentTimestamp) {
         const age = now - state.lastSavedContentTimestamp;
         if (age > staleThreshold) {
           delete state.lastSavedContent;
           delete state.lastSavedContentTimestamp;
-        }
-      }
-
-      // Clean up stale lastAliasUpdateStatus (prevents stale status affecting logic)
-      // Cleanup after 5 minutes - status is only relevant shortly after update
-      if (state.lastAliasUpdateTimestamp) {
-        const age = now - state.lastAliasUpdateTimestamp;
-        if (age > 5 * 60 * 1000) {
-          delete state.lastAliasUpdateSucceeded;
-          delete state.lastAliasUpdateTimestamp;
         }
       }
 
