@@ -32,6 +32,18 @@ export function setDisableRenamingProperty(
   enabled: boolean
 ): void {
   const { disableRenamingKey, disableRenamingValue } = settings.exclusions;
+
+  // Keys fold case like frontmatterHasDisableProperty, so a variant such as `No Rename` is removed rather than left beside a second key.
+  const foldedDisableRenamingKey = disableRenamingKey.toLowerCase();
+  for (const key of Object.keys(frontmatter)) {
+    if (
+      key !== disableRenamingKey &&
+      key.toLowerCase() === foldedDisableRenamingKey
+    ) {
+      delete frontmatter[key];
+    }
+  }
+
   if (enabled) {
     delete frontmatter[disableRenamingKey];
   } else {

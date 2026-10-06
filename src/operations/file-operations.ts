@@ -1,9 +1,11 @@
-import { TFile, MarkdownView, getFrontMatterInfo, parseYaml } from 'obsidian';
+import { TFile, MarkdownView } from 'obsidian';
 import { PluginSettings } from '../types';
 import {
   verboseLog,
   shouldProcessFile,
   hasDisablePropertyInFile,
+  frontmatterHasDisableProperty,
+  parseFrontmatterFromContent,
   reverseCharacterReplacements,
 } from '../utils';
 import { t } from '../i18n';
@@ -647,48 +649,34 @@ export class FileOperations {
    * same real-time content, so duplicating the rules would fork the matcher again.
    */
   private checkDisablePropertyInContent(content: string): boolean {
-    const frontmatterInfo = getFrontMatterInfo(content);
-    if (!frontmatterInfo.exists) return false;
-
-    let frontmatter: Record<string, unknown>;
-    try {
-      frontmatter = parseYaml(frontmatterInfo.frontmatter) as Record<
-        string,
-        unknown
-      >;
-    } catch (error) {
-      verboseLog(this.plugin, `Failed to parse YAML: ${error}`);
+    const contentFrontmatter = parseFrontmatterFromContent(content);
+    if (!contentFrontmatter.parsed) {
+      verboseLog(
+        this.plugin,
+        `Failed to parse YAML: ${String(contentFrontmatter.error)}`
+      );
       return false;
     }
 
+    const { frontmatter } = contentFrontmatter;
     if (!frontmatter || typeof frontmatter !== 'object') return false;
 
-    // Property matching folds case on both the key and the value
-    const disableKey =
-      this.settings.exclusions.disableRenamingKey.toLowerCase();
-    const disableValue =
-      this.settings.exclusions.disableRenamingValue.toLowerCase();
+    const { disableRenamingKey, disableRenamingValue } =
+      this.settings.exclusions;
+    const hasDisableProperty = frontmatterHasDisableProperty(
+      frontmatter as Record<string, unknown>,
+      disableRenamingKey,
+      disableRenamingValue
+    );
 
-    const matchesDisableValue = (value: unknown): boolean =>
-      String(value).toLowerCase() === disableValue;
-
-    for (const [key, value] of Object.entries(frontmatter)) {
-      if (key.toLowerCase() !== disableKey) continue;
-
-      const matched = Array.isArray(value)
-        ? value.some(matchesDisableValue)
-        : value !== null && value !== undefined && matchesDisableValue(value);
-
-      if (matched) {
-        verboseLog(
-          this.plugin,
-          `Found disable property: ${key}: ${String(value)}`
-        );
-        return true;
-      }
+    if (hasDisableProperty) {
+      verboseLog(
+        this.plugin,
+        `Found disable property: ${disableRenamingKey}: ${disableRenamingValue}`
+      );
     }
 
-    return false;
+    return hasDisableProperty;
   }
 
   /**

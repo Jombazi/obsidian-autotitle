@@ -11,6 +11,7 @@ import {
   findTitleSourceLine,
   processForbiddenChars,
   isOnlyFrontmatterChanged,
+  disablePropertyTurnedOff,
 } from '../utils';
 import { t } from '../i18n';
 import { RateLimiter } from './rate-limiter';
@@ -147,53 +148,76 @@ export class RenameEngine {
       // Always use editor content for change detection (avoid cache staleness)
       const currentContent = editor.getValue();
 
+      // A frontmatter-only edit that turns the rename-blocking property off is deliberate, so it renames now; half-typed values never qualify, keeping the YAML safeguard for typing.
+      let disablePropertyWasTurnedOff = false;
+
       // Detect if only frontmatter changed (skip processing to preserve YAML formatting)
       const previousContent = this.plugin.fileStateManager.getLastEditorContent(
         file.path
       );
       if (previousContent) {
         if (isOnlyFrontmatterChanged(currentContent, previousContent)) {
-          if (this.plugin.settings.core.debug) {
-            console.debug(`Skipping - only frontmatter edited: ${file.path}`);
-          }
-          this.plugin.fileStateManager.setLastEditorContent(
-            file.path,
-            currentContent
+          disablePropertyWasTurnedOff = disablePropertyTurnedOff(
+            previousContent,
+            currentContent,
+            this.plugin.settings.exclusions.disableRenamingKey,
+            this.plugin.settings.exclusions.disableRenamingValue
           );
-          return;
+          if (!disablePropertyWasTurnedOff) {
+            if (this.plugin.settings.core.debug) {
+              console.debug(`Skipping - only frontmatter edited: ${file.path}`);
+            }
+            this.plugin.fileStateManager.setLastEditorContent(
+              file.path,
+              currentContent
+            );
+            return;
+          }
         }
       } else {
         // First editor event - compare editor vs disk to detect actual edits
         const diskContent = await this.plugin.app.vault.read(file);
 
         if (isOnlyFrontmatterChanged(currentContent, diskContent)) {
-          // No body edits (or YAML-only edit) - skip processing
-          if (this.plugin.settings.core.debug) {
-            console.debug(
-              `Skipping - no body edits detected on first open: ${file.path}`
+          disablePropertyWasTurnedOff = disablePropertyTurnedOff(
+            diskContent,
+            currentContent,
+            this.plugin.settings.exclusions.disableRenamingKey,
+            this.plugin.settings.exclusions.disableRenamingValue
+          );
+          if (!disablePropertyWasTurnedOff) {
+            // No body edits (or YAML-only edit) - skip processing
+            if (this.plugin.settings.core.debug) {
+              console.debug(
+                `Skipping - no body edits detected on first open: ${file.path}`
+              );
+            }
+            // Initialize tracking for next edit
+            const currentTitleRegion = this.extractTitleRegion(
+              editor,
+              file,
+              currentContent
             );
+            this.plugin.fileStateManager.setLastEditorContent(
+              file.path,
+              currentContent
+            );
+            this.plugin.fileStateManager.setTitleRegionCache(
+              file.path,
+              currentTitleRegion
+            );
+            return;
           }
-          // Initialize tracking for next edit
-          const currentTitleRegion = this.extractTitleRegion(
-            editor,
-            file,
-            currentContent
-          );
-          this.plugin.fileStateManager.setLastEditorContent(
-            file.path,
-            currentContent
-          );
-          this.plugin.fileStateManager.setTitleRegionCache(
-            file.path,
-            currentTitleRegion
-          );
-          return;
-        }
-
-        // Body content differs from disk - user edited body, proceed with processing
-        if (this.plugin.settings.core.debug) {
+        } else if (this.plugin.settings.core.debug) {
+          // Body content differs from disk - user edited body, proceed with processing
           console.debug(`Body edited, will process: ${file.path}`);
         }
+      }
+
+      if (disablePropertyWasTurnedOff && this.plugin.settings.core.debug) {
+        console.debug(
+          `Rename-blocking property turned off, will process: ${file.path}`
+        );
       }
 
       // Extract title region and check cache
@@ -205,7 +229,9 @@ export class RenameEngine {
       const cachedTitleRegion =
         this.plugin.fileStateManager.getTitleRegionCache(file.path);
 
+      // Switching the property off leaves the title as it was, so the unchanged-title skip would swallow the rename it now allows.
       if (
+        !disablePropertyWasTurnedOff &&
         cachedTitleRegion &&
         currentTitleRegion.firstNonEmptyLine ===
           cachedTitleRegion.firstNonEmptyLine &&

@@ -1,16 +1,24 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { getFrontMatterInfo, parseYaml } from 'obsidian';
 import {
   verboseLog,
   isValidHeading,
   detectOS,
   canModifyFile,
   hasDisablePropertyInFile,
+  frontmatterHasDisableProperty,
+  disablePropertyTurnedOff,
   isExcludedByFileName,
   extractTitle,
   normalizeExclusionLists,
   reverseCharacterReplacements,
 } from '../src/utils';
-import { createTestSettings, createMockFile, createMockApp } from './testUtils';
+import {
+  createTestSettings,
+  createMockFile,
+  createMockApp,
+  splitFrontMatter,
+} from './testUtils';
 import { PluginSettings, FileNameExclusion } from '../src/types';
 import { CharKey, CharReplacementConfig } from '../src/types/char-replacement';
 import { TFile, App, Platform } from './mockObsidian';
@@ -288,6 +296,269 @@ describe('utils', () => {
         'true'
       );
       expect(result).toBe(false);
+    });
+  });
+
+  describe('frontmatterHasDisableProperty', () => {
+    const DISABLE_KEY = 'no rename';
+
+    it('should match a boolean true', () => {
+      expect(
+        frontmatterHasDisableProperty(
+          { 'no rename': true },
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(true);
+    });
+
+    it('should match the string "True" ignoring case', () => {
+      expect(
+        frontmatterHasDisableProperty(
+          { 'no rename': 'True' },
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(true);
+    });
+
+    it('should match the string "TRUE" ignoring case', () => {
+      expect(
+        frontmatterHasDisableProperty(
+          { 'no rename': 'TRUE' },
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(true);
+    });
+
+    it('should match "01" against a configured "1" as the same number', () => {
+      expect(
+        frontmatterHasDisableProperty({ 'no rename': '01' }, DISABLE_KEY, '1')
+      ).toBe(true);
+    });
+
+    it('should match a list when any item matches', () => {
+      expect(
+        frontmatterHasDisableProperty(
+          { 'no rename': ['draft', true] },
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(true);
+    });
+
+    it('should not match a list without the configured value', () => {
+      expect(
+        frontmatterHasDisableProperty(
+          { 'no rename': ['draft'] },
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(false);
+    });
+
+    it('should match the key in another case', () => {
+      expect(
+        frontmatterHasDisableProperty(
+          { 'No Rename': true },
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(true);
+    });
+
+    it('should match when any case variant of the key matches', () => {
+      expect(
+        frontmatterHasDisableProperty(
+          { 'no rename': false, 'No Rename': true },
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(true);
+    });
+
+    it('should not match an empty property', () => {
+      expect(
+        frontmatterHasDisableProperty(
+          { 'no rename': null },
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(false);
+    });
+
+    it('should not match when the key is absent', () => {
+      expect(
+        frontmatterHasDisableProperty({ other: true }, DISABLE_KEY, 'true')
+      ).toBe(false);
+    });
+
+    it('should match "yes" against a configured "Yes" ignoring case', () => {
+      expect(
+        frontmatterHasDisableProperty(
+          { 'no rename': 'yes' },
+          DISABLE_KEY,
+          'Yes'
+        )
+      ).toBe(true);
+    });
+  });
+
+  describe('disablePropertyTurnedOff', () => {
+    const DISABLE_KEY = 'no rename';
+    // Raw YAML block -> parsed object. Blocks with no entry throw, modelling malformed YAML.
+    const yamlFixtures = new Map<string, unknown>([
+      ['no rename: true', { 'no rename': true }],
+      ['no rename: false', { 'no rename': false }],
+      ['no rename: tru', { 'no rename': 'tru' }],
+      ['no rename:', { 'no rename': null }],
+      ['no rename: "false"', { 'no rename': 'false' }],
+      ['no rename: yes', { 'no rename': 'yes' }],
+      ['tags: a\nno rename: true', { tags: 'a', 'no rename': true }],
+      ['tags: a\nno rename: false', { tags: 'a', 'no rename': false }],
+      ['tags: a\nNo Rename: true', { tags: 'a', 'No Rename': true }],
+      ['tags: a', { tags: 'a' }],
+    ]);
+    const noteWith = (yaml: string): string =>
+      `---\n${yaml}\n---\nNote title\n`;
+
+    beforeEach(() => {
+      vi.mocked(getFrontMatterInfo).mockImplementation(
+        splitFrontMatter as unknown as typeof getFrontMatterInfo
+      );
+      vi.mocked(parseYaml).mockImplementation(((yaml: string) => {
+        if (!yamlFixtures.has(yaml)) {
+          throw new Error(`malformed YAML: ${yaml}`);
+        }
+        return yamlFixtures.get(yaml);
+      }) as typeof parseYaml);
+    });
+
+    afterEach(() => {
+      vi.mocked(getFrontMatterInfo).mockReset();
+      vi.mocked(parseYaml).mockReset();
+    });
+
+    it('should be true when the value changes from true to false', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('no rename: true'),
+          noteWith('no rename: false'),
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(true);
+    });
+
+    it('should be true when the key is removed', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('tags: a\nno rename: true'),
+          noteWith('tags: a'),
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(true);
+    });
+
+    it('should be true when the whole frontmatter block is removed', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('no rename: true'),
+          'Note title\n',
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(true);
+    });
+
+    it('should be true when a key in another case is removed', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('tags: a\nNo Rename: true'),
+          noteWith('tags: a'),
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(true);
+    });
+
+    it('should be false when the value is left half-typed', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('no rename: true'),
+          noteWith('no rename: tru'),
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(false);
+    });
+
+    it('should be false when the value is emptied', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('no rename: true'),
+          noteWith('no rename:'),
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(false);
+    });
+
+    it('should be false when the value becomes the quoted string "false"', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('no rename: true'),
+          noteWith('no rename: "false"'),
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(false);
+    });
+
+    it('should be false when the previous value did not block renaming', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('tags: a\nno rename: false'),
+          noteWith('tags: a'),
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(false);
+    });
+
+    it('should be false when the property still blocks renaming', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('no rename: true'),
+          noteWith('no rename: true'),
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(false);
+    });
+
+    it('should be false when the current YAML does not parse', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('no rename: true'),
+          noteWith('no rename: [true'),
+          DISABLE_KEY,
+          'true'
+        )
+      ).toBe(false);
+    });
+
+    it('should be true when a configured "yes" changes to false', () => {
+      expect(
+        disablePropertyTurnedOff(
+          noteWith('no rename: yes'),
+          noteWith('no rename: false'),
+          DISABLE_KEY,
+          'yes'
+        )
+      ).toBe(true);
     });
   });
 

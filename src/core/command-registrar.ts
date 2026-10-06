@@ -1,5 +1,9 @@
 import { Notice } from 'obsidian';
-import { verboseLog, reverseCharacterReplacements } from '../utils';
+import {
+  verboseLog,
+  reverseCharacterReplacements,
+  hasDisablePropertyInFile,
+} from '../utils';
 import { RenameAllFilesModal } from '../modals';
 import FirstLineIsTitle from '../../main';
 import { t } from '../i18n';
@@ -276,7 +280,7 @@ export class CommandRegistrar {
 
   /**
    * Register command: Disable renaming for current note
-   * Uses checkCallback to only show when disable property doesn't exist
+   * Uses checkCallback to only show when the note does not carry the disable property's value
    */
   private registerDisableRenamingCommand(): void {
     this.plugin.addCommand({
@@ -289,15 +293,16 @@ export class CommandRegistrar {
           return false;
         }
 
-        // Check if property exists (synchronously using cache)
-        const fileCache = this.app.metadataCache.getFileCache(activeFile);
-        const hasProperty =
-          fileCache?.frontmatter?.[
-            this.settings.exclusions.disableRenamingKey
-          ] !== undefined;
+        // Check the disable property (synchronously using cache)
+        const hasProperty = hasDisablePropertyInFile(
+          activeFile,
+          this.app,
+          this.settings.exclusions.disableRenamingKey,
+          this.settings.exclusions.disableRenamingValue
+        );
 
         if (checking) {
-          // Only show command if property doesn't exist
+          // Only show command if renaming is not already disabled
           return !hasProperty;
         }
 
@@ -312,7 +317,7 @@ export class CommandRegistrar {
 
   /**
    * Register command: Enable renaming for current note
-   * Uses checkCallback to only show when disable property exists
+   * Uses checkCallback to only show when the note carries the disable property's value
    */
   private registerEnableRenamingCommand(): void {
     this.plugin.addCommand({
@@ -325,15 +330,16 @@ export class CommandRegistrar {
           return false;
         }
 
-        // Check if property exists (synchronously using cache)
-        const fileCache = this.app.metadataCache.getFileCache(activeFile);
-        const hasProperty =
-          fileCache?.frontmatter?.[
-            this.settings.exclusions.disableRenamingKey
-          ] !== undefined;
+        // Check the disable property (synchronously using cache)
+        const hasProperty = hasDisablePropertyInFile(
+          activeFile,
+          this.app,
+          this.settings.exclusions.disableRenamingKey,
+          this.settings.exclusions.disableRenamingValue
+        );
 
         if (checking) {
-          // Only show command if property exists
+          // Only show command if renaming is disabled
           return hasProperty;
         }
 

@@ -8,11 +8,16 @@ vi.mock('../../src/i18n', () => ({
   t: vi.fn((key: string) => key),
 }));
 
-// Mock the utils module
-vi.mock('../../src/utils', () => ({
-  verboseLog: vi.fn(),
-  reverseCharacterReplacements: vi.fn((str: string) => str),
-}));
+// Mock the utils module; the disable-property matcher stays real so the palette cases run the canonical rule against their mocked metadata cache.
+vi.mock('../../src/utils', async () => {
+  const actual =
+    await vi.importActual<typeof import('../../src/utils')>('../../src/utils');
+  return {
+    verboseLog: vi.fn(),
+    reverseCharacterReplacements: vi.fn((str: string) => str),
+    hasDisablePropertyInFile: actual.hasDisablePropertyInFile,
+  };
+});
 
 // Mock the modals module.
 // In vitest v4, mockImplementation for a class mock must use a regular function
@@ -139,7 +144,8 @@ describe('CommandRegistrar', () => {
       registrar.registerCommands();
 
       const command = mockPlugin.addCommand.mock.calls.find(
-        (call: any[]) => call[0].id === 'add-safe-internal-link-with-display-text'
+        (call: any[]) =>
+          call[0].id === 'add-safe-internal-link-with-display-text'
       );
       expect(command).toBeDefined();
       expect(command[0].icon).toBe('link');
@@ -185,7 +191,8 @@ describe('CommandRegistrar', () => {
       registrar.registerCommands();
 
       const command = mockPlugin.addCommand.mock.calls.find(
-        (call: any[]) => call[0].id === 'add-safe-internal-link-with-display-text'
+        (call: any[]) =>
+          call[0].id === 'add-safe-internal-link-with-display-text'
       );
 
       command[0].editorCallback({}, {});
@@ -358,7 +365,7 @@ describe('CommandRegistrar', () => {
   });
 
   describe('checkCallback commands', () => {
-    it('disable-renaming command should show when property does not exist', async () => {
+    it('disable-renaming command should show when renaming is not disabled', async () => {
       const { CommandRegistrar } =
         await import('../../src/core/command-registrar');
       const registrar = new CommandRegistrar(mockPlugin);
@@ -379,7 +386,7 @@ describe('CommandRegistrar', () => {
       expect(checkResult).toBe(true);
     });
 
-    it('disable-renaming command should not show when property exists', async () => {
+    it('disable-renaming command should not show when renaming is disabled', async () => {
       const { CommandRegistrar } =
         await import('../../src/core/command-registrar');
       const registrar = new CommandRegistrar(mockPlugin);
@@ -402,7 +409,7 @@ describe('CommandRegistrar', () => {
       expect(checkResult).toBe(false);
     });
 
-    it('enable-renaming command should show when property exists', async () => {
+    it('enable-renaming command should show when renaming is disabled', async () => {
       const { CommandRegistrar } =
         await import('../../src/core/command-registrar');
       const registrar = new CommandRegistrar(mockPlugin);
@@ -425,7 +432,7 @@ describe('CommandRegistrar', () => {
       expect(checkResult).toBe(true);
     });
 
-    it('enable-renaming command should not show when property does not exist', async () => {
+    it('enable-renaming command should not show when renaming is not disabled', async () => {
       const { CommandRegistrar } =
         await import('../../src/core/command-registrar');
       const registrar = new CommandRegistrar(mockPlugin);
@@ -444,6 +451,58 @@ describe('CommandRegistrar', () => {
 
       const checkResult = command[0].checkCallback(true);
       expect(checkResult).toBe(false);
+    });
+
+    it('disable-renaming command should show and enable-renaming should not when the property is false', async () => {
+      const { CommandRegistrar } =
+        await import('../../src/core/command-registrar');
+      const registrar = new CommandRegistrar(mockPlugin);
+
+      const mockFile = new TFile('test.md');
+      mockApp.workspace.getActiveFile = vi.fn().mockReturnValue(mockFile);
+      mockApp.metadataCache.getFileCache = vi.fn().mockReturnValue({
+        frontmatter: {
+          [DEFAULT_SETTINGS.exclusions.disableRenamingKey]: false,
+        },
+      });
+
+      registrar.registerCommands();
+
+      const disableCommand = mockPlugin.addCommand.mock.calls.find(
+        (call: any[]) => call[0].id === 'disable-renaming-for-note'
+      );
+      const enableCommand = mockPlugin.addCommand.mock.calls.find(
+        (call: any[]) => call[0].id === 'enable-renaming-for-note'
+      );
+
+      expect(disableCommand[0].checkCallback(true)).toBe(true);
+      expect(enableCommand[0].checkCallback(true)).toBe(false);
+    });
+
+    it('enable-renaming command should show and disable-renaming should not when the key differs in case', async () => {
+      const { CommandRegistrar } =
+        await import('../../src/core/command-registrar');
+      const registrar = new CommandRegistrar(mockPlugin);
+
+      const mockFile = new TFile('test.md');
+      mockApp.workspace.getActiveFile = vi.fn().mockReturnValue(mockFile);
+      mockApp.metadataCache.getFileCache = vi.fn().mockReturnValue({
+        frontmatter: {
+          'No Rename': true,
+        },
+      });
+
+      registrar.registerCommands();
+
+      const disableCommand = mockPlugin.addCommand.mock.calls.find(
+        (call: any[]) => call[0].id === 'disable-renaming-for-note'
+      );
+      const enableCommand = mockPlugin.addCommand.mock.calls.find(
+        (call: any[]) => call[0].id === 'enable-renaming-for-note'
+      );
+
+      expect(enableCommand[0].checkCallback(true)).toBe(true);
+      expect(disableCommand[0].checkCallback(true)).toBe(false);
     });
 
     it('disable-renaming command should call plugin method when executed', async () => {

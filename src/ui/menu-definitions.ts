@@ -3,6 +3,7 @@ import { MenuConfig } from './menu-config';
 import FirstLineIsTitlePlugin from '../../main';
 import { ProcessTagModal, RenameFolderModal } from '../modals';
 import { t } from '../i18n';
+import { hasDisablePropertyInFile } from '../utils';
 import { setDisableRenamingProperty } from '../utils/property-value';
 
 /**
@@ -23,11 +24,6 @@ interface FolderContext {
 
 interface FileContext {
   file: TFile;
-}
-
-/** Case-folds an untyped property value for comparison. Takes `unknown` because inline `String()` on a narrowed value trips no-base-to-string, and a cast trips no-unnecessary-type-assertion. */
-function foldPropertyValue(value: unknown): string {
-  return String(value).toLowerCase();
 }
 
 export class MenuDefinitions {
@@ -213,21 +209,12 @@ export class MenuDefinitions {
             if (!this.plugin.settings.core.enableFileCommands) return false;
 
             const fileContext = context as FileContext;
-            const fileCache = this.plugin.app.metadataCache.getFileCache(
-              fileContext.file
-            );
-            if (!fileCache || !fileCache.frontmatter) return true;
-
-            const value = (fileCache.frontmatter as Record<string, unknown>)[
-              this.plugin.settings.exclusions.disableRenamingKey
-            ];
-            if (value === undefined) return true;
-
-            const valueStr = foldPropertyValue(value);
-            const expectedValue = foldPropertyValue(
+            return !hasDisablePropertyInFile(
+              fileContext.file,
+              this.plugin.app,
+              this.plugin.settings.exclusions.disableRenamingKey,
               this.plugin.settings.exclusions.disableRenamingValue
             );
-            return valueStr !== expectedValue; // Show disable if property doesn't match
           },
           onClick: async (context) => {
             const fileContext = context as FileContext;
@@ -263,21 +250,12 @@ export class MenuDefinitions {
             if (!this.plugin.settings.core.enableFileCommands) return false;
 
             const fileContext = context as FileContext;
-            const fileCache = this.plugin.app.metadataCache.getFileCache(
-              fileContext.file
-            );
-            if (!fileCache || !fileCache.frontmatter) return false;
-
-            const value = (fileCache.frontmatter as Record<string, unknown>)[
-              this.plugin.settings.exclusions.disableRenamingKey
-            ];
-            if (value === undefined) return false;
-
-            const valueStr = foldPropertyValue(value);
-            const expectedValue = foldPropertyValue(
+            return hasDisablePropertyInFile(
+              fileContext.file,
+              this.plugin.app,
+              this.plugin.settings.exclusions.disableRenamingKey,
               this.plugin.settings.exclusions.disableRenamingValue
             );
-            return valueStr === expectedValue; // Show enable if property matches
           },
           onClick: async (context) => {
             const fileContext = context as FileContext;

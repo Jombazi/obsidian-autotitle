@@ -93,6 +93,24 @@ export const mockFileContent = {
 };
 
 /**
+ * Minimal stand-in for Obsidian's frontmatter splitter so fixtures can be written
+ * as raw note content instead of pre-split offsets.
+ */
+export function splitFrontMatter(content: string) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content);
+  if (!match) {
+    return { exists: false, frontmatter: '', from: 0, to: 0, contentStart: 0 };
+  }
+  return {
+    exists: true,
+    frontmatter: match[1],
+    from: 4,
+    to: 4 + match[1].length,
+    contentStart: match[0].length,
+  };
+}
+
+/**
  * Wait for a promise to resolve (useful for async tests)
  */
 export function waitFor(ms: number): Promise<void> {

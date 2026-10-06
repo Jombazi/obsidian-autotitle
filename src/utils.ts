@@ -4,6 +4,7 @@ import {
   Platform,
   ViewWithFileEditor,
   getFrontMatterInfo,
+  parseYaml,
 } from 'obsidian';
 import { PluginSettings, OSPreset } from './types';
 import { CHAR_TO_SETTING_KEY } from './types/char-replacement';
@@ -190,55 +191,106 @@ export function hasDisablePropertyInFile(
 
     if (!frontmatter) return false;
 
-    // Property matching folds case, so resolve the configured key against the frontmatter's own casing
-    const matchedKey = Object.keys(frontmatter).find(
-      (key) => key.toLowerCase() === disableKey.toLowerCase()
-    );
-    if (matchedKey === undefined) return false;
-
-    // Get the property value
-    const propertyValue = (frontmatter as Record<string, unknown>)[matchedKey];
-
-    if (propertyValue === undefined || propertyValue === null) return false;
-
-    // Normalize BOTH values for comparison
-    const normalizedPropertyValue = normalizePropertyValue(propertyValue);
-    const normalizedDisableValue = normalizePropertyValue(disableValue);
-
-    // Handle array/list values
-    if (Array.isArray(normalizedPropertyValue)) {
-      // Check if any item in the array matches (case-insensitive for strings)
-      return normalizedPropertyValue.some((item) => {
-        const normalizedItem = normalizePropertyValue(item);
-        if (
-          typeof normalizedItem === 'string' &&
-          typeof normalizedDisableValue === 'string'
-        ) {
-          return (
-            normalizedItem.toLowerCase() ===
-            normalizedDisableValue.toLowerCase()
-          );
-        }
-        return normalizedItem === normalizedDisableValue;
-      });
-    }
-
-    // Handle single values (case-insensitive comparison for strings)
-    if (
-      typeof normalizedPropertyValue === 'string' &&
-      typeof normalizedDisableValue === 'string'
-    ) {
-      return (
-        normalizedPropertyValue.toLowerCase() ===
-        normalizedDisableValue.toLowerCase()
-      );
-    }
-
-    // Direct comparison for non-string types
-    return normalizedPropertyValue === normalizedDisableValue;
+    return frontmatterHasDisableProperty(frontmatter, disableKey, disableValue);
   } catch {
     return false;
   }
+}
+
+/** Folds a property value for the disable-property comparison: number-like strings normalize first, so `"01"` meets `1`, then case folds, so `"True"` meets `true`. */
+function foldDisablePropertyValue(value: unknown): string {
+  return String(normalizePropertyValue(value)).toLowerCase();
+}
+
+/** The one disable-property matcher behind the rename engine, the file menu and the command palette, so the three cannot disagree about a note. */
+export function frontmatterHasDisableProperty(
+  frontmatter: Record<string, unknown>,
+  disableKey: string,
+  disableValue: string
+): boolean {
+  const foldedDisableKey = disableKey.toLowerCase();
+  const foldedDisableValue = foldDisablePropertyValue(disableValue);
+
+  // An empty property never matches, not even a configured value of `null`.
+  const matchesDisableValue = (value: unknown): boolean =>
+    value !== null &&
+    value !== undefined &&
+    foldDisablePropertyValue(value) === foldedDisableValue;
+
+  // Every case variant of the key counts, so the verdict never depends on which variant comes first in the properties.
+  return Object.entries(frontmatter).some(
+    ([key, value]) =>
+      key.toLowerCase() === foldedDisableKey &&
+      (Array.isArray(value)
+        ? value.some(matchesDisableValue)
+        : matchesDisableValue(value))
+  );
+}
+
+/** Frontmatter parsed straight from note content: `frontmatter` is null when the note has no frontmatter block, and `parsed` is false when its YAML does not parse. */
+export type ContentFrontmatter =
+  { parsed: true; frontmatter: unknown } | { parsed: false; error: unknown };
+
+/** Parses the frontmatter of raw note content, for checks that cannot wait for the metadata cache to catch up with the editor. */
+export function parseFrontmatterFromContent(
+  content: string
+): ContentFrontmatter {
+  const frontmatterInfo = getFrontMatterInfo(content);
+  if (!frontmatterInfo.exists) return { parsed: true, frontmatter: null };
+
+  try {
+    return {
+      parsed: true,
+      frontmatter: parseYaml(frontmatterInfo.frontmatter) as unknown,
+    };
+  } catch (error) {
+    return { parsed: false, error };
+  }
+}
+
+function isPropertyMap(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** True when an edit switched the rename-blocking property off: the previous content blocked renaming, and the current content parses with every case variant of the key removed or set to exactly `false`. */
+export function disablePropertyTurnedOff(
+  previousContent: string,
+  currentContent: string,
+  disableKey: string,
+  disableValue: string
+): boolean {
+  const previous = parseFrontmatterFromContent(previousContent);
+  if (
+    !previous.parsed ||
+    !isPropertyMap(previous.frontmatter) ||
+    !frontmatterHasDisableProperty(
+      previous.frontmatter,
+      disableKey,
+      disableValue
+    )
+  ) {
+    return false;
+  }
+
+  const current = parseFrontmatterFromContent(currentContent);
+  if (!current.parsed) return false;
+  // No block at all, or an emptied one, leaves no key to block renaming.
+  if (current.frontmatter === null || current.frontmatter === undefined) {
+    return true;
+  }
+  // A block that parses to a bare scalar or list is a property line caught mid-typing, not a removal.
+  if (!isPropertyMap(current.frontmatter)) return false;
+  // A configured value of `false` still blocks, so setting `false` never switches it off.
+  if (
+    frontmatterHasDisableProperty(current.frontmatter, disableKey, disableValue)
+  ) {
+    return false;
+  }
+
+  const foldedDisableKey = disableKey.toLowerCase();
+  return Object.entries(current.frontmatter).every(
+    ([key, value]) => key.toLowerCase() !== foldedDisableKey || value === false
+  );
 }
 
 // Obsidian 1.14's highlight color markers in circle and square form, as its own lookup table accepts both; self-grouped so the alternation stays inside the surrounding `==…==` pattern.
