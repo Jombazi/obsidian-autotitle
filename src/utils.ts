@@ -241,6 +241,16 @@ export function hasDisablePropertyInFile(
   }
 }
 
+// Obsidian 1.14's highlight color markers in circle and square form, as its own lookup table accepts both; self-grouped so an interpolated `^` anchors every alternative, not just the first.
+const HIGHLIGHT_COLOR_MARKERS =
+  '(?:\u{1F534}|\u{1F7E5}|\u{1F7E0}|\u{1F7E7}|\u{1F7E1}|\u{1F7E8}|\u{1F7E2}|\u{1F7E9}|\u{1F535}|\u{1F7E6}|\u{1F7E3}|\u{1F7EA})';
+
+// `u` matches whole code points: the markers share a high surrogate with unrelated emoji such as U+1F7E4, which a code-unit character class would split in half.
+const LEADING_HIGHLIGHT_COLOR_MARKER = new RegExp(
+  `^${HIGHLIGHT_COLOR_MARKERS}`,
+  'u'
+);
+
 export function extractTitle(
   line: string,
   settings: PluginSettings,
@@ -404,7 +414,10 @@ export function extractTitle(
       line = line.replace(
         /==(.*?)==/g,
         (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
+          // Obsidian consumes a leading color marker without rendering it, so it must not reach the title; a space after it is highlighted text and stays.
+          return checkEscaped(match, offset)
+            ? match
+            : content.replace(LEADING_HIGHLIGHT_COLOR_MARKER, '');
         }
       );
     }

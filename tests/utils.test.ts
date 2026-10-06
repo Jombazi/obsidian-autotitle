@@ -752,6 +752,75 @@ describe('utils', () => {
         );
       });
     });
+
+    describe('highlight markup stripping', () => {
+      // Obsidian 1.14's color markers: a circle and a square form for each of six colors.
+      const colorMarkers: Array<{ name: string; marker: string }> = [
+        { name: 'red circle', marker: '\u{1F534}' },
+        { name: 'red square', marker: '\u{1F7E5}' },
+        { name: 'orange circle', marker: '\u{1F7E0}' },
+        { name: 'orange square', marker: '\u{1F7E7}' },
+        { name: 'yellow circle', marker: '\u{1F7E1}' },
+        { name: 'yellow square', marker: '\u{1F7E8}' },
+        { name: 'green circle', marker: '\u{1F7E2}' },
+        { name: 'green square', marker: '\u{1F7E9}' },
+        { name: 'blue circle', marker: '\u{1F535}' },
+        { name: 'blue square', marker: '\u{1F7E6}' },
+        { name: 'purple circle', marker: '\u{1F7E3}' },
+        { name: 'purple square', marker: '\u{1F7EA}' },
+      ];
+
+      it('should strip highlight markup and keep the content', () => {
+        expect(extractTitle('==My Title==', settings)).toBe('My Title');
+      });
+
+      it.each(colorMarkers)(
+        'should strip the $name color marker',
+        ({ marker }) => {
+          expect(extractTitle(`==${marker}Title==`, settings)).toBe('Title');
+        }
+      );
+
+      it('should keep a color marker that is not the first character', () => {
+        expect(extractTitle('==a🔴b==', settings)).toBe('a🔴b');
+      });
+
+      it('should keep a leading emoji that is not a color marker', () => {
+        expect(extractTitle('==⭐x==', settings)).toBe('⭐x');
+      });
+
+      it('should keep a brown circle whole even though it shares a high surrogate with the markers', () => {
+        expect(extractTitle('==\u{1F7E4}x==', settings)).toBe('\u{1F7E4}x');
+      });
+
+      it('should strip a color marker followed by a space', () => {
+        expect(extractTitle('==🔴 x==', settings)).toBe('x');
+      });
+
+      it('should drop a marker-only highlight inside a longer line', () => {
+        expect(extractTitle('Before ==🔴== After', settings)).toBe(
+          'Before  After'
+        );
+      });
+
+      it('should return Untitled when the line is only a marker-only highlight', () => {
+        expect(extractTitle('==🔴==', settings)).toBe('Untitled');
+      });
+
+      it('should leave a color-marked highlight untouched when highlight stripping is disabled', () => {
+        settings.markupStripping.stripMarkupSettings.highlight = false;
+
+        expect(extractTitle('==🔴Title==', settings)).toBe('==🔴Title==');
+      });
+
+      it('should leave an escaped highlight untouched', () => {
+        expect(extractTitle('\\==🔴Title==', settings)).toBe('==🔴Title==');
+      });
+
+      it('should keep the color marker when an escape inside the highlight blocks stripping', () => {
+        expect(extractTitle('==🔴Ti\\*tle==', settings)).toBe('==🔴Ti*tle==');
+      });
+    });
   });
 
   describe('normalizeExclusionLists', () => {
