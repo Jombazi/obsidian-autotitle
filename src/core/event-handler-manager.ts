@@ -1,12 +1,20 @@
 import { Menu, TFile, TFolder, MarkdownView, EventRef } from 'obsidian';
 import FirstLineIsTitlePlugin from '../../main';
-import { verboseLog, isOnlyFrontmatterChanged } from '../utils';
+import {
+  verboseLog,
+  isOnlyFrontmatterChanged,
+  hasDisablePropertyInFile,
+  frontmatterHasDisableProperty,
+  disablePropertyIsOff,
+} from '../utils';
 import { tp } from '../i18n';
 import { RenameModal, DisableEnableModal } from '../modals';
 import { around } from 'monkey-around';
 import { detectTagFromDOM, detectTagFromEditor } from '../utils/tag-detection';
+import { TIMING } from '../constants/timing';
 
-/**
+// In `Cache` and `File` read modes the `modify` handler's own `processFile` can still hold the lock when `changed` arrives.
+const LOCKED_FILE_RETRY_LIMIT = 10;
 
 /**
  * Extended Workspace interface with undocumented search results event
@@ -26,6 +34,8 @@ export class EventHandlerManager {
   private plugin: FirstLineIsTitlePlugin;
   /** Tracks files with alias updates in progress to prevent concurrent updates */
   private pendingAliasUpdates: Set<string> = new Set();
+  /** Notes last seen blocking renaming, keyed by `TFile` because the object survives renames */
+  private notesBlockingRename = new WeakSet<TFile>();
 
   constructor(plugin: FirstLineIsTitlePlugin) {
     this.plugin = plugin;
@@ -67,6 +77,8 @@ export class EventHandlerManager {
     this.registerTagSearchMenuHandler();
     this.registerSearchResultsMenuHandler();
     this.registerEditorChangeHandler();
+    // `processFile` takes the file lock before its first `await`, so the alias `changed` handler registered after it sees the lock and leaves the alias to the rename path.
+    this.registerDisablePropertyTransitionHandler();
     this.registerFileSystemHandlers();
   }
 
@@ -340,6 +352,8 @@ export class EventHandlerManager {
           return;
         }
 
+        this.rememberIfBlockingRename(info.file);
+
         // Early exit if still within creation delay window
         if (info.file && editor) {
           if (
@@ -368,6 +382,105 @@ export class EventHandlerManager {
         );
       })
     );
+  }
+
+  /**
+   * Renames a note as soon as its rename-blocking property is unchecked or removed.
+   */
+  private registerDisablePropertyTransitionHandler(): void {
+    this.plugin.registerEvent(
+      this.plugin.app.workspace.on('file-open', (file) => {
+        if (file?.extension === 'md') this.rememberIfBlockingRename(file);
+      })
+    );
+
+    // Runs at once on a plugin reload, which fires no `file-open`; deferred leaves are seeded by `file-open` when activated.
+    this.plugin.app.workspace.onLayoutReady(() => {
+      for (const leaf of this.plugin.app.workspace.getLeavesOfType(
+        'markdown'
+      )) {
+        if (leaf.view instanceof MarkdownView && leaf.view.file) {
+          this.rememberIfBlockingRename(leaf.view.file);
+        }
+      }
+    });
+
+    this.plugin.registerEvent(
+      // The metadata `changed` event is the first point where cache, disk and editor agree, while the editor-change path still sees the old cached value.
+      this.plugin.app.metadataCache.on('changed', (file, _data, cache) =>
+        this.handleDisablePropertyChange(
+          file,
+          cache.frontmatter,
+          LOCKED_FILE_RETRY_LIMIT
+        )
+      )
+    );
+  }
+
+  private rememberIfBlockingRename(file: TFile): void {
+    if (
+      hasDisablePropertyInFile(
+        file,
+        this.plugin.app,
+        this.plugin.settings.exclusions.disableRenamingKey,
+        this.plugin.settings.exclusions.disableRenamingValue
+      )
+    ) {
+      this.notesBlockingRename.add(file);
+    }
+  }
+
+  private handleDisablePropertyChange(
+    file: TFile,
+    frontmatter: Record<string, unknown> | undefined,
+    retriesLeft: number
+  ): void {
+    if (file.extension !== 'md') return;
+
+    const { disableRenamingKey, disableRenamingValue } =
+      this.plugin.settings.exclusions;
+    if (
+      frontmatterHasDisableProperty(
+        frontmatter ?? {},
+        disableRenamingKey,
+        disableRenamingValue
+      )
+    ) {
+      this.notesBlockingRename.add(file);
+      return;
+    }
+
+    if (!this.notesBlockingRename.has(file)) return;
+    // A half-typed value keeps the note remembered until it settles.
+    if (!disablePropertyIsOff(frontmatter, disableRenamingKey)) return;
+    // The note stays remembered; the delayed new-note processing renames it.
+    if (this.plugin.editorLifecycle.isFileInCreationDelay(file.path)) return;
+
+    if (this.plugin.cacheManager?.isLocked(file.path)) {
+      if (retriesLeft > 0) {
+        window.setTimeout(
+          () =>
+            this.handleDisablePropertyChange(
+              file,
+              this.plugin.app.metadataCache.getFileCache(file)?.frontmatter,
+              retriesLeft - 1
+            ),
+          TIMING.UI_SETTLE_DELAY_MS
+        );
+      }
+      return;
+    }
+
+    if (
+      !this.plugin.settings.core.renameAutomatically ||
+      !this.plugin.isFullyLoaded
+    ) {
+      return;
+    }
+
+    this.notesBlockingRename.delete(file);
+    // No `await` before this call, so `processFile` takes the lock synchronously; `canModifyFile` then requires the note open in any Markdown leaf, Reading view included.
+    void this.plugin.renameEngine.processFile(file, true);
   }
 
   /**

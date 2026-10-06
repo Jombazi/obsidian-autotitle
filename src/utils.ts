@@ -4,7 +4,6 @@ import {
   Platform,
   ViewWithFileEditor,
   getFrontMatterInfo,
-  parseYaml,
 } from 'obsidian';
 import { PluginSettings, OSPreset } from './types';
 import { CHAR_TO_SETTING_KEY } from './types/char-replacement';
@@ -227,68 +226,14 @@ export function frontmatterHasDisableProperty(
   );
 }
 
-/** Frontmatter parsed straight from note content: `frontmatter` is null when the note has no frontmatter block, and `parsed` is false when its YAML does not parse. */
-export type ContentFrontmatter =
-  { parsed: true; frontmatter: unknown } | { parsed: false; error: unknown };
-
-/** Parses the frontmatter of raw note content, for checks that cannot wait for the metadata cache to catch up with the editor. */
-export function parseFrontmatterFromContent(
-  content: string
-): ContentFrontmatter {
-  const frontmatterInfo = getFrontMatterInfo(content);
-  if (!frontmatterInfo.exists) return { parsed: true, frontmatter: null };
-
-  try {
-    return {
-      parsed: true,
-      frontmatter: parseYaml(frontmatterInfo.frontmatter) as unknown,
-    };
-  } catch (error) {
-    return { parsed: false, error };
-  }
-}
-
-function isPropertyMap(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** True when an edit switched the rename-blocking property off: the previous content blocked renaming, and the current content parses with every case variant of the key removed or set to exactly `false`. */
-export function disablePropertyTurnedOff(
-  previousContent: string,
-  currentContent: string,
-  disableKey: string,
-  disableValue: string
+/** True when no case variant of the disable key is left or every one is exactly `false`, so a half-typed value such as `tru` never counts as switched off. */
+export function disablePropertyIsOff(
+  frontmatter: Record<string, unknown> | undefined,
+  disableKey: string
 ): boolean {
-  const previous = parseFrontmatterFromContent(previousContent);
-  if (
-    !previous.parsed ||
-    !isPropertyMap(previous.frontmatter) ||
-    !frontmatterHasDisableProperty(
-      previous.frontmatter,
-      disableKey,
-      disableValue
-    )
-  ) {
-    return false;
-  }
-
-  const current = parseFrontmatterFromContent(currentContent);
-  if (!current.parsed) return false;
-  // No block at all, or an emptied one, leaves no key to block renaming.
-  if (current.frontmatter === null || current.frontmatter === undefined) {
-    return true;
-  }
-  // A block that parses to a bare scalar or list is a property line caught mid-typing, not a removal.
-  if (!isPropertyMap(current.frontmatter)) return false;
-  // A configured value of `false` still blocks, so setting `false` never switches it off.
-  if (
-    frontmatterHasDisableProperty(current.frontmatter, disableKey, disableValue)
-  ) {
-    return false;
-  }
-
+  if (!frontmatter) return true;
   const foldedDisableKey = disableKey.toLowerCase();
-  return Object.entries(current.frontmatter).every(
+  return Object.entries(frontmatter).every(
     ([key, value]) => key.toLowerCase() !== foldedDisableKey || value === false
   );
 }

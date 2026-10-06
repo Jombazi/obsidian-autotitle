@@ -1,13 +1,5 @@
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  vi,
-  type MockInstance,
-} from 'vitest';
-import { getFrontMatterInfo, parseYaml } from 'obsidian';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { getFrontMatterInfo } from 'obsidian';
 import { RenameEngine } from '../../src/core/rename-engine';
 import { CacheManager } from '../../src/core/cache-manager';
 import {
@@ -381,6 +373,10 @@ describe('RenameEngine', () => {
       plugin.app.vault.read = vi.fn().mockResolvedValue('Test content');
     });
 
+    afterEach(() => {
+      vi.mocked(getFrontMatterInfo).mockReset();
+    });
+
     it('should return early when file is locked', async () => {
       plugin.cacheManager.isLocked = vi.fn().mockReturnValue(true);
       plugin.fileStateManager.isEditorSyncing = vi.fn().mockReturnValue(false);
@@ -434,6 +430,10 @@ describe('RenameEngine', () => {
     });
 
     it('should skip processing when only frontmatter changed', async () => {
+      // The default mock reports no frontmatter, so both versions would differ in full and never reach the skip.
+      vi.mocked(getFrontMatterInfo).mockImplementation(
+        splitFrontMatter as unknown as typeof getFrontMatterInfo
+      );
       const previousContent = '---\ntitle: Old\n---\nBody';
       const currentContent = '---\ntitle: New\n---\nBody';
 
@@ -448,6 +448,9 @@ describe('RenameEngine', () => {
         file.path,
         currentContent
       );
+      expect(
+        plugin.fileStateManager.setTitleRegionCache
+      ).not.toHaveBeenCalled();
     });
 
     it('should process when body content changes', async () => {
@@ -489,96 +492,6 @@ describe('RenameEngine', () => {
 
       // Should initialize cache but not process
       expect(plugin.fileStateManager.setTitleRegionCache).toHaveBeenCalled();
-    });
-
-    describe('frontmatter-only edit to the rename-blocking property', () => {
-      // Raw YAML block -> parsed object. Blocks with no entry throw, modelling malformed YAML.
-      const yamlFixtures = new Map<string, unknown>([
-        ['no rename: true', { 'no rename': true }],
-        ['no rename: false', { 'no rename': false }],
-        ['no rename: tru', { 'no rename': 'tru' }],
-      ]);
-      let processFileImmediate: MockInstance<
-        RenameEngine['processFileImmediate']
-      >;
-
-      beforeEach(() => {
-        vi.mocked(getFrontMatterInfo).mockImplementation(
-          splitFrontMatter as unknown as typeof getFrontMatterInfo
-        );
-        vi.mocked(parseYaml).mockImplementation(((yaml: string) => {
-          if (!yamlFixtures.has(yaml)) {
-            throw new Error(`malformed YAML: ${yaml}`);
-          }
-          return yamlFixtures.get(yaml);
-        }) as typeof parseYaml);
-        processFileImmediate = vi
-          .spyOn(renameEngine, 'processFileImmediate')
-          .mockResolvedValue(undefined);
-      });
-
-      afterEach(() => {
-        vi.mocked(getFrontMatterInfo).mockReset();
-        vi.mocked(parseYaml).mockReset();
-      });
-
-      it('should process when the property turns false, even with the title unchanged', async () => {
-        const previousContent = '---\nno rename: true\n---\nBody';
-        const currentContent = '---\nno rename: false\n---\nBody';
-        plugin.fileStateManager.getLastEditorContent = vi
-          .fn()
-          .mockReturnValue(previousContent);
-        editor.getValue = vi.fn().mockReturnValue(currentContent);
-        plugin.fileStateManager.getTitleRegionCache = vi
-          .fn()
-          .mockReturnValue(
-            renameEngine.extractTitleRegion(editor, file, currentContent)
-          );
-
-        await renameEngine.processEditorChangeOptimal(editor, file);
-
-        expect(processFileImmediate).toHaveBeenCalledWith(
-          file,
-          currentContent,
-          expect.anything(),
-          editor
-        );
-      });
-
-      it('should process on first open when the editor drops the property the disk still has', async () => {
-        const diskContent = '---\nno rename: true\n---\nBody';
-        const currentContent = 'Body';
-        plugin.fileStateManager.getLastEditorContent = vi
-          .fn()
-          .mockReturnValue(undefined);
-        plugin.app.vault.read = vi.fn().mockResolvedValue(diskContent);
-        editor.getValue = vi.fn().mockReturnValue(currentContent);
-
-        await renameEngine.processEditorChangeOptimal(editor, file);
-
-        expect(processFileImmediate).toHaveBeenCalledWith(
-          file,
-          currentContent,
-          expect.anything(),
-          editor
-        );
-      });
-
-      it('should still skip when the value is left half-typed', async () => {
-        const previousContent = '---\nno rename: true\n---\nBody';
-        const currentContent = '---\nno rename: tru\n---\nBody';
-        plugin.fileStateManager.getLastEditorContent = vi
-          .fn()
-          .mockReturnValue(previousContent);
-        editor.getValue = vi.fn().mockReturnValue(currentContent);
-
-        await renameEngine.processEditorChangeOptimal(editor, file);
-
-        expect(processFileImmediate).not.toHaveBeenCalled();
-        expect(
-          plugin.fileStateManager.setLastEditorContent
-        ).toHaveBeenCalledWith(file.path, currentContent);
-      });
     });
 
     it('should track usage on every call', async () => {

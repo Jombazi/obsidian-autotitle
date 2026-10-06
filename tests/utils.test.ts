@@ -1,5 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { getFrontMatterInfo, parseYaml } from 'obsidian';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   verboseLog,
   isValidHeading,
@@ -7,18 +6,13 @@ import {
   canModifyFile,
   hasDisablePropertyInFile,
   frontmatterHasDisableProperty,
-  disablePropertyTurnedOff,
+  disablePropertyIsOff,
   isExcludedByFileName,
   extractTitle,
   normalizeExclusionLists,
   reverseCharacterReplacements,
 } from '../src/utils';
-import {
-  createTestSettings,
-  createMockFile,
-  createMockApp,
-  splitFrontMatter,
-} from './testUtils';
+import { createTestSettings, createMockFile, createMockApp } from './testUtils';
 import { PluginSettings, FileNameExclusion } from '../src/types';
 import { CharKey, CharReplacementConfig } from '../src/types/char-replacement';
 import { TFile, App, Platform } from './mockObsidian';
@@ -405,160 +399,54 @@ describe('utils', () => {
     });
   });
 
-  describe('disablePropertyTurnedOff', () => {
+  describe('disablePropertyIsOff', () => {
     const DISABLE_KEY = 'no rename';
-    // Raw YAML block -> parsed object. Blocks with no entry throw, modelling malformed YAML.
-    const yamlFixtures = new Map<string, unknown>([
-      ['no rename: true', { 'no rename': true }],
-      ['no rename: false', { 'no rename': false }],
-      ['no rename: tru', { 'no rename': 'tru' }],
-      ['no rename:', { 'no rename': null }],
-      ['no rename: "false"', { 'no rename': 'false' }],
-      ['no rename: yes', { 'no rename': 'yes' }],
-      ['tags: a\nno rename: true', { tags: 'a', 'no rename': true }],
-      ['tags: a\nno rename: false', { tags: 'a', 'no rename': false }],
-      ['tags: a\nNo Rename: true', { tags: 'a', 'No Rename': true }],
-      ['tags: a', { tags: 'a' }],
-    ]);
-    const noteWith = (yaml: string): string =>
-      `---\n${yaml}\n---\nNote title\n`;
 
-    beforeEach(() => {
-      vi.mocked(getFrontMatterInfo).mockImplementation(
-        splitFrontMatter as unknown as typeof getFrontMatterInfo
+    it('should be true when there is no frontmatter', () => {
+      expect(disablePropertyIsOff(undefined, DISABLE_KEY)).toBe(true);
+    });
+
+    it('should be true for empty frontmatter', () => {
+      expect(disablePropertyIsOff({}, DISABLE_KEY)).toBe(true);
+    });
+
+    it('should be true when the property is false', () => {
+      expect(disablePropertyIsOff({ 'no rename': false }, DISABLE_KEY)).toBe(
+        true
       );
-      vi.mocked(parseYaml).mockImplementation(((yaml: string) => {
-        if (!yamlFixtures.has(yaml)) {
-          throw new Error(`malformed YAML: ${yaml}`);
-        }
-        return yamlFixtures.get(yaml);
-      }) as typeof parseYaml);
     });
 
-    afterEach(() => {
-      vi.mocked(getFrontMatterInfo).mockReset();
-      vi.mocked(parseYaml).mockReset();
+    it('should be true when the property in another case is false', () => {
+      expect(disablePropertyIsOff({ 'No Rename': false }, DISABLE_KEY)).toBe(
+        true
+      );
     });
 
-    it('should be true when the value changes from true to false', () => {
+    it('should be false when the property is true', () => {
+      expect(disablePropertyIsOff({ 'no rename': true }, DISABLE_KEY)).toBe(
+        false
+      );
+    });
+
+    it('should be false when the value is half-typed', () => {
+      expect(disablePropertyIsOff({ 'no rename': 'tru' }, DISABLE_KEY)).toBe(
+        false
+      );
+    });
+
+    it('should be false when the property is empty', () => {
+      expect(disablePropertyIsOff({ 'no rename': null }, DISABLE_KEY)).toBe(
+        false
+      );
+    });
+
+    it('should be false when any case variant of the key is not false', () => {
       expect(
-        disablePropertyTurnedOff(
-          noteWith('no rename: true'),
-          noteWith('no rename: false'),
-          DISABLE_KEY,
-          'true'
-        )
-      ).toBe(true);
-    });
-
-    it('should be true when the key is removed', () => {
-      expect(
-        disablePropertyTurnedOff(
-          noteWith('tags: a\nno rename: true'),
-          noteWith('tags: a'),
-          DISABLE_KEY,
-          'true'
-        )
-      ).toBe(true);
-    });
-
-    it('should be true when the whole frontmatter block is removed', () => {
-      expect(
-        disablePropertyTurnedOff(
-          noteWith('no rename: true'),
-          'Note title\n',
-          DISABLE_KEY,
-          'true'
-        )
-      ).toBe(true);
-    });
-
-    it('should be true when a key in another case is removed', () => {
-      expect(
-        disablePropertyTurnedOff(
-          noteWith('tags: a\nNo Rename: true'),
-          noteWith('tags: a'),
-          DISABLE_KEY,
-          'true'
-        )
-      ).toBe(true);
-    });
-
-    it('should be false when the value is left half-typed', () => {
-      expect(
-        disablePropertyTurnedOff(
-          noteWith('no rename: true'),
-          noteWith('no rename: tru'),
-          DISABLE_KEY,
-          'true'
+        disablePropertyIsOff(
+          { 'no rename': false, 'No Rename': 'x' },
+          DISABLE_KEY
         )
       ).toBe(false);
-    });
-
-    it('should be false when the value is emptied', () => {
-      expect(
-        disablePropertyTurnedOff(
-          noteWith('no rename: true'),
-          noteWith('no rename:'),
-          DISABLE_KEY,
-          'true'
-        )
-      ).toBe(false);
-    });
-
-    it('should be false when the value becomes the quoted string "false"', () => {
-      expect(
-        disablePropertyTurnedOff(
-          noteWith('no rename: true'),
-          noteWith('no rename: "false"'),
-          DISABLE_KEY,
-          'true'
-        )
-      ).toBe(false);
-    });
-
-    it('should be false when the previous value did not block renaming', () => {
-      expect(
-        disablePropertyTurnedOff(
-          noteWith('tags: a\nno rename: false'),
-          noteWith('tags: a'),
-          DISABLE_KEY,
-          'true'
-        )
-      ).toBe(false);
-    });
-
-    it('should be false when the property still blocks renaming', () => {
-      expect(
-        disablePropertyTurnedOff(
-          noteWith('no rename: true'),
-          noteWith('no rename: true'),
-          DISABLE_KEY,
-          'true'
-        )
-      ).toBe(false);
-    });
-
-    it('should be false when the current YAML does not parse', () => {
-      expect(
-        disablePropertyTurnedOff(
-          noteWith('no rename: true'),
-          noteWith('no rename: [true'),
-          DISABLE_KEY,
-          'true'
-        )
-      ).toBe(false);
-    });
-
-    it('should be true when a configured "yes" changes to false', () => {
-      expect(
-        disablePropertyTurnedOff(
-          noteWith('no rename: yes'),
-          noteWith('no rename: false'),
-          DISABLE_KEY,
-          'yes'
-        )
-      ).toBe(true);
     });
   });
 

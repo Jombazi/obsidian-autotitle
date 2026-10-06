@@ -8,6 +8,7 @@ function createMockPlugin() {
     app: {
       workspace: {
         on: vi.fn(),
+        onLayoutReady: vi.fn(),
       },
       vault: {
         on: vi.fn(),

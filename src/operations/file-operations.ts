@@ -1,11 +1,10 @@
-import { TFile, MarkdownView } from 'obsidian';
+import { TFile, MarkdownView, getFrontMatterInfo, parseYaml } from 'obsidian';
 import { PluginSettings } from '../types';
 import {
   verboseLog,
   shouldProcessFile,
   hasDisablePropertyInFile,
   frontmatterHasDisableProperty,
-  parseFrontmatterFromContent,
   reverseCharacterReplacements,
 } from '../utils';
 import { t } from '../i18n';
@@ -649,22 +648,26 @@ export class FileOperations {
    * same real-time content, so duplicating the rules would fork the matcher again.
    */
   private checkDisablePropertyInContent(content: string): boolean {
-    const contentFrontmatter = parseFrontmatterFromContent(content);
-    if (!contentFrontmatter.parsed) {
-      verboseLog(
-        this.plugin,
-        `Failed to parse YAML: ${String(contentFrontmatter.error)}`
-      );
+    const frontmatterInfo = getFrontMatterInfo(content);
+    if (!frontmatterInfo.exists) return false;
+
+    let frontmatter: Record<string, unknown>;
+    try {
+      frontmatter = parseYaml(frontmatterInfo.frontmatter) as Record<
+        string,
+        unknown
+      >;
+    } catch (error) {
+      verboseLog(this.plugin, `Failed to parse YAML: ${String(error)}`);
       return false;
     }
 
-    const { frontmatter } = contentFrontmatter;
     if (!frontmatter || typeof frontmatter !== 'object') return false;
 
     const { disableRenamingKey, disableRenamingValue } =
       this.settings.exclusions;
     const hasDisableProperty = frontmatterHasDisableProperty(
-      frontmatter as Record<string, unknown>,
+      frontmatter,
       disableRenamingKey,
       disableRenamingValue
     );
