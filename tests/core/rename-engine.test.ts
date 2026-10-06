@@ -49,10 +49,6 @@ function createMockPlugin() {
       deleteTitleRegionCache: vi.fn(),
       clearAllTitleRegionCaches: vi.fn(),
       updateTitleRegionCacheKey: vi.fn(),
-      // Fresh read flag
-      needsFreshRead: vi.fn().mockReturnValue(false),
-      markNeedsFreshRead: vi.fn(),
-      clearNeedsFreshRead: vi.fn(),
       // File lifecycle
       notifyFileRenamed: vi.fn(),
       notifyFileDeleted: vi.fn(),
@@ -64,7 +60,6 @@ function createMockPlugin() {
       // Pending alias recheck
       markPendingAliasRecheck: vi.fn(),
       hasPendingAliasRecheck: vi.fn().mockReturnValue(false),
-      getPendingAliasEditor: vi.fn().mockReturnValue(undefined),
       clearPendingAliasRecheck: vi.fn(),
       getFilesWithPendingAliasRecheck: vi.fn().mockReturnValue([]),
       // Lifecycle timers
@@ -704,7 +699,7 @@ describe('RenameEngine', () => {
 
     const BLOCKED_NOTE = '---\nno rename: true\n---\nTitle\n';
 
-    // Mirrors the new-note path: noDelay, automatic, no content handed in, editor assumed open
+    // Mirrors the new-note path: noDelay, automatic, no content handed in, a new note shown in a Markdown leaf
     const processAsNewNote = () =>
       renameEngine.processFile(
         noteInFolder,
@@ -795,26 +790,8 @@ describe('RenameEngine', () => {
       expect(result.reason).toBe('property-disabled');
     });
 
-    it('falls back to the cache on a manual command whose only content is another note in a hover popover', async () => {
-      const otherNote = createMockFile('Notes/Other note.md');
-      plugin.app.workspace.getLeavesOfType = vi.fn().mockReturnValue([
-        {
-          view: {
-            hoverPopover: {
-              targetEl: {},
-              file: otherNote,
-              editor: {
-                getValue: vi
-                  .fn()
-                  .mockReturnValue('---\nstatus: draft\n---\nOther note\n'),
-              },
-            },
-          },
-        },
-      ]);
-      plugin.app.metadataCache.getFileCache = vi
-        .fn()
-        .mockReturnValue({ frontmatter: { 'no rename': true } });
+    it('keeps the name on a manual command when the property is in the text the cache has not indexed', async () => {
+      plugin.app.vault.read = vi.fn().mockResolvedValue(BLOCKED_NOTE);
 
       const result = await renameEngine.processFile(noteInFolder, true, true);
 

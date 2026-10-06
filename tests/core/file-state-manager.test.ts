@@ -193,13 +193,6 @@ describe('FileStateManager', () => {
       expect(manager.hasPendingAliasRecheck('test.md')).toBe(true);
     });
 
-    it('should store and retrieve pending alias editor', () => {
-      const mockEditor = { getValue: () => 'content' };
-      manager.markPendingAliasRecheck('test.md', mockEditor);
-
-      expect(manager.getPendingAliasEditor('test.md')).toBe(mockEditor);
-    });
-
     it('should clear pending alias recheck', () => {
       manager.markPendingAliasRecheck('test.md');
       manager.clearPendingAliasRecheck('test.md');
@@ -232,22 +225,6 @@ describe('FileStateManager', () => {
       manager.clearEditorSyncing('test.md');
 
       expect(manager.isEditorSyncing('test.md')).toBe(false);
-    });
-  });
-
-  describe('fresh read flag', () => {
-    it('should mark and check needs fresh read', () => {
-      expect(manager.needsFreshRead('test.md')).toBe(false);
-
-      manager.markNeedsFreshRead('test.md');
-      expect(manager.needsFreshRead('test.md')).toBe(true);
-    });
-
-    it('should clear needs fresh read', () => {
-      manager.markNeedsFreshRead('test.md');
-      manager.clearNeedsFreshRead('test.md');
-
-      expect(manager.needsFreshRead('test.md')).toBe(false);
     });
   });
 
@@ -321,15 +298,6 @@ describe('FileStateManager', () => {
 
       // State entry should be removed when empty
       expect(manager.getState('test.md')).toBeUndefined();
-    });
-
-    it('should cleanup needsFreshRead after 5 minutes', () => {
-      manager.markNeedsFreshRead('test.md');
-
-      vi.advanceTimersByTime(6 * 60 * 1000);
-      manager.runMaintenance();
-
-      expect(manager.needsFreshRead('test.md')).toBe(false);
     });
 
     it('should cleanup lastRenamedTime after 1 second', () => {

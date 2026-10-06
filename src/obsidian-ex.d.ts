@@ -12,6 +12,7 @@ import {
   View,
   Setting,
 } from 'obsidian';
+import type { PagePreviewEmbed } from './utils/page-preview';
 
 declare module 'obsidian' {
   export class SettingGroup {
@@ -73,11 +74,7 @@ declare module 'obsidian' {
   type ViewWithFileEditor = View & {
     file?: TFile | null;
     editor?: Editor | null;
-    hoverPopover?: {
-      targetEl?: HTMLElement;
-      editor?: Editor;
-      file?: TFile;
-    } | null;
+    hoverPopover?: { targetEl?: HTMLElement; embed?: PagePreviewEmbed } | null;
   };
 }
 

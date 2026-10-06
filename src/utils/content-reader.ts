@@ -1,5 +1,6 @@
-import { App, TFile, Editor, MarkdownView, ViewWithFileEditor } from 'obsidian';
+import { App, TFile, Editor, MarkdownView } from 'obsidian';
 import FirstLineIsTitlePlugin from '../../main';
+import { findPagePreviewEditors } from './page-preview';
 
 /**
  * Options for reading file content
@@ -9,7 +10,7 @@ export interface ContentReaderOptions {
   providedContent?: string;
   /** Already have editor instance */
   providedEditor?: Editor;
-  /** Search workspace for matching editor */
+  /** Search open editors for this note, page previews included */
   searchWorkspace?: boolean;
   /** Use vault.read instead of vault.cachedRead when falling back */
   preferFresh?: boolean;
@@ -65,7 +66,7 @@ export async function readFileContent(
       return content;
     }
 
-    // Strategy 3: Search workspace for matching editor if requested
+    // Strategy 3: Search open editors for this note, page previews included, if requested
     if (searchWorkspace) {
       const editorContent = findEditorContent(app, file);
       if (editorContent !== null) {
@@ -80,13 +81,9 @@ export async function readFileContent(
 
     // Strategy 4: Use contentReadMethod setting
     if (settings.core.contentReadMethod === 'Editor') {
-      // Editor method with no editor available - fallback based on preferFresh or file state
-      const needsFresh =
-        preferFresh || plugin.fileStateManager?.needsFreshRead(file.path);
-      if (needsFresh) {
+      // Editor method with no editor available - fallback based on preferFresh
+      if (preferFresh) {
         content = await app.vault.read(file);
-        // Clear needsFreshRead flag after using it
-        plugin.fileStateManager?.clearNeedsFreshRead(file.path);
         if (settings.core.debug) {
           console.debug(
             `Editor method using fresh read for ${file.path} (${content.length} chars)`
@@ -144,47 +141,19 @@ export async function readFileContent(
 
 /**
  * Search workspace for an editor matching the given file
- * Checks hover popovers first (most likely fresh during active editing), then main workspace
+ * Checks page previews editing the note first, then the active view, then open Markdown leaves
  * @param app - Obsidian App instance
  * @param file - File to find editor for
  * @returns Editor content if found, null otherwise
  */
 function findEditorContent(app: App, file: TFile): string | null {
-  const leaves = app.workspace.getLeavesOfType('markdown');
-
-  // Track popover editors for single-popover fallback logic
-  let singlePopoverContent: string | null = null;
-  let popoverCount = 0;
-
-  // Check hover popovers FIRST - most likely to have fresh content during active editing
-  // Popovers are ephemeral and only exist when actively being used
-  for (const leaf of leaves) {
-    // Cast to ViewWithFileEditor to access MarkdownView properties
-    const view = leaf.view as ViewWithFileEditor;
-
-    if (view?.hoverPopover?.targetEl && view.hoverPopover.editor) {
-      const content = view.hoverPopover.editor.getValue();
-
-      // Don't trust empty content - likely transient state after file operations
-      if (content) {
-        popoverCount++;
-        singlePopoverContent = content;
-
-        // Try exact path match first (normal case)
-        if (view.hoverPopover.file?.path === file.path) {
-          return content;
-        }
-        // Path might not match immediately after rename due to async update
-        // Continue to check other popovers and fall back to single-popover logic
-      }
-    }
-  }
-
-  // If exactly one active popover exists with content, use it
-  // Obsidian only allows one hover popover at a time - opening another closes the first
-  // This handles post-rename case where popover's file.path hasn't updated yet
-  if (popoverCount === 1 && singlePopoverContent) {
-    return singlePopoverContent;
+  // Page previews match the note by file identity, so a preview of another note is never read. Empty content is not trusted: likely transient state after file operations.
+  const previewContent = findPagePreviewEditors(
+    app,
+    file
+  )[0]?.editor?.getValue();
+  if (previewContent) {
+    return previewContent;
   }
 
   // Check active view's editor as fallback - only if file matches
@@ -199,7 +168,7 @@ function findEditorContent(app: App, file: TFile): string | null {
 
   // Check main workspace leaves as final fallback
   // These can be stale after file operations (renames, etc.)
-  for (const leaf of leaves) {
+  for (const leaf of app.workspace.getLeavesOfType('markdown')) {
     const view = leaf.view as MarkdownView;
     if (view && view.file?.path === file.path && view.editor) {
       const content = view.editor.getValue();

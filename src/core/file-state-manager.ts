@@ -36,15 +36,10 @@ export interface FileState {
   isLocked?: boolean;
   lockTimestamp?: number; // When lock was acquired (for stale lock cleanup)
   pendingAliasRecheck?: boolean;
-  pendingAliasEditor?: unknown; // Stored editor reference for popover detection
   isSyncingEditors?: boolean; // True when syncing background editors to prevent spurious rechecks
 
   // Rename tracking - prevents processing stale content after rename
   lastRenamedTime?: number; // Timestamp when file was renamed by plugin
-
-  // Cache staleness tracking - when editor sync skipped in popover
-  needsFreshRead?: boolean; // True when cache is stale, must read from disk not cache
-  needsFreshReadTimestamp?: number; // When flag was set, for cleanup in maintenance
 }
 
 /**
@@ -370,14 +365,10 @@ export class FileStateManager {
 
   /**
    * Mark file for pending alias recheck
-   * @param editor - Optional editor reference for popover detection
    */
-  markPendingAliasRecheck(path: string, editor?: unknown): void {
+  markPendingAliasRecheck(path: string): void {
     const state = this.getOrCreateState(path);
     state.pendingAliasRecheck = true;
-    if (editor) {
-      state.pendingAliasEditor = editor;
-    }
   }
 
   /**
@@ -388,20 +379,12 @@ export class FileStateManager {
   }
 
   /**
-   * Get stored editor reference for pending alias recheck
-   */
-  getPendingAliasEditor(path: string): unknown {
-    return this.fileStates.get(path)?.pendingAliasEditor;
-  }
-
-  /**
    * Clear pending alias recheck
    */
   clearPendingAliasRecheck(path: string): void {
     const state = this.fileStates.get(path);
     if (state) {
       state.pendingAliasRecheck = false;
-      state.pendingAliasEditor = undefined;
     }
   }
 
@@ -446,34 +429,6 @@ export class FileStateManager {
   }
 
   /**
-   * Mark file as needing fresh read from disk (not cache)
-   * Used when editor sync skipped in popover - cache is stale, must read from disk
-   */
-  markNeedsFreshRead(path: string): void {
-    const state = this.getOrCreateState(path);
-    state.needsFreshRead = true;
-    state.needsFreshReadTimestamp = Date.now();
-  }
-
-  /**
-   * Check if file needs fresh read from disk (cache is stale)
-   */
-  needsFreshRead(path: string): boolean {
-    return this.fileStates.get(path)?.needsFreshRead ?? false;
-  }
-
-  /**
-   * Clear needs fresh read flag
-   */
-  clearNeedsFreshRead(path: string): void {
-    const state = this.fileStates.get(path);
-    if (state) {
-      state.needsFreshRead = false;
-      delete state.needsFreshReadTimestamp;
-    }
-  }
-
-  /**
    * Mark file as recently renamed by plugin
    * Used to prevent processFile from running with stale content immediately after rename
    */
@@ -489,7 +444,10 @@ export class FileStateManager {
    * @param path - File path to check
    * @param withinMs - Time window in milliseconds (default 100ms)
    */
-  wasRecentlyRenamed(path: string, withinMs: number = 100): boolean {
+  wasRecentlyRenamed(
+    path: string,
+    withinMs: number = TIMING.RENAME_RECENTLY_WINDOW_MS
+  ): boolean {
     const state = this.fileStates.get(path);
     if (!state?.lastRenamedTime) return false;
     return Date.now() - state.lastRenamedTime < withinMs;
@@ -538,15 +496,6 @@ export class FileStateManager {
         const age = now - state.operationData.lastUpdate;
         if (age > staleThreshold) {
           delete state.operationData;
-        }
-      }
-
-      // Clean up stale needsFreshRead flags (5 minutes)
-      if (state.needsFreshReadTimestamp) {
-        const age = now - state.needsFreshReadTimestamp;
-        if (age > 5 * 60 * 1000) {
-          delete state.needsFreshRead;
-          delete state.needsFreshReadTimestamp;
         }
       }
 

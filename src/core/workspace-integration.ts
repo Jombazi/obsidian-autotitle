@@ -289,7 +289,12 @@ export class WorkspaceIntegration {
                         editorContent = value;
                       }
                     }
-                    // hasActiveEditor=true because we just verified editor exists
+                    // A note never shown in a Markdown leaf (Obsidian's silent creators such as `obsidian://new?silent`, sync, another plugin or a script) is left alone until it is opened and edited; canvas-created notes count as shown.
+                    const shownInEditor =
+                      renameView !== null ||
+                      canvasIsActive ||
+                      plugin.eventHandlerManager?.hasBeenShownInEditor(file) ===
+                        true;
                     await plugin.renameEngine.processFile(
                       file,
                       true,
@@ -297,7 +302,8 @@ export class WorkspaceIntegration {
                       editorContent,
                       false,
                       undefined,
-                      true
+                      // Undefined, not false: the central gate then looks for an open editor itself
+                      shownInEditor ? true : undefined
                     );
                   }
 

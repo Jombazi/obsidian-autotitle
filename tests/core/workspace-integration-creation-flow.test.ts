@@ -181,6 +181,44 @@ describe('WorkspaceIntegration creation flow', () => {
     ).toHaveBeenCalledWith(file, '', null);
   });
 
+  function hasActiveEditorPassedToRename(): unknown {
+    const processFile = (
+      mockPlugin.renameEngine as { processFile: ReturnType<typeof vi.fn> }
+    ).processFile;
+    expect(processFile).toHaveBeenCalledTimes(1);
+    return processFile.mock.calls[0][6];
+  }
+
+  it('leaves the open-editor check to the gate for a note never shown in a Markdown leaf', async () => {
+    mockPlugin.eventHandlerManager = {
+      hasBeenShownInEditor: vi.fn().mockReturnValue(false),
+    };
+
+    await runCreate();
+
+    expect(hasActiveEditorPassedToRename()).toBeUndefined();
+  });
+
+  it('treats a note already shown in a Markdown leaf as having an editor', async () => {
+    mockPlugin.eventHandlerManager = {
+      hasBeenShownInEditor: vi.fn().mockReturnValue(true),
+    };
+
+    await runCreate();
+
+    expect(hasActiveEditorPassedToRename()).toBe(true);
+  });
+
+  it('treats a note created while a canvas is active as having an editor', async () => {
+    mockApp.workspace.getMostRecentLeaf = vi.fn().mockReturnValue({
+      view: { getViewType: () => 'canvas' },
+    });
+
+    await runCreate();
+
+    expect(hasActiveEditorPassedToRename()).toBe(true);
+  });
+
   it('resolves the rename editor through the shared resolver', async () => {
     await runCreate();
 

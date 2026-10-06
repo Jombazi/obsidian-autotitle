@@ -12,10 +12,6 @@ import {
 } from './settings-base';
 import { t } from '../i18n';
 import { DEFAULT_SETTINGS } from '../constants';
-import { createPluginLink, buildPluginLinkRouterGroup } from './plugin-links';
-
-// Plugin names (proper nouns, not subject to sentence case)
-const PLUGIN_HOVER_EDITOR = 'Hover Editor';
 
 /**
  * The limitation caveats, as bare newline-separated lines (no bullet markup),
@@ -24,11 +20,7 @@ const PLUGIN_HOVER_EDITOR = 'Hover Editor';
 function buildLimitationsNote(): DocumentFragment {
   return createFragment((frag) => {
     appendLines(frag, [
-      (target) => {
-        target.appendText(t('settings.alias.limitations.bullet1.part1'));
-        createPluginLink(target, 'obsidian-hover-editor', PLUGIN_HOVER_EDITOR);
-        target.appendText(t('settings.alias.limitations.bullet1.part2'));
-      },
+      (target) => target.appendText(t('settings.alias.limitations.bullet1')),
       (target) => target.appendText(t('settings.alias.limitations.bullet2')),
     ]);
   });
@@ -271,8 +263,6 @@ export function buildAliasPage(
       },
     },
   ];
-
-  items.push(buildPluginLinkRouterGroup(plugin.app));
 
   return {
     type: 'page',

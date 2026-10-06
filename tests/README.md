@@ -14,30 +14,48 @@ tests/
 ├── locale-parity.test.ts
 ├── main.test.ts
 ├── modals.test.ts
+├── readme-locale-parity.test.ts
 ├── testUtils.test.ts
 ├── utils.test.ts
+├── version-bump.test.ts
 ├── core/                       # Core module tests
 │   ├── alias-manager.test.ts
+│   ├── alias-properties-only-skip.test.ts
 │   ├── cache-manager.test.ts
 │   ├── command-registrar.test.ts
+│   ├── disable-property-transition.test.ts
+│   ├── editor-lifecycle-first-line.test.ts
+│   ├── editor-lifecycle-syncing-guard.test.ts
 │   ├── event-handler-manager.test.ts
 │   ├── file-creation-coordinator.test.ts
 │   ├── file-state-manager.test.ts
 │   ├── plugin-initializer.test.ts
 │   ├── rate-limiter.test.ts
 │   ├── rename-engine.test.ts
+│   ├── workspace-integration-creation-flow.test.ts
 │   └── workspace-integration.test.ts
 ├── operations/                 # Batch operation tests
+│   ├── file-operations-title-insertion.test.ts
 │   └── file-operations.test.ts
 ├── settings/                   # Settings tab tests
+│   ├── exclusions-add-item.test.ts
+│   ├── general.test.ts
+│   ├── import-guard.test.ts
 │   ├── plugin-links.test.ts
+│   ├── settings-base.test.ts
 │   ├── settings-main.test.ts
 │   ├── settings-paths.test.ts
-│   └── general.test.ts
+│   └── transfer.test.ts
+├── ui/                         # Context menu and property visibility tests
+│   ├── menu-config.test.ts
+│   ├── menu-definitions.test.ts
+│   └── property-visibility.test.ts
 └── utils/                      # Utility module tests
     ├── content-reader.test.ts
     ├── debug.test.ts
     ├── file-exclusions.test.ts
+    ├── page-preview.test.ts
+    ├── property-value.test.ts
     ├── string-processing.test.ts
     └── tag-utils.test.ts
 ```
@@ -55,7 +73,7 @@ npm test -- --reporter=verbose              # verbose output
 
 ### CI/CD
 
-Tests run automatically on push via GitHub Actions (Node 18 & 20).
+Tests run automatically on push via GitHub Actions (Node 20).
 
 ---
 
@@ -65,29 +83,28 @@ Tests run automatically on push via GitHub Actions (Node 18 & 20).
 
 | Module        | Tests | Coverage                                                                                           |
 | ------------- | ----- | -------------------------------------------------------------------------------------------------- |
-| Rename Engine | 60    | Rate limiting, frontmatter stripping, title extraction, cache management, editor change processing |
-| Cache Manager | 52    | LRU cache, path reservation, file existence cache, lock management                                 |
-| Rate Limiter  | 60    | Per-key/global limits, time windows, expiration, performance                                       |
-| i18n          | 80    | Locale switching, translations, variable replacement, English/Russian plurals                      |
+| Rename Engine | 76    | Rate limiting, frontmatter stripping, title extraction, cache management, editor change processing |
+| Cache Manager | 34    | LRU cache, path reservation, file existence cache, lock management                                 |
+| Rate Limiter  | 38    | Per-key/global limits, time windows, expiration, performance                                       |
+| i18n          | 69    | Locale switching, translations, variable replacement, English/Russian plurals                      |
 
 ### Utility modules
 
-| Module            | Tests | Coverage                                                                    |
-| ----------------- | ----- | --------------------------------------------------------------------------- |
-| String Processing | 45    | Forbidden chars, replacements, safe links, maxLength                        |
-| File Exclusions   | 85    | Folders (+subfolders), tags (frontmatter + inline), properties, strategies  |
-| Tag Utilities     | 63    | Normalization, YAML parsing, frontmatter stripping, child tag matching      |
-| Content Reader    | 48    | All read strategies (Editor/Cache/File), workspace search, popover handling |
-| Core Utilities    | 42    | Logging, headings, file name exclusions, disable properties                 |
-| Debug Utilities   | 41    | Setting logs, content output, dumps                                         |
+| Module            | Tests | Coverage                                                                       |
+| ----------------- | ----- | ------------------------------------------------------------------------------ |
+| String Processing | 36    | Forbidden chars, replacements, safe links, maxLength                           |
+| File Exclusions   | 45    | Folders (+subfolders), tags (frontmatter + inline), properties, strategies     |
+| Tag Utilities     | 41    | Normalization, YAML parsing, frontmatter stripping, child tag matching         |
+| Content Reader    | 30    | All read strategies (Editor/Cache/File), workspace search, page preview lookup |
+| Core Utilities    | 187   | Logging, headings, file name exclusions, disable properties                    |
+| Debug Utilities   | 25    | Setting logs, content output, dumps                                            |
 
-**Total: 805 tests across 27 files** (`npx vitest run`)
+**Total: 1099 tests across 44 files** (`npx vitest run`)
 
 ### Not yet tested
 
 - Property Manager
 - Link Manager
-- Context menus
 
 ---
 

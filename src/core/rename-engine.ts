@@ -500,7 +500,7 @@ export class RenameEngine {
             })();
           }, TIMING.UI_SETTLE_DELAY_MS);
         } else {
-          // File in popover or not in view - the flag stays set and the next processFile on this file rechecks it
+          // File not in the active view - the flag stays set and the next processFile on this file rechecks it
           verboseLog(
             this.plugin,
             `Pending alias flag stays set, next processFile on this file rechecks it: ${newPath}`
@@ -530,18 +530,12 @@ export class RenameEngine {
         providedContent,
         providedEditor: editor, // Use editor from manual command
         preferFresh: true,
-        searchWorkspace: showNotices, // Manual commands search for popover editors
+        searchWorkspace: showNotices, // Manual commands search for open editors, page previews included
       });
     } catch (error) {
       console.error(`Error reading file content: ${file.path}`, error);
       return { success: false, reason: 'read-error' };
     }
-
-    // With searchWorkspace and no editor, readFileContent can return the only live hover popover's content even when it shows another note, so the gate falls back to the cache there.
-    const gateContent =
-      providedContent !== undefined || editor !== undefined || !showNotices
-        ? initialContent
-        : undefined;
 
     // Central gate: check policy requirements and always-on safeguards. It reads the rename-blocking property from the note's text, so a note the metadata cache has not indexed yet (just created, or replaced by sync) still counts it; the cache is the fallback when the text has no parseable frontmatter.
     const { canModify, reason } = canModifyFile(
@@ -551,7 +545,7 @@ export class RenameEngine {
       this.plugin.settings.exclusions.disableRenamingValue,
       showNotices, // showNotices indicates manual command
       hasActiveEditor, // From editor-change event or auto-detected
-      gateContent
+      initialContent
     );
 
     if (!canModify) {
@@ -668,7 +662,7 @@ export class RenameEngine {
     let content = await readFileContent(this.plugin, file, {
       providedContent,
       providedEditor: editor, // Use editor from manual command
-      searchWorkspace: showNotices, // Manual commands search for popover editors
+      searchWorkspace: showNotices, // Manual commands search for open editors, page previews included
     });
 
     const currentName = file.basename;

@@ -3,7 +3,7 @@
  *
  * Tests cover:
  * - getAliasPropertyKeys: parsing, whitespace, blank key
- * - updateAliasIfNeeded: canvas/popover detection, alias matching, YAML handling
+ * - updateAliasIfNeeded: canvas detection, alias matching, YAML handling
  * - addAliasToFile: ZWSP markers, truncation, custom replacements, multi-property
  * - removePluginAliasesFromFile: selective removal, keepEmptyAliasProperty
  * - Edge cases: ENOENT, concurrent calls, special characters
@@ -13,10 +13,19 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { getFrontMatterInfo, parseYaml } from 'obsidian';
 import { AliasManager } from '../../src/core/alias-manager';
 import { createMockFile, createMockApp, splitFrontMatter } from '../testUtils';
-import { TFile, Editor, MarkdownView } from '../mockObsidian';
+import { TFile, MarkdownView } from '../mockObsidian';
 import { DeepPartial, PluginSettings } from '../../src/types';
 import { DEFAULT_SETTINGS } from '../../src/constants';
 import { deepMerge } from '../../src/utils/deep-merge';
+
+const { keepPagePreviewCursors } = vi.hoisted(() => ({
+  keepPagePreviewCursors: vi.fn(),
+}));
+
+vi.mock('../../src/utils/page-preview', () => ({
+  keepPagePreviewCursors,
+  findPagePreviewEditors: vi.fn(() => []),
+}));
 
 // Create mock plugin for AliasManager
 function createMockPlugin(settingsOverrides: DeepPartial<PluginSettings> = {}) {
@@ -72,13 +81,11 @@ describe('AliasManager', () => {
   let plugin: ReturnType<typeof createMockPlugin>;
   let aliasManager: AliasManager;
   let file: TFile;
-  let editor: Editor;
 
   beforeEach(() => {
     plugin = createMockPlugin();
     aliasManager = new AliasManager(plugin);
     file = createMockFile('test.md');
-    editor = new Editor();
 
     // Reset all mocks
     vi.clearAllMocks();
@@ -313,6 +320,23 @@ describe('AliasManager', () => {
 
       const zwsp = '\u200B';
       expect(capturedFrontmatter.aliases).toEqual([`${zwsp}${title}${zwsp}`]);
+    });
+
+    it('should keep page preview cursors before writing the properties', async () => {
+      plugin.app.fileManager.processFrontMatter = vi.fn(async () => {});
+
+      await aliasManager.addAliasToFile(
+        file,
+        'First Line',
+        'filename',
+        'First Line\nBody'
+      );
+
+      expect(keepPagePreviewCursors).toHaveBeenCalledWith(plugin.app, file);
+      expect(keepPagePreviewCursors.mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(plugin.app.fileManager.processFrontMatter).mock
+          .invocationCallOrder[0]
+      );
     });
 
     it('should truncate alias when enabled and exceeds charCount', async () => {
@@ -875,50 +899,6 @@ describe('AliasManager', () => {
       await aliasManager.removePluginAliasesFromFile(file);
 
       expect(mockView.save).toHaveBeenCalled();
-    });
-  });
-
-  describe('isEditorInPopoverOrCanvas', () => {
-    it('should return false when editor is provided', () => {
-      // Editor provided means it's from editor-change event (not popover)
-      const result = aliasManager.isEditorInPopoverOrCanvas(editor, file);
-
-      expect(result).toBe(false);
-    });
-
-    it('should return true when no active view', () => {
-      plugin.app.workspace.getActiveViewOfType = vi.fn().mockReturnValue(null);
-
-      const result = aliasManager.isEditorInPopoverOrCanvas(null as any, file);
-
-      expect(result).toBe(true);
-    });
-
-    it("should return true when active view file doesn't match", () => {
-      const otherFile = createMockFile('other.md');
-      const mockView = new MarkdownView(plugin.app);
-      mockView.file = otherFile;
-
-      plugin.app.workspace.getActiveViewOfType = vi
-        .fn()
-        .mockReturnValue(mockView);
-
-      const result = aliasManager.isEditorInPopoverOrCanvas(null as any, file);
-
-      expect(result).toBe(true);
-    });
-
-    it('should return false when active view file matches', () => {
-      const mockView = new MarkdownView(plugin.app);
-      mockView.file = file;
-
-      plugin.app.workspace.getActiveViewOfType = vi
-        .fn()
-        .mockReturnValue(mockView);
-
-      const result = aliasManager.isEditorInPopoverOrCanvas(null as any, file);
-
-      expect(result).toBe(false);
     });
   });
 

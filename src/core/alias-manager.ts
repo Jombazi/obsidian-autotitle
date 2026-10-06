@@ -16,6 +16,7 @@ import {
 import { resolveCurrentFrontmatter } from '../utils/file-exclusions';
 import { t } from '../i18n';
 import { readFileContent } from '../utils/content-reader';
+import { keepPagePreviewCursors } from '../utils/page-preview';
 import FirstLineIsTitle from '../../main';
 
 const ZWSP = '\u200B';
@@ -143,10 +144,8 @@ export class AliasManager {
         return false;
       }
 
-      // Skip ALL alias operations in popovers/canvas due to Obsidian sync/cache issues
-      // Popovers and canvas have: delayed disk writes, stale editor cache, content mismatches
-
-      // Check canvas first - works without editor parameter
+      // Skip ALL alias operations in canvas due to Obsidian sync/cache issues
+      // Canvas has: delayed disk writes, stale editor cache, content mismatches
       const mostRecentLeaf = this.app.workspace.getMostRecentLeaf();
       const viewType = mostRecentLeaf?.view?.getViewType?.();
       const isCanvas = viewType === 'canvas';
@@ -155,15 +154,6 @@ export class AliasManager {
         verboseLog(
           this.plugin,
           `Skipping alias update in canvas: ${file.path}`
-        );
-        return false;
-      }
-
-      // Check popover (requires editor parameter)
-      if (editor && this.isEditorInPopoverOrCanvas(editor, file)) {
-        verboseLog(
-          this.plugin,
-          `Skipping alias update in popover: ${file.path}`
         );
         return false;
       }
@@ -410,8 +400,8 @@ export class AliasManager {
           originalCharReplacementSetting;
       }
       // Re-check alias-matches-filename after custom replacements are applied.
-      // The caller (updateAliasIfNeeded) checks this at line 182, but custom replacement
-      // rules (lines 276-303) can modify the alias value differently, so we must verify again.
+      // The caller (updateAliasIfNeeded) checks this too, but the custom replacement
+      // rules applied above can modify the alias value differently, so we must verify again.
       const targetTitle = newTitle.trim();
       const aliasMatchesFilename = aliasToAdd.trim() === targetTitle;
       const shouldAddAlias =
@@ -506,6 +496,7 @@ export class AliasManager {
 
         // No frontmatter exists - use processFrontMatter to create it properly
         const aliasPropertyKeys = this.getAliasPropertyKeys();
+        keepPagePreviewCursors(this.app, currentFileForFrontmatter);
         await this.app.fileManager.processFrontMatter(
           currentFileForFrontmatter,
           (frontmatter: Record<string, unknown>) => {
@@ -577,6 +568,7 @@ export class AliasManager {
 
       // File has frontmatter - update aliases via processFrontMatter
       const aliasPropertyKeys = this.getAliasPropertyKeys();
+      keepPagePreviewCursors(this.app, currentFileForUpdate);
       await this.app.fileManager.processFrontMatter(
         currentFileForUpdate,
         (frontmatter: Record<string, unknown>) => {
@@ -764,6 +756,7 @@ export class AliasManager {
         return;
       }
 
+      keepPagePreviewCursors(this.app, currentFileForRemoval);
       await this.app.fileManager.processFrontMatter(
         currentFileForRemoval,
         (frontmatter: Record<string, unknown>) => {
@@ -847,33 +840,6 @@ export class AliasManager {
         );
       }
     }
-  }
-
-  /**
-   * Check if editor is in a popover (hover preview)
-   * Note: Canvas is checked separately before calling this method
-   * @param editor - Editor instance to check
-   * @param file - File being edited
-   * @returns true if editor is in a popover, false if in main workspace
-   */
-  public isEditorInPopoverOrCanvas(editor: Editor, file: TFile): boolean {
-    // If editor is provided, it's from editor-change event
-    // Popovers don't trigger editor-change events, so this is always a real editor
-    if (editor) {
-      return false; // Editor provided = not a popover
-    }
-
-    // Get the active Markdown view
-    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-
-    // If there's no active view, or the active view's editor doesn't match
-    // the one we're syncing, it's a popover
-    if (!activeView || activeView.file?.path !== file.path) {
-      return true; // It's a popover
-    }
-
-    // Editor matches active view = main workspace editor
-    return false;
   }
 
   /**

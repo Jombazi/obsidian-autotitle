@@ -1,14 +1,12 @@
 import { App, Notice, TFile, TFolder, normalizePath } from 'obsidian';
 import { verboseLog } from '../utils';
 import { EXCLUSION_STRATEGY, PluginSettings } from '../types';
-import { RenameEngine } from '../core/rename-engine';
 import { t } from '../i18n';
 
 export class FolderOperations {
   constructor(
     private app: App,
     public settings: PluginSettings,
-    private renameEngine: RenameEngine,
     private saveSettings: () => Promise<void>,
     private debugLog: (settingName: string, value: unknown) => void,
     private processMultipleFiles: (
@@ -16,99 +14,6 @@ export class FolderOperations {
       action: 'rename'
     ) => Promise<void>
   ) {}
-
-  async putFirstLineInTitleForFolder(folder: TFolder): Promise<void> {
-    const files = this.app.vault
-      .getAllLoadedFiles()
-      .filter(
-        (file: unknown): file is TFile =>
-          file instanceof TFile && file.extension === 'md'
-      )
-      .filter((file: TFile) => {
-        return (
-          file.path.startsWith(folder.path + '/') ||
-          file.parent?.path === folder.path
-        );
-      });
-
-    if (files.length === 0) {
-      verboseLog(
-        this,
-        `Showing notice: No Markdown files found in this folder.`
-      );
-      new Notice(
-        t('notifications.noNotesFoundInFolder').replace(
-          '{{folder}}',
-          folder.name
-        )
-      );
-      return;
-    }
-
-    verboseLog(
-      this,
-      `Showing notice: Renaming ${files.length} files in "${folder.path}"...`
-    );
-    new Notice(
-      t('notifications.renamingNNotes').replace(
-        '{{count}}',
-        String(files.length)
-      )
-    );
-
-    let processedCount = 0;
-    let errorCount = 0;
-
-    const exclusionOverrides = {
-      ignoreFolder: true,
-      ignoreTag: true,
-      ignoreProperty: true,
-    };
-
-    for (const file of files) {
-      try {
-        await this.renameEngine.processFile(
-          file,
-          true,
-          false,
-          undefined,
-          true,
-          exclusionOverrides
-        );
-        processedCount++;
-      } catch (error) {
-        console.error(`Error processing file ${file.path}:`, error);
-        errorCount++;
-      }
-    }
-
-    if (errorCount > 0) {
-      verboseLog(
-        this,
-        `Showing notice: Renamed ${processedCount}/${files.length} notes with ${errorCount} errors. Check console for details.`
-      );
-      const errorNotice = new Notice(
-        t('notifications.renamedNotesWithErrors')
-          .replace('{{renamed}}', String(processedCount))
-          .replace('{{total}}', String(files.length))
-          .replace('{{errors}}', String(errorCount)),
-        0
-      );
-      errorNotice.containerEl.addClass('mod-warning');
-    } else {
-      verboseLog(
-        this,
-        `Showing notice: Successfully processed ${processedCount} files.`
-      );
-      const successNotice = new Notice(
-        t('notifications.renamedNotes')
-          .replace('{{renamed}}', String(processedCount))
-          .replace('{{total}}', String(files.length)),
-        0
-      );
-      successNotice.containerEl.addClass('mod-success');
-    }
-  }
 
   async toggleFolderExclusion(
     folderPath: string,

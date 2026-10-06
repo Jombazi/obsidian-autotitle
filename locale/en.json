@@ -68,7 +68,6 @@
     "notRenamedNoHeading": "Note not renamed due to no heading in first line: {{filename}}",
     "notRenamedExcluded": "Note not renamed due to being excluded: {{filename}}",
     "fileNameExclusionPreventedRename": "Excluded file name prevented rename of: {{filename}}",
-    "noNotesFoundInFolder": "No notes found in: {{folder}}",
     "disabledRenamingInFolder": "Disabled renaming in: {{folder}}",
     "enabledRenamingInFolder": "Enabled renaming in: {{folder}}",
     "enabledRenamingInNFolders": "Enabled renaming in {{count}} folders",
@@ -367,10 +366,7 @@
         "desc": "Also hide the property in the properties sidebar."
       },
       "limitations": {
-        "bullet1": {
-          "part1": "First line alias will not update when editing in page preview or Canvas. Using ",
-          "part2": " is recommended."
-        },
+        "bullet1": "First line alias will not update when editing in Canvas.",
         "bullet2": "Due to Obsidian bug, “modified externally” notifications may occasionally appear when updating alias."
       }
     },

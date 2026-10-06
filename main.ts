@@ -88,7 +88,6 @@ export default class FirstLineIsTitle extends Plugin {
       this._folderOperations = new FolderOperations(
         this.app,
         this.settings,
-        this.renameEngine,
         () => this.saveSettings(),
         (settingName: string, value: unknown) =>
           this.debugLog(settingName, value),
@@ -102,9 +101,7 @@ export default class FirstLineIsTitle extends Plugin {
   get tagOperations(): TagOperations {
     if (!this._tagOperations) {
       this._tagOperations = new TagOperations(
-        this.app,
         this.settings,
-        this.renameEngine,
         () => this.saveSettings(),
         (settingName: string, value: unknown) =>
           this.debugLog(settingName, value)
@@ -134,25 +131,9 @@ export default class FirstLineIsTitle extends Plugin {
     return this.app.plugins.enabledPlugins.has('tag-wrangler');
   }
 
-  async putFirstLineInTitleForFolder(folder: TFolder): Promise<void> {
-    return this.folderOperations.putFirstLineInTitleForFolder(folder);
-  }
-
   async toggleFolderExclusion(folderPath: string): Promise<void> {
     await this.folderOperations.toggleFolderExclusion(folderPath);
     this.refreshSettingsTab();
-  }
-
-  async putFirstLineInTitleForTag(
-    tagName: string,
-    omitBodyTags: boolean = false,
-    omitNestedTags: boolean = false
-  ): Promise<void> {
-    return this.tagOperations.putFirstLineInTitleForTag(
-      tagName,
-      omitBodyTags,
-      omitNestedTags
-    );
   }
 
   async toggleTagExclusion(tagName: string): Promise<void> {

@@ -18,8 +18,9 @@ function createMockPlugin() {
       workspace: {
         on: vi.fn(),
         onLayoutReady: vi.fn((callback: () => void) => callback()),
-        getLeavesOfType: vi.fn(() => []),
+        getLeavesOfType: vi.fn((): unknown[] => []),
         getActiveViewOfType: vi.fn(() => null),
+        iterateAllLeaves: vi.fn(),
       },
       vault: {
         on: vi.fn(),
@@ -119,6 +120,12 @@ describe('alias update on a properties-only save', () => {
     ['modify', () => modify],
     ['metadata changed', () => metadataChanged],
   ])('%s handler', (_name, handler) => {
+    beforeEach(() => {
+      plugin.app.workspace.getLeavesOfType.mockReturnValue([
+        { view: { file: note } },
+      ]);
+    });
+
     it('skips the alias when only the properties changed since the baseline', async () => {
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
       plugin.app.vault.read.mockResolvedValue(PROPERTIES_ONLY_EDIT);
@@ -159,6 +166,63 @@ describe('alias update on a properties-only save', () => {
       await handler()(note);
 
       expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe.each([
+    ['modify', () => modify],
+    ['metadata changed', () => metadataChanged],
+  ])('%s handler on a note not open in an editor', (_name, handler) => {
+    const editNoteInEditor = async () => {
+      plugin.app.vault.cachedRead.mockResolvedValue(SAVED);
+      editorChange({}, { file: note });
+      await flushPromises();
+    };
+
+    beforeEach(() => {
+      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
+    });
+
+    it('leaves the alias alone and drops the baseline when the note was never edited', async () => {
+      plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
+
+      await handler()(note);
+
+      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(
+        plugin.fileStateManager.getLastSavedContent(note.path)
+      ).toBeUndefined();
+    });
+
+    it('updates the alias when the note is open in an editor', async () => {
+      plugin.app.workspace.getLeavesOfType.mockReturnValue([
+        { view: { file: note } },
+      ]);
+
+      await handler()(note);
+
+      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
+    });
+
+    it('updates the alias when the note was edited 1 s earlier', async () => {
+      await editNoteInEditor();
+      vi.advanceTimersByTime(1000);
+
+      await handler()(note);
+
+      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves the alias alone and drops the baseline when the note was edited 6 s earlier', async () => {
+      await editNoteInEditor();
+      vi.advanceTimersByTime(6000);
+
+      await handler()(note);
+
+      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(
+        plugin.fileStateManager.getLastSavedContent(note.path)
+      ).toBeUndefined();
     });
   });
 

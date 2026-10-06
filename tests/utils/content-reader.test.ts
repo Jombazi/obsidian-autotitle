@@ -12,10 +12,6 @@ function createMockPlugin(app: App, settings: any) {
   return {
     app,
     settings,
-    fileStateManager: {
-      needsFreshRead: vi.fn().mockReturnValue(false),
-      clearNeedsFreshRead: vi.fn(),
-    },
   } as any;
 }
 
@@ -117,20 +113,6 @@ describe('content-reader', () => {
 
       expect(result).toBe('Fresh content');
       expect(app.vault.read).toHaveBeenCalledWith(file);
-    });
-
-    it('should use fresh read when fileStateManager indicates need', async () => {
-      plugin.settings.core.contentReadMethod = 'Editor';
-      plugin.fileStateManager.needsFreshRead = vi.fn().mockReturnValue(true);
-      app.vault.read = vi.fn().mockResolvedValue('Fresh content');
-
-      const result = await readFileContent(plugin, file);
-
-      expect(result).toBe('Fresh content');
-      expect(app.vault.read).toHaveBeenCalledWith(file);
-      expect(plugin.fileStateManager.clearNeedsFreshRead).toHaveBeenCalledWith(
-        file.path
-      );
     });
 
     it('should throw error when file read fails', async () => {
@@ -311,66 +293,63 @@ describe('content-reader', () => {
   });
 
   describe('workspace editor search', () => {
-    it('should find editor in hover popover', async () => {
-      const popoverContent = 'Popover content';
-      const mockView = {
-        hoverPopover: {
-          targetEl: document.createElement('div'),
-          editor: {
-            getValue: vi.fn().mockReturnValue(popoverContent),
+    // A core page preview keeps its note and editor on `hoverPopover.embed`
+    function previewLeaf(previewFile: TFile, content: string) {
+      return {
+        view: {
+          hoverPopover: {
+            embed: {
+              file: previewFile,
+              editor: { getValue: vi.fn().mockReturnValue(content) },
+              set: vi.fn(),
+            },
           },
-          file: file,
         },
       };
+    }
 
-      app.workspace.getLeavesOfType = vi
-        .fn()
-        .mockReturnValue([{ view: mockView }]);
+    function showLeaves(leaves: unknown[]) {
+      app.workspace.iterateAllLeaves = vi.fn((callback: (leaf: any) => void) =>
+        leaves.forEach(callback)
+      );
+    }
+
+    it('should use the page preview editing this note', async () => {
+      showLeaves([previewLeaf(file, 'Preview content')]);
 
       const result = await readFileContent(plugin, file, {
         searchWorkspace: true,
       });
 
-      expect(result).toBe(popoverContent);
+      expect(result).toBe('Preview content');
     });
 
-    it('should use single popover content when exactly one popover exists', async () => {
-      const popoverContent = 'Single popover';
-      const mockView = {
-        hoverPopover: {
-          targetEl: document.createElement('div'),
-          editor: {
-            getValue: vi.fn().mockReturnValue(popoverContent),
-          },
-          file: createMockFile('different.md'), // Different file
-        },
-      };
-
-      app.workspace.getLeavesOfType = vi
-        .fn()
-        .mockReturnValue([{ view: mockView }]);
+    it("should skip another note's page preview", async () => {
+      showLeaves([
+        previewLeaf(createMockFile('different.md'), 'Other note'),
+        previewLeaf(file, 'Preview content'),
+      ]);
 
       const result = await readFileContent(plugin, file, {
         searchWorkspace: true,
       });
 
-      expect(result).toBe(popoverContent);
+      expect(result).toBe('Preview content');
     });
 
-    it('should not use popover with empty content', async () => {
-      const mockView = {
-        hoverPopover: {
-          targetEl: document.createElement('div'),
-          editor: {
-            getValue: vi.fn().mockReturnValue(''),
-          },
-          file: file,
-        },
-      };
+    it('should not fall back to the only page preview when it shows another note', async () => {
+      showLeaves([previewLeaf(createMockFile('different.md'), 'Other note')]);
+      app.vault.cachedRead = vi.fn().mockResolvedValue('Fallback content');
 
-      app.workspace.getLeavesOfType = vi
-        .fn()
-        .mockReturnValue([{ view: mockView }]);
+      const result = await readFileContent(plugin, file, {
+        searchWorkspace: true,
+      });
+
+      expect(result).toBe('Fallback content');
+    });
+
+    it('should not use a page preview with empty content', async () => {
+      showLeaves([previewLeaf(file, '')]);
       app.vault.cachedRead = vi.fn().mockResolvedValue('Fallback content');
 
       const result = await readFileContent(plugin, file, {

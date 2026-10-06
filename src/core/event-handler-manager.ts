@@ -6,6 +6,7 @@ import {
   hasDisablePropertyInFile,
   frontmatterHasDisableProperty,
   disablePropertyIsOff,
+  isFileOpenInAnyEditor,
 } from '../utils';
 import { tp } from '../i18n';
 import { RenameModal, DisableEnableModal } from '../modals';
@@ -36,9 +37,27 @@ export class EventHandlerManager {
   private pendingAliasUpdates: Set<string> = new Set();
   /** Notes last seen blocking renaming, keyed by `TFile` because the object survives renames */
   private notesBlockingRename = new WeakSet<TFile>();
+  /** Notes shown in a Markdown leaf since load, keyed by `TFile` because the object survives renames */
+  private notesShownInEditor = new WeakSet<TFile>();
+  /** When each note was last edited in any editor, keyed by `TFile` because the object survives renames */
+  private lastEditorEditAt = new WeakMap<TFile, number>();
 
   constructor(plugin: FirstLineIsTitlePlugin) {
     this.plugin = plugin;
+  }
+
+  /** Check if a note has been shown in a Markdown leaf since the plugin loaded; the new-note path leaves a note that never was alone. */
+  hasBeenShownInEditor(file: TFile): boolean {
+    return this.notesShownInEditor.has(file);
+  }
+
+  /** Check if a note is open in an editor, or was edited in one recently enough that a closed page preview's pending save still belongs to that edit. */
+  private isEditingNote(file: TFile): boolean {
+    return (
+      isFileOpenInAnyEditor(file, this.plugin.app) ||
+      Date.now() - (this.lastEditorEditAt.get(file) ?? 0) <
+        TIMING.PAGE_PREVIEW_SAVE_GRACE_MS
+    );
   }
 
   /**
@@ -353,6 +372,7 @@ export class EventHandlerManager {
         }
 
         this.rememberIfBlockingRename(info.file);
+        this.lastEditorEditAt.set(info.file, Date.now());
         this.rememberSavedContentBaseline(info.file);
 
         // Early exit if still within creation delay window
@@ -386,12 +406,13 @@ export class EventHandlerManager {
   }
 
   /**
-   * Renames a note as soon as its rename-blocking property is unchecked or removed.
+   * Renames a note as soon as its rename-blocking property is unchecked or removed, and records which notes have been shown in a Markdown leaf.
    */
   private registerDisablePropertyTransitionHandler(): void {
     this.plugin.registerEvent(
       this.plugin.app.workspace.on('file-open', (file) => {
         if (file?.extension !== 'md') return;
+        this.notesShownInEditor.add(file);
         this.rememberIfBlockingRename(file);
         this.rememberSavedContentBaseline(file);
       })
@@ -403,6 +424,7 @@ export class EventHandlerManager {
         'markdown'
       )) {
         if (leaf.view instanceof MarkdownView && leaf.view.file) {
+          this.notesShownInEditor.add(leaf.view.file);
           this.rememberIfBlockingRename(leaf.view.file);
           this.rememberSavedContentBaseline(leaf.view.file);
         }
@@ -604,6 +626,12 @@ export class EventHandlerManager {
             return;
           }
 
+          // Background alias updates follow only notes being edited: a closed note changed by sync, another plugin or a script is left alone, its saved-content baseline is dropped so the next open reseeds it from disk, and manual commands write their own aliases.
+          if (!this.isEditingNote(file)) {
+            this.plugin.fileStateManager.deleteLastSavedContent(file.path);
+            return;
+          }
+
           // Mark as in-progress BEFORE any async operation to prevent race
           // between modify and metadata-changed handlers
           this.pendingAliasUpdates.add(file.path);
@@ -707,6 +735,12 @@ export class EventHandlerManager {
           return;
         }
 
+        // Background alias updates follow only notes being edited: a closed note changed by sync, another plugin or a script is left alone, its saved-content baseline is dropped so the next open reseeds it from disk, and manual commands write their own aliases.
+        if (!this.isEditingNote(file)) {
+          this.plugin.fileStateManager.deleteLastSavedContent(file.path);
+          return;
+        }
+
         // Mark as in-progress BEFORE any async operation to prevent race
         // between modify and metadata-changed handlers
         this.pendingAliasUpdates.add(file.path);
@@ -741,7 +775,7 @@ export class EventHandlerManager {
             );
             return;
           }
-          // No previousContent means no baseline: a note never opened since load, or purged, so a YAML-only edit cannot be told apart and the alias update proceeds
+          // No previousContent means no baseline: a note open or just edited but not yet seeded, or purged, so a YAML-only edit cannot be told apart and the alias update proceeds
 
           // Get editor if active view matches the file being updated
           const activeView =

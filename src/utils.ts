@@ -11,6 +11,7 @@ import { isRootFolderPath } from './utils/string-processing';
 import { resolveCurrentFrontmatter } from './utils/file-exclusions';
 import { t } from './i18n';
 import { PropertyManager } from './core/property-manager';
+import { findPagePreviewEditors } from './utils/page-preview';
 
 // Re-export from modular utilities
 export {
@@ -92,12 +93,12 @@ export function detectOS(): OSPreset {
 }
 
 /**
- * Check if file is currently open in any editor (main workspace or popover)
+ * Check if file is currently open in a Markdown leaf or being edited in a page preview
  * @param file - File to check
  * @param app - Obsidian App instance
  * @returns true if file is open in any editor
  */
-function isFileOpenInAnyEditor(file: TFile, app: App): boolean {
+export function isFileOpenInAnyEditor(file: TFile, app: App): boolean {
   const leaves = app.workspace.getLeavesOfType('markdown');
 
   // Check main workspace leaves
@@ -109,19 +110,7 @@ function isFileOpenInAnyEditor(file: TFile, app: App): boolean {
     }
   }
 
-  // Check popovers
-  for (const leaf of leaves) {
-    // Cast to ViewWithFileEditor to access MarkdownView properties
-    const view = leaf.view as ViewWithFileEditor;
-    if (view?.hoverPopover?.targetEl) {
-      const popoverEditor = view.hoverPopover.editor;
-      if (popoverEditor && view.hoverPopover.file?.path === file.path) {
-        return true;
-      }
-    }
-  }
-
-  return false;
+  return findPagePreviewEditors(app, file).length > 0;
 }
 
 /**
@@ -155,7 +144,7 @@ export function canModifyFile(
   // Manual commands bypass this check
   if (!isManualCommand) {
     // If hasActiveEditor provided (from editor-change event), trust it
-    // This includes both leaf editors and popover/hover editors
+    // This includes both leaf editors and page preview editors
     if (hasActiveEditor !== undefined) {
       if (!hasActiveEditor) {
         return { canModify: false, reason: 'file not open in editor' };

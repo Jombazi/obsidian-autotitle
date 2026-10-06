@@ -70,8 +70,8 @@ export const TIMING = {
   /** Threshold for stale file locks (cleaned up during maintenance) */
   FILE_LOCK_STALE_THRESHOLD_MS: 60000,
 
-  /** Threshold for stale needsFreshRead flags (cleaned up during maintenance) */
-  NEEDS_FRESH_READ_STALE_THRESHOLD_MS: 300000,
+  /** A page preview saves 2 s after its last keystroke, possibly after it has closed; background alias updates stay allowed this long after an edit */
+  PAGE_PREVIEW_SAVE_GRACE_MS: 5000,
 } as const;
 
 export const LIMITS = {
