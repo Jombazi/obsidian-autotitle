@@ -35,7 +35,7 @@ function createMockPlugin(openLeaves: unknown[] = []) {
         debug: false,
         enableContextMenus: true,
       },
-      aliases: { enableAliases: false },
+      firstLineProperty: { propertyKey: '' },
       exclusions: {
         disableRenamingKey: DISABLE_KEY,
         disableRenamingValue: 'true',

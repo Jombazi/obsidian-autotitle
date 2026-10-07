@@ -46,8 +46,10 @@ describe('EditorLifecycleManager editor-syncing guard', () => {
       fileStateManager: {
         isEditorSyncing,
         hasThrottleTimer: vi.fn().mockReturnValue(false),
+        hasDelayedThrottleTimer: vi.fn().mockReturnValue(false),
         setThrottleTimer,
         clearThrottleTimer: vi.fn(),
+        getLastEditorContent: vi.fn(),
         setLastEditorContent: vi.fn(),
       },
       renameEngine: { processEditorChangeOptimal },

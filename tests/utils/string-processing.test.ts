@@ -202,6 +202,14 @@ describe('string-processing', () => {
       expect(result).toBe('hello-world');
     });
 
+    it('should trim spaces before a replaced dot when its trimLeft is on', () => {
+      settings.characterReplacements.charReplacements.dot.enabled = true;
+      settings.characterReplacements.charReplacements.dot.replacement = '-';
+      settings.characterReplacements.charReplacements.dot.trimLeft = true;
+      const result = processForbiddenChars('hello .world', settings);
+      expect(result).toBe('hello-world');
+    });
+
     it('should handle trimLeft option for replacements', () => {
       settings.characterReplacements.charReplacements.slash.trimLeft = true;
       const result = processForbiddenChars('hello /world', settings);
@@ -228,14 +236,16 @@ describe('string-processing', () => {
 
     it('should replace Windows/Android characters unconditionally', () => {
       settings.characterReplacements.charReplacements.asterisk.enabled = true;
-      settings.characterReplacements.charReplacements.asterisk.replacement = '-';
+      settings.characterReplacements.charReplacements.asterisk.replacement =
+        '-';
       const result = processForbiddenChars('hello*world', settings);
       expect(result).toBe('hello-world');
     });
 
     it('should not replace Windows/Android character when its individual toggle is off', () => {
       settings.characterReplacements.charReplacements.asterisk.enabled = false;
-      settings.characterReplacements.charReplacements.asterisk.replacement = '-';
+      settings.characterReplacements.charReplacements.asterisk.replacement =
+        '-';
       const result = processForbiddenChars('hello*world', settings);
       expect(result).toBe('helloworld'); // Strips asterisk instead of replacing
     });
@@ -501,14 +511,16 @@ describe('string-processing', () => {
     });
 
     it('should reverse Windows/Android characters unconditionally', () => {
-      settings.characterReplacements.charReplacements.asterisk.replacement = 'STAR';
+      settings.characterReplacements.charReplacements.asterisk.replacement =
+        'STAR';
       const result = reverseSafeLinkTarget('TitleSTARBold', settings);
       expect(result).toBe('Title*Bold');
     });
 
     it('should not reverse Windows/Android character when its individual toggle is off', () => {
       settings.characterReplacements.charReplacements.asterisk.enabled = false;
-      settings.characterReplacements.charReplacements.asterisk.replacement = 'STAR';
+      settings.characterReplacements.charReplacements.asterisk.replacement =
+        'STAR';
       const result = reverseSafeLinkTarget('TitleSTARBold', settings);
       expect(result).toBe('TitleSTARBold');
     });

@@ -95,6 +95,18 @@ describe('i18n', () => {
       expect(result).toBe('Hello John, you are 25 years old');
     });
 
+    it('should insert a variable containing $ patterns verbatim into a found translation', () => {
+      expect(
+        t('notifications.renamedTo', { filename: "Price $& tax $$ $` $' end" })
+      ).toBe("Renamed to “Price $& tax $$ $` $' end”");
+    });
+
+    it('should insert a variable containing $ patterns verbatim into a fallback', () => {
+      expect(
+        t('missing.key', { filename: 'Price $& tax $$' }, 'File {{filename}}')
+      ).toBe('File Price $& tax $$');
+    });
+
     it('should handle numeric variables', () => {
       const result = t('key', { count: 42 }, 'Count: {{count}}');
       expect(result).toBe('Count: 42');

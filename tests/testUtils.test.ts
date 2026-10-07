@@ -6,11 +6,11 @@ describe('createTestSettings', () => {
   it('should isolate nested state from DEFAULT_SETTINGS and from other instances', () => {
     // Captured before any mutation so the assertions compare against the pristine
     // defaults rather than whatever the mutation may have leaked into them.
-    const pristineExcludedFolders = [
-      ...DEFAULT_SETTINGS.exclusions.excludedFolders,
+    const pristineExcludedFiles = [
+      ...DEFAULT_SETTINGS.exclusions.excludedFiles,
     ];
-    const pristineFileNameExclusionCount =
-      DEFAULT_SETTINGS.exclusions.excludedFileNames.length;
+    const pristineExcludedTagCount =
+      DEFAULT_SETTINGS.exclusions.excludedTags.length;
 
     const first = createTestSettings();
     const second = createTestSettings();
@@ -20,24 +20,18 @@ describe('createTestSettings', () => {
     expect(first.core).not.toBe(DEFAULT_SETTINGS.core);
     expect(first.core).not.toBe(second.core);
 
-    first.exclusions.excludedFolders = ['Notes'];
-    first.exclusions.excludedFileNames.push({
-      text: 'draft',
-      onlyAtStart: false,
-      onlyWholeLine: false,
-      enabled: true,
-      caseSensitive: false,
-    });
+    first.exclusions.excludedFiles = ['Notes/'];
+    first.exclusions.excludedTags.push('#draft');
 
-    expect(DEFAULT_SETTINGS.exclusions.excludedFolders).toEqual(
-      pristineExcludedFolders
+    expect(DEFAULT_SETTINGS.exclusions.excludedFiles).toEqual(
+      pristineExcludedFiles
     );
-    expect(DEFAULT_SETTINGS.exclusions.excludedFileNames).toHaveLength(
-      pristineFileNameExclusionCount
+    expect(DEFAULT_SETTINGS.exclusions.excludedTags).toHaveLength(
+      pristineExcludedTagCount
     );
-    expect(second.exclusions.excludedFolders).toEqual(pristineExcludedFolders);
-    expect(second.exclusions.excludedFileNames).toHaveLength(
-      pristineFileNameExclusionCount
+    expect(second.exclusions.excludedFiles).toEqual(pristineExcludedFiles);
+    expect(second.exclusions.excludedTags).toHaveLength(
+      pristineExcludedTagCount
     );
   });
 
@@ -59,13 +53,13 @@ describe('createTestSettings', () => {
   it('should replace arrays wholesale rather than merging them item by item', () => {
     const settings = createTestSettings({
       exclusions: {
-        excludedFolders: ['Notes', 'Archive'],
+        excludedFiles: ['Notes/', 'Archive/'],
       },
     });
 
-    expect(settings.exclusions.excludedFolders).toEqual(['Notes', 'Archive']);
-    expect(settings.exclusions.matchSubfolders).toBe(
-      DEFAULT_SETTINGS.exclusions.matchSubfolders
+    expect(settings.exclusions.excludedFiles).toEqual(['Notes/', 'Archive/']);
+    expect(settings.exclusions.fileScopeStrategy).toBe(
+      DEFAULT_SETTINGS.exclusions.fileScopeStrategy
     );
   });
 });

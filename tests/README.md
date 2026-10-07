@@ -25,6 +25,7 @@ tests/
 │   ├── command-registrar.test.ts
 │   ├── disable-property-transition.test.ts
 │   ├── editor-lifecycle-first-line.test.ts
+│   ├── editor-lifecycle-linked-delay.test.ts
 │   ├── editor-lifecycle-syncing-guard.test.ts
 │   ├── event-handler-manager.test.ts
 │   ├── file-creation-coordinator.test.ts
@@ -34,11 +35,19 @@ tests/
 │   ├── rename-engine.test.ts
 │   ├── workspace-integration-creation-flow.test.ts
 │   └── workspace-integration.test.ts
+├── modals/                     # Dialog tests
+│   └── entry-edit-modal.test.ts
 ├── operations/                 # Batch operation tests
 │   ├── file-operations-title-insertion.test.ts
-│   └── file-operations.test.ts
+│   ├── file-operations.test.ts
+│   └── folder-operations.test.ts
 ├── settings/                   # Settings tab tests
+│   ├── character-replacements.test.ts
+│   ├── custom-replacements.test.ts
+│   ├── excluded-files.test.ts
+│   ├── exclusion-row-delete.test.ts
 │   ├── exclusions-add-item.test.ts
+│   ├── first-line-property.test.ts
 │   ├── general.test.ts
 │   ├── import-guard.test.ts
 │   ├── plugin-links.test.ts
@@ -53,8 +62,11 @@ tests/
 └── utils/                      # Utility module tests
     ├── content-reader.test.ts
     ├── debug.test.ts
+    ├── embedded-editors.test.ts
     ├── file-exclusions.test.ts
-    ├── page-preview.test.ts
+    ├── first-line-property-keys.test.ts
+    ├── frontmatter-edit.test.ts
+    ├── inbound-links.test.ts
     ├── property-value.test.ts
     ├── string-processing.test.ts
     └── tag-utils.test.ts
@@ -83,7 +95,7 @@ Tests run automatically on push via GitHub Actions (Node 20).
 
 | Module        | Tests | Coverage                                                                                           |
 | ------------- | ----- | -------------------------------------------------------------------------------------------------- |
-| Rename Engine | 76    | Rate limiting, frontmatter stripping, title extraction, cache management, editor change processing |
+| Rename Engine | 85    | Rate limiting, frontmatter stripping, title extraction, cache management, editor change processing |
 | Cache Manager | 34    | LRU cache, path reservation, file existence cache, lock management                                 |
 | Rate Limiter  | 38    | Per-key/global limits, time windows, expiration, performance                                       |
 | i18n          | 69    | Locale switching, translations, variable replacement, English/Russian plurals                      |
@@ -93,13 +105,13 @@ Tests run automatically on push via GitHub Actions (Node 20).
 | Module            | Tests | Coverage                                                                       |
 | ----------------- | ----- | ------------------------------------------------------------------------------ |
 | String Processing | 36    | Forbidden chars, replacements, safe links, maxLength                           |
-| File Exclusions   | 45    | Folders (+subfolders), tags (frontmatter + inline), properties, strategies     |
+| File Exclusions   | 72    | Excluded files (paths, regular expressions), tags (frontmatter + inline), properties, strategies |
 | Tag Utilities     | 41    | Normalization, YAML parsing, frontmatter stripping, child tag matching         |
-| Content Reader    | 30    | All read strategies (Editor/Cache/File), workspace search, page preview lookup |
-| Core Utilities    | 187   | Logging, headings, file name exclusions, disable properties                    |
+| Content Reader    | 31    | All read strategies (Editor/Cache/File), workspace search, page preview and Canvas card lookup |
+| Core Utilities    | 410   | Logging, headings, exclusion list normalization, disable properties |
 | Debug Utilities   | 25    | Setting logs, content output, dumps                                            |
 
-**Total: 1099 tests across 44 files** (`npx vitest run`)
+**Total: 1552 tests across 55 files** (`npx vitest run`)
 
 ### Not yet tested
 

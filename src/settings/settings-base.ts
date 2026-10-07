@@ -8,6 +8,12 @@ export interface FirstLineIsTitlePlugin {
   app: App;
   settings: PluginSettings;
   saveSettings(): Promise<void>;
+  /**
+   * Writes a timestamped settings backup at the vault root and resolves with its path,
+   * or `null` when the write failed. Declared here because the import modal types the
+   * plugin through this interface.
+   */
+  writeSettingsBackup(contents: string): Promise<string | null>;
   debugLog(settingName: string, value: unknown): void;
   editorLifecycle?: { initializeCheckingSystem(): void };
   renameEngine?: {
@@ -24,34 +30,9 @@ export interface FirstLineIsTitlePlugin {
   updatePropertyVisibility?: () => void;
   getCurrentTimestamp?: () => string;
   outputAllSettings?: () => void;
-  getTodayDateString?: () => string;
   cacheManager?: {
     clearReservedPaths(): void;
   };
-}
-
-/**
- * Updates accessibility for disabled rows (removes them from tab order)
- * @param container - The container element to search for disabled rows
- */
-export function updateDisabledRowsAccessibility(container: HTMLElement): void {
-  const disabledRows = container.querySelectorAll('.flit-row-disabled');
-  disabledRows.forEach((row: HTMLElement) => {
-    const interactiveElements = row.querySelectorAll(
-      'input, button, a, select, .dropdown, textarea'
-    );
-    interactiveElements.forEach((el: HTMLElement) => {
-      // Skip enable column toggles and action buttons (they should remain interactive)
-      if (
-        el.closest('.flit-enable-column') ||
-        el.closest('.flit-actions-column')
-      ) {
-        return;
-      }
-      el.tabIndex = -1;
-      el.setAttribute('aria-disabled', 'true');
-    });
-  });
 }
 
 export function addForbiddenCharProtection(
@@ -103,26 +84,66 @@ export function addForbiddenCharProtection(
   });
 }
 
-/**
- * Mounts a container for legacy imperative markup inside a declarative setting
- * row, carrying the `.flit-settings-page` class the pre-migration stylesheet is
- * scoped to.
- *
- * Must be used instead of appending to `settingEl` directly. Obsidian reuses the
- * same row element across re-renders and only rebuilds the info/control
- * children, so anything appended straight to `settingEl` survives and would
- * accumulate one copy per render. Clearing `settingEl` wholesale is not an
- * option either — that drops the name element and silently removes the row from
- * settings search.
- */
-export function mountLegacyHost(settingEl: HTMLElement): HTMLElement {
-  settingEl
-    .querySelectorAll(':scope > .flit-settings-page')
-    .forEach((stale) => stale.remove());
-  // Marks the row as a legacy host so the stylesheet can widen it without a
-  // :has() selector, which Obsidian's CSS lint flags for invalidation cost.
-  settingEl.addClass('flit-settings-page-host');
-  return settingEl.createDiv({ cls: 'flit-settings-page' });
+/** Adds a row's Edit button, drawn as Obsidian's own Maps settings draw theirs. */
+export function addEditButton(setting: Setting, editEntry: () => void): void {
+  setting.addExtraButton((button) =>
+    button
+      .setIcon('lucide-pen-line')
+      .setTooltip(t('settings.common.edit'))
+      .onClick(editEntry)
+  );
+}
+
+/** Adds a row's Delete button: a trash bin, as Obsidian's own Maps settings draw it, because the x that Obsidian 1.14.4 draws for a native list's `onDelete` cannot be changed. */
+export function addDeleteButton(
+  setting: Setting,
+  deleteEntry: () => void
+): void {
+  setting.addExtraButton((button) =>
+    button
+      .setIcon('lucide-trash-2')
+      .setTooltip(t('settings.common.delete'))
+      .onClick(deleteEntry)
+  );
+}
+
+export interface SummaryRowOptions {
+  /** Plain text: a list row's reconciliation key and its search text. */
+  name: string;
+  /** Display form of the name, for markup the plain `name` cannot carry; built per render because an inserted fragment empties. */
+  buildNameFragment?: () => DocumentFragment;
+  /** Built per render, for the same reason as `buildNameFragment`. */
+  buildDesc?: () => string | DocumentFragment;
+  /** User data stays out of the settings search index; static labels stay in it. */
+  searchable: boolean;
+  editEntry?: () => void;
+  deleteEntry?: () => void;
+}
+
+/** A compact row summarizing one entry, its Edit and Delete buttons ahead of any drag handle a native list appends; callers close over the entry object, never its index, because a reorder moves entries without re-rendering. */
+export function buildSummaryRow(
+  options: SummaryRowOptions
+): SettingDefinitionRender {
+  const {
+    name,
+    buildNameFragment,
+    buildDesc,
+    searchable,
+    editEntry,
+    deleteEntry,
+  } = options;
+  return {
+    name,
+    searchable,
+    render: (setting) => {
+      // Runs after the renderer's own setName, so the fragment replaces the plain name on every rebuild
+      if (buildNameFragment) setting.setName(buildNameFragment());
+      const desc = buildDesc?.();
+      if (desc) setting.setDesc(desc);
+      if (editEntry) addEditButton(setting, editEntry);
+      if (deleteEntry) addDeleteButton(setting, deleteEntry);
+    },
+  };
 }
 
 /**
@@ -135,6 +156,27 @@ export function mountLegacyHost(settingEl: HTMLElement): HTMLElement {
  */
 export function quoteLabel(text: string): string {
   return getCurrentLocale() === 'ru' ? `«${text}»` : `“${text}”`;
+}
+
+/**
+ * "Replaced with “…”" followed by `suffix`, with the replacement in a span that
+ * keeps its whitespace as typed: a description collapses runs of spaces, so
+ * `a  b` would otherwise read as `a b`.
+ */
+export function buildReplacedWithSummary(
+  replacement: string,
+  suffix: string
+): DocumentFragment {
+  // A sentinel splits the translated sentence around the replacement, so each locale keeps its own word order and quotes
+  const [before, after = ''] = t(
+    'settings.characterReplacements.summary.replacedWith',
+    { replacement: '\u0000' }
+  ).split('\u0000');
+  return createFragment((frag) => {
+    frag.appendText(before);
+    frag.createSpan({ cls: 'flit-rule-text', text: replacement });
+    frag.appendText(after + suffix);
+  });
 }
 
 /**

@@ -89,19 +89,17 @@ describe('Exclusions list add affordances', () => {
   it('gives every list a native addItem rather than a sibling add row', () => {
     const { lists } = buildHarness();
 
-    expect(lists).toHaveLength(4);
+    expect(lists).toHaveLength(3);
     expect(lists.map((list) => list.addItem?.name)).toEqual([
-      'settings.exclusions.folders.addButton',
+      'settings.exclusions.files.addButton',
       'settings.exclusions.tags.addButton',
       'settings.exclusions.properties.addButton',
-      'settings.exclusions.fileNames.addButton',
     ]);
   });
 
-  describe.each([
-    { label: 'folders', index: 0, key: 'excludedFolders' as const },
-    { label: 'tags', index: 1, key: 'excludedTags' as const },
-  ])('$label', ({ index, key }) => {
+  describe('tags', () => {
+    const index = 1;
+    const key = 'excludedTags';
     let harness: Harness;
 
     beforeEach(() => {
@@ -188,52 +186,15 @@ describe('Exclusions list add affordances', () => {
     });
   });
 
-  describe('file names', () => {
-    const entry = {
-      text: 'draft',
-      onlyAtStart: false,
-      onlyWholeLine: false,
-      enabled: true,
-      caseSensitive: false,
-    };
-    let harness: Harness;
-
-    beforeEach(() => {
-      harness = buildHarness();
-    });
-
-    it('appends an entry', async () => {
-      const { affordance } = mountListGroup();
-      harness.exclusions.excludedFileNames = [{ ...entry }];
-
-      harness.lists[3].addItem?.action(affordance);
-      await flush();
-
-      expect(harness.exclusions.excludedFileNames).toHaveLength(2);
-      expect(harness.exclusions.excludedFileNames[1].text).toBe('');
-      expect(harness.update).toHaveBeenCalled();
-    });
-
-    it('refuses to stack a second blank entry', () => {
-      const { affordance } = mountListGroup();
-      harness.exclusions.excludedFileNames = [{ ...entry, text: '' }];
-
-      harness.lists[3].addItem?.action(affordance);
-
-      expect(harness.exclusions.excludedFileNames).toHaveLength(1);
-      expect(harness.update).not.toHaveBeenCalled();
-    });
-  });
-
   it('skips the focus follow-up when the affordance has no list group', async () => {
     const harness = buildHarness();
     // Detached from any `.setting-group`: the add must still land the entry.
     const orphan = document.createElement('div');
     document.body.appendChild(orphan);
 
-    harness.lists[0].addItem?.action(orphan);
+    harness.lists[1].addItem?.action(orphan);
     await flush();
 
-    expect(harness.exclusions.excludedFolders).toEqual(['']);
+    expect(harness.exclusions.excludedTags).toEqual(['']);
   });
 });

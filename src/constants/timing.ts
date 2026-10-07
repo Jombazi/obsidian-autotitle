@@ -70,8 +70,14 @@ export const TIMING = {
   /** Threshold for stale file locks (cleaned up during maintenance) */
   FILE_LOCK_STALE_THRESHOLD_MS: 60000,
 
-  /** A page preview saves 2 s after its last keystroke, possibly after it has closed; background alias updates stay allowed this long after an edit */
-  PAGE_PREVIEW_SAVE_GRACE_MS: 5000,
+  /** A page preview saves 2 s after its first unsaved keystroke, so at most 2 s after its last; a Canvas card does the same while it stays selected, and saves at once on deselect. Either save can land after the embed's editor is gone, so background alias updates stay allowed this long after an edit */
+  EMBED_SAVE_GRACE_MS: 5000,
+
+  /** Each rename of a linked note raises Obsidian's link-update notices, so a note another file links to waits for typing to pause before its rename and first line property update; a longer Check interval wins. Applies whatever "Automatically update internal links" says: with it off, each rename opens Obsidian's "Update links" dialog instead, and Canvas shows its notice either way */
+  LINKED_NOTE_RENAME_DELAY_MS: 2000,
+
+  /** Right after a rename Obsidian re-resolves the note's links asynchronously, and a canvas-linked note reads as unlinked for about 530 ms, so a note seen linked this recently still counts as linked */
+  LINKED_NOTE_MEMORY_MS: 5000,
 } as const;
 
 export const LIMITS = {

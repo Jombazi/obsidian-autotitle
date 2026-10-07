@@ -1,6 +1,6 @@
 import { App, TFile, Editor, MarkdownView } from 'obsidian';
 import FirstLineIsTitlePlugin from '../../main';
-import { findPagePreviewEditors } from './page-preview';
+import { findEmbeddedEditors } from './embedded-editors';
 
 /**
  * Options for reading file content
@@ -10,7 +10,7 @@ export interface ContentReaderOptions {
   providedContent?: string;
   /** Already have editor instance */
   providedEditor?: Editor;
-  /** Search open editors for this note, page previews included */
+  /** Search open editors for this note, page previews and Canvas cards included */
   searchWorkspace?: boolean;
   /** Use vault.read instead of vault.cachedRead when falling back */
   preferFresh?: boolean;
@@ -66,7 +66,7 @@ export async function readFileContent(
       return content;
     }
 
-    // Strategy 3: Search open editors for this note, page previews included, if requested
+    // Strategy 3: Search open editors for this note, page previews and Canvas cards included, if requested
     if (searchWorkspace) {
       const editorContent = findEditorContent(app, file);
       if (editorContent !== null) {
@@ -141,19 +141,16 @@ export async function readFileContent(
 
 /**
  * Search workspace for an editor matching the given file
- * Checks page previews editing the note first, then the active view, then open Markdown leaves
+ * Checks page previews and Canvas cards editing the note first, then the active view, then open Markdown leaves
  * @param app - Obsidian App instance
  * @param file - File to find editor for
  * @returns Editor content if found, null otherwise
  */
 function findEditorContent(app: App, file: TFile): string | null {
-  // Page previews match the note by file identity, so a preview of another note is never read. Empty content is not trusted: likely transient state after file operations.
-  const previewContent = findPagePreviewEditors(
-    app,
-    file
-  )[0]?.editor?.getValue();
-  if (previewContent) {
-    return previewContent;
+  // Page previews and Canvas cards match the note by file identity, so an embed of another note is never read. Empty content is not trusted: likely transient state after file operations.
+  const embedContent = findEmbeddedEditors(app, file)[0]?.editor?.getValue();
+  if (embedContent) {
+    return embedContent;
   }
 
   // Check active view's editor as fallback - only if file matches

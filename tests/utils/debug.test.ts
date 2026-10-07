@@ -246,7 +246,7 @@ describe('DebugUtils', () => {
     it('should output complete settings object', () => {
       plugin.settings.core.debug = true;
       plugin.settings.core.charCount = 999;
-      plugin.settings.exclusions.excludedFolders = ['test-folder'];
+      plugin.settings.exclusions.excludedFiles = ['test-folder/'];
 
       debugUtils.outputAllSettings();
 
@@ -256,8 +256,8 @@ describe('DebugUtils', () => {
       const outputtedSettings = JSON.parse(jsonCall[0]);
 
       expect(outputtedSettings.core.charCount).toBe(999);
-      expect(outputtedSettings.exclusions.excludedFolders).toContain(
-        'test-folder'
+      expect(outputtedSettings.exclusions.excludedFiles).toContain(
+        'test-folder/'
       );
     });
   });

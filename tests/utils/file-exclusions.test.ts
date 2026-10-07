@@ -1,16 +1,18 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import {
-  isFileInConfiguredFolders,
+  compileExcludedFileFilters,
   fileHasExcludedProperties,
+  isPathExcludedByFileRules,
   shouldProcessFile,
-  isExcludedByFileName,
+  isFolderFullyExcludedByFileRules,
+  isTagFullyExcludedByTagRules,
 } from '../../src/utils/file-exclusions';
 import {
   createTestSettings,
   createMockFile,
   createMockApp,
 } from '../testUtils';
-import { FileNameExclusion, PluginSettings } from '../../src/types';
+import { EXCLUSION_STRATEGY, PluginSettings } from '../../src/types';
 import { App, TFolder } from '../mockObsidian';
 
 describe('file-exclusions', () => {
@@ -22,99 +24,132 @@ describe('file-exclusions', () => {
     app = createMockApp();
   });
 
-  describe('isFileInConfiguredFolders', () => {
-    beforeEach(() => {
-      settings.exclusions.excludedFolders = ['Notes', 'Archive'];
-      settings.exclusions.matchSubfolders = false;
+  // Each case pins Obsidian 1.14.4's own Excluded files behavior (MetadataCache.updateUserIgnoreFilters)
+  describe('compileExcludedFileFilters', () => {
+    const matches = (entries: string[], path: string): boolean =>
+      compileExcludedFileFilters(entries).some((filter) => filter.test(path));
+
+    describe('path prefixes', () => {
+      it('should cover every note under a folder entry', () => {
+        expect(matches(['Notes/'], 'Notes/a.md')).toBe(true);
+        expect(matches(['Notes/'], 'Notes/a/b.md')).toBe(true);
+        expect(matches(['Notes/'], 'Other/Notes/a.md')).toBe(false);
+      });
+
+      it('should match a prefix without a slash beyond the folder, as Obsidian does', () => {
+        expect(matches(['Notes'], 'Notes/a.md')).toBe(true);
+        expect(matches(['Notes'], 'Notes 2/x.md')).toBe(true);
+        expect(matches(['Notes'], 'Notes.md')).toBe(true);
+      });
+
+      it('should ignore case', () => {
+        expect(matches(['notes/'], 'Notes/a.md')).toBe(true);
+        expect(matches(['NOTES/'], 'notes/a.md')).toBe(true);
+      });
+
+      it('should treat regex metacharacters in a path literally', () => {
+        expect(matches(['Notes (old)/'], 'Notes (old)/a.md')).toBe(true);
+        expect(matches(['a.b/'], 'aXb/c.md')).toBe(false);
+        expect(matches(['[draft]'], '[draft] a.md')).toBe(true);
+      });
+
+      it('should match a full note path entry', () => {
+        expect(matches(['Notes/a.md'], 'Notes/a.md')).toBe(true);
+        expect(matches(['Notes/a.md'], 'Notes/b.md')).toBe(false);
+      });
+
+      it('should trim entries and skip blank ones', () => {
+        expect(compileExcludedFileFilters(['', '   '])).toHaveLength(0);
+        expect(matches(['  Notes/  '], 'Notes/a.md')).toBe(true);
+      });
     });
 
-    it('should return true if file is in configured folder', () => {
-      const file = createMockFile('Notes/test.md');
-      file.parent = new TFolder('Notes');
+    describe('regular expressions', () => {
+      it('should match a slash-wrapped entry anywhere in the path, ignoring case', () => {
+        expect(matches(['/draft-/'], 'Notes/draft-a.md')).toBe(true);
+        expect(matches(['/draft-/'], 'DRAFT-b.md')).toBe(true);
+        expect(matches(['/draft-/'], 'Notes/final.md')).toBe(false);
+      });
 
-      const result = isFileInConfiguredFolders(file, settings);
-      expect(result).toBe(true);
+      it('should honor regex syntax inside the slashes', () => {
+        expect(matches(['/^daily-\\d+/'], 'daily-12.md')).toBe(true);
+        expect(matches(['/^daily-\\d+/'], 'Notes/daily-12.md')).toBe(false);
+      });
+
+      it('should read a three-character entry as a regex and `//` as a plain prefix', () => {
+        expect(matches(['/a/'], 'Notes/a.md')).toBe(true);
+        expect(matches(['/a/'], 'b.md')).toBe(false);
+        // `//` is a literal prefix no vault path starts with
+        expect(matches(['//'], 'Notes/a.md')).toBe(false);
+        expect(matches(['//'], '//a.md')).toBe(true);
+      });
+
+      it('should skip an entry whose regex does not compile', () => {
+        expect(
+          compileExcludedFileFilters(['/[unclosed/', 'Notes/'])
+        ).toHaveLength(1);
+        expect(matches(['/[unclosed/'], '[unclosed.md')).toBe(false);
+      });
+    });
+  });
+
+  describe('isPathExcludedByFileRules', () => {
+    describe('"Only exclude..." strategy', () => {
+      beforeEach(() => {
+        settings.exclusions.fileScopeStrategy = EXCLUSION_STRATEGY.ONLY_EXCLUDE;
+      });
+
+      it('should exclude nothing when the list is empty', () => {
+        settings.exclusions.excludedFiles = [];
+        expect(isPathExcludedByFileRules('Notes/a.md', settings)).toBe(false);
+      });
+
+      it('should exclude matching paths only', () => {
+        settings.exclusions.excludedFiles = ['Archive/', '/draft-/'];
+        expect(isPathExcludedByFileRules('Archive/a.md', settings)).toBe(true);
+        expect(isPathExcludedByFileRules('Notes/draft-a.md', settings)).toBe(
+          true
+        );
+        expect(isPathExcludedByFileRules('Notes/a.md', settings)).toBe(false);
+      });
+
+      it('should exclude nothing when every entry is an invalid regex', () => {
+        settings.exclusions.excludedFiles = ['/[unclosed/'];
+        expect(isPathExcludedByFileRules('Notes/a.md', settings)).toBe(false);
+      });
     });
 
-    it('should return false if file is not in configured folder', () => {
-      const file = createMockFile('Documents/test.md');
-      file.parent = new TFolder('Documents');
+    describe('"Exclude all except..." strategy', () => {
+      beforeEach(() => {
+        settings.exclusions.fileScopeStrategy =
+          EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT;
+      });
 
-      const result = isFileInConfiguredFolders(file, settings);
-      expect(result).toBe(false);
-    });
+      it('should spare notes that match', () => {
+        settings.exclusions.excludedFiles = ['Notes/inc/'];
+        expect(isPathExcludedByFileRules('Notes/inc/a.md', settings)).toBe(
+          false
+        );
+        expect(isPathExcludedByFileRules('notes/INC/b/c.md', settings)).toBe(
+          false
+        );
+      });
 
-    it('should return false when no folders configured', () => {
-      settings.exclusions.excludedFolders = [];
-      const file = createMockFile('Notes/test.md');
-      file.parent = new TFolder('Notes');
+      it('should exclude notes that do not match', () => {
+        settings.exclusions.excludedFiles = ['Notes/inc/'];
+        expect(isPathExcludedByFileRules('Notes/a.md', settings)).toBe(true);
+        expect(isPathExcludedByFileRules('top.md', settings)).toBe(true);
+      });
 
-      const result = isFileInConfiguredFolders(file, settings);
-      expect(result).toBe(false);
-    });
+      it('should exclude everything when the list is empty', () => {
+        settings.exclusions.excludedFiles = [];
+        expect(isPathExcludedByFileRules('Notes/a.md', settings)).toBe(true);
+      });
 
-    it('should filter out empty folder strings', () => {
-      settings.exclusions.excludedFolders = ['Notes', '', '  '];
-      const file = createMockFile('Notes/test.md');
-      file.parent = new TFolder('Notes');
-
-      const result = isFileInConfiguredFolders(file, settings);
-      expect(result).toBe(true);
-    });
-
-    it('should check subfolders when matchSubfolders is enabled', () => {
-      settings.exclusions.matchSubfolders = true;
-      settings.exclusions.excludedFolders = ['Notes'];
-
-      const file = createMockFile('Notes/Work/test.md');
-      file.parent = new TFolder('Notes/Work');
-
-      const result = isFileInConfiguredFolders(file, settings);
-      expect(result).toBe(true);
-    });
-
-    it('should not check subfolders when matchSubfolders is disabled', () => {
-      settings.exclusions.matchSubfolders = false;
-      settings.exclusions.excludedFolders = ['Notes'];
-
-      const file = createMockFile('Notes/Work/test.md');
-      file.parent = new TFolder('Notes/Work');
-
-      const result = isFileInConfiguredFolders(file, settings);
-      expect(result).toBe(false);
-    });
-
-    it('should handle root folder "/" correctly', () => {
-      settings.exclusions.excludedFolders = ['/'];
-      const file = createMockFile('test.md');
-      file.parent = new TFolder('');
-      file.parent.path = '';
-
-      const result = isFileInConfiguredFolders(file, settings);
-      expect(result).toBe(true);
-    });
-
-    it('should not check subfolders of root folder', () => {
-      settings.exclusions.matchSubfolders = true;
-      settings.exclusions.excludedFolders = ['/'];
-
-      const file = createMockFile('Notes/test.md');
-      file.parent = new TFolder('Notes');
-
-      const result = isFileInConfiguredFolders(file, settings);
-      // Root folder "/" has no subfolders to check
-      expect(result).toBe(false);
-    });
-
-    it('should handle deeply nested subfolders', () => {
-      settings.exclusions.matchSubfolders = true;
-      settings.exclusions.excludedFolders = ['Notes'];
-
-      const file = createMockFile('Notes/Work/Projects/2024/test.md');
-      file.parent = new TFolder('Notes/Work/Projects/2024');
-
-      const result = isFileInConfiguredFolders(file, settings);
-      expect(result).toBe(true);
+      it('should exclude everything when only blank or invalid entries remain', () => {
+        settings.exclusions.excludedFiles = ['  ', '/[unclosed/'];
+        expect(isPathExcludedByFileRules('Notes/a.md', settings)).toBe(true);
+      });
     });
   });
 
@@ -264,10 +299,10 @@ describe('file-exclusions', () => {
 
   describe('shouldProcessFile', () => {
     beforeEach(() => {
-      settings.exclusions.folderScopeStrategy = 'Only exclude...';
+      settings.exclusions.fileScopeStrategy = 'Only exclude...';
       settings.exclusions.tagScopeStrategy = 'Only exclude...';
       settings.exclusions.propertyScopeStrategy = 'Only exclude...';
-      settings.exclusions.excludedFolders = [];
+      settings.exclusions.excludedFiles = [];
       settings.exclusions.excludedTags = [];
       settings.exclusions.excludedProperties = [];
     });
@@ -282,7 +317,7 @@ describe('file-exclusions', () => {
       });
 
       it('should not process file in excluded folder', () => {
-        settings.exclusions.excludedFolders = ['Archive'];
+        settings.exclusions.excludedFiles = ['Archive/'];
         const file = createMockFile('Archive/test.md');
         file.parent = new TFolder('Archive');
 
@@ -291,22 +326,30 @@ describe('file-exclusions', () => {
       });
 
       it('should process file not in excluded folder', () => {
-        settings.exclusions.excludedFolders = ['Archive'];
+        settings.exclusions.excludedFiles = ['Archive/'];
         const file = createMockFile('Notes/test.md');
         file.parent = new TFolder('Notes');
 
         const result = shouldProcessFile(file, settings, app);
         expect(result).toBe(true);
       });
+
+      it("should test the note's full path, so an entry can match its name", () => {
+        settings.exclusions.excludedFiles = ['/draft-/'];
+        const file = createMockFile('Notes/draft-a.md');
+        file.parent = new TFolder('Notes');
+
+        expect(shouldProcessFile(file, settings, app)).toBe(false);
+      });
     });
 
     describe('"Exclude all except..." strategy', () => {
       beforeEach(() => {
-        settings.exclusions.folderScopeStrategy = 'Exclude all except...';
+        settings.exclusions.fileScopeStrategy = 'Exclude all except...';
       });
 
-      it('should not process any files when no folders configured', () => {
-        settings.exclusions.excludedFolders = [];
+      it('should not process any files when no entries are configured', () => {
+        settings.exclusions.excludedFiles = [];
         const file = createMockFile('Notes/test.md');
         file.parent = new TFolder('Notes');
 
@@ -315,7 +358,7 @@ describe('file-exclusions', () => {
       });
 
       it('should process file in included folder', () => {
-        settings.exclusions.excludedFolders = ['Notes'];
+        settings.exclusions.excludedFiles = ['Notes/'];
         const file = createMockFile('Notes/test.md');
         file.parent = new TFolder('Notes');
 
@@ -324,7 +367,7 @@ describe('file-exclusions', () => {
       });
 
       it('should not process file not in included folder', () => {
-        settings.exclusions.excludedFolders = ['Notes'];
+        settings.exclusions.excludedFiles = ['Notes/'];
         const file = createMockFile('Archive/test.md');
         file.parent = new TFolder('Archive');
 
@@ -335,19 +378,19 @@ describe('file-exclusions', () => {
 
     describe('exclusion overrides', () => {
       beforeEach(() => {
-        settings.exclusions.excludedFolders = ['Archive'];
+        settings.exclusions.excludedFiles = ['Archive/'];
         settings.exclusions.excludedTags = ['archived'];
         settings.exclusions.excludedProperties = [
           { key: 'status', value: 'draft' },
         ];
       });
 
-      it('should ignore folder exclusions when ignoreFolder is true', () => {
+      it('should ignore path exclusions when ignoreFiles is true', () => {
         const file = createMockFile('Archive/test.md');
         file.parent = new TFolder('Archive');
 
         const result = shouldProcessFile(file, settings, app, undefined, {
-          ignoreFolder: true,
+          ignoreFiles: true,
         });
         expect(result).toBe(true);
       });
@@ -386,7 +429,7 @@ describe('file-exclusions', () => {
         });
 
         const result = shouldProcessFile(file, settings, app, undefined, {
-          ignoreFolder: true,
+          ignoreFiles: true,
           ignoreTag: true,
           ignoreProperty: true,
         });
@@ -396,9 +439,9 @@ describe('file-exclusions', () => {
 
     describe('combined exclusions', () => {
       it('should exclude if ANY exclusion type matches ("Only exclude..." mode)', () => {
-        settings.exclusions.folderScopeStrategy = 'Only exclude...';
+        settings.exclusions.fileScopeStrategy = 'Only exclude...';
         settings.exclusions.tagScopeStrategy = 'Only exclude...';
-        settings.exclusions.excludedFolders = ['Archive'];
+        settings.exclusions.excludedFiles = ['Archive/'];
         settings.exclusions.excludedTags = ['archived'];
 
         const file = createMockFile('Archive/test.md');
@@ -412,9 +455,9 @@ describe('file-exclusions', () => {
         expect(result).toBe(false);
       });
 
-      it('should exclude if only folder matches', () => {
-        settings.exclusions.folderScopeStrategy = 'Only exclude...';
-        settings.exclusions.excludedFolders = ['Archive'];
+      it('should exclude if only the path matches', () => {
+        settings.exclusions.fileScopeStrategy = 'Only exclude...';
+        settings.exclusions.excludedFiles = ['Archive/'];
 
         const file = createMockFile('Archive/test.md');
         file.parent = new TFolder('Archive');
@@ -446,119 +489,241 @@ describe('file-exclusions', () => {
     });
   });
 
-  describe('isExcludedByFileName', () => {
-    const rule = (
-      text: string,
-      overrides: Partial<FileNameExclusion> = {}
-    ): FileNameExclusion => ({
-      text,
-      onlyAtStart: false,
-      onlyWholeLine: false,
-      enabled: true,
-      caseSensitive: false,
-      ...overrides,
-    });
+  describe('isFolderFullyExcludedByFileRules', () => {
+    const notes = () => new TFolder('Notes');
+    const work = () => new TFolder('Notes/Work');
+    const vaultRoot = () => new TFolder('/');
 
     beforeEach(() => {
-      settings.exclusions.fileNameScopeStrategy = 'Only exclude...';
-      settings.exclusions.excludedFileNames = [];
+      settings.exclusions.excludedFiles = [];
     });
 
     describe('"Only exclude..." strategy', () => {
-      it('should exclude a file whose name matches a rule', () => {
-        settings.exclusions.excludedFileNames = [rule('draft')];
-
-        expect(isExcludedByFileName('draft note.md', settings)).toBe(true);
+      beforeEach(() => {
+        settings.exclusions.fileScopeStrategy = EXCLUSION_STRATEGY.ONLY_EXCLUDE;
       });
 
-      it('should not exclude a file whose name matches no rule', () => {
-        settings.exclusions.excludedFileNames = [rule('draft')];
-
-        expect(isExcludedByFileName('final note.md', settings)).toBe(false);
+      it('should not report a folder as fully excluded when the list is empty', () => {
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(false);
       });
 
-      it('should exclude nothing when the list is empty', () => {
-        expect(isExcludedByFileName('draft note.md', settings)).toBe(false);
+      it('should report a folder whose own entry is listed, ignoring case', () => {
+        settings.exclusions.excludedFiles = ['notes/'];
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(true);
+      });
+
+      it('should report a subfolder covered by a parent entry', () => {
+        settings.exclusions.excludedFiles = ['Notes/'];
+        expect(isFolderFullyExcludedByFileRules(work(), settings)).toBe(true);
+      });
+
+      it('should report a folder covered by a slash-less prefix entry', () => {
+        settings.exclusions.excludedFiles = ['Note'];
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(true);
+      });
+
+      it('should not report a parent when only a subfolder is listed', () => {
+        settings.exclusions.excludedFiles = ['Notes/Work/'];
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(false);
+      });
+
+      it('should not report a folder a regex might only partly cover', () => {
+        settings.exclusions.excludedFiles = ['/^Notes\\//'];
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(false);
+      });
+
+      it('should never report the vault root', () => {
+        settings.exclusions.excludedFiles = ['Notes/'];
+        expect(isFolderFullyExcludedByFileRules(vaultRoot(), settings)).toBe(
+          false
+        );
       });
     });
 
     describe('"Exclude all except..." strategy', () => {
       beforeEach(() => {
-        settings.exclusions.fileNameScopeStrategy = 'Exclude all except...';
+        settings.exclusions.fileScopeStrategy =
+          EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT;
       });
 
-      it('should not exclude a file whose name matches a rule', () => {
-        settings.exclusions.excludedFileNames = [rule('draft')];
-
-        expect(isExcludedByFileName('draft note.md', settings)).toBe(false);
+      it('should report every folder, the root included, when the list is empty', () => {
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(true);
+        expect(isFolderFullyExcludedByFileRules(vaultRoot(), settings)).toBe(
+          true
+        );
       });
 
-      it('should exclude a file whose name matches no rule', () => {
-        settings.exclusions.excludedFileNames = [rule('draft')];
-
-        expect(isExcludedByFileName('final note.md', settings)).toBe(true);
+      it('should report every folder when only invalid regexes are listed', () => {
+        settings.exclusions.excludedFiles = ['/[unclosed/'];
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(true);
       });
 
-      it('should exclude everything when the list is empty', () => {
-        expect(isExcludedByFileName('draft note.md', settings)).toBe(true);
+      it('should report a folder no entry touches', () => {
+        settings.exclusions.excludedFiles = ['Archive/'];
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(true);
       });
 
-      // A rule the matcher skips must not count as a target either: if it did, the
-      // allow-list would exclude the whole vault with no name able to satisfy it.
-      it('should exclude everything when every rule is disabled', () => {
-        settings.exclusions.excludedFileNames = [
-          rule('draft', { enabled: false }),
-        ];
-
-        expect(isExcludedByFileName('draft note.md', settings)).toBe(true);
-        expect(isExcludedByFileName('final note.md', settings)).toBe(true);
+      it('should not report a folder whose own entry spares it', () => {
+        settings.exclusions.excludedFiles = ['NOTES/'];
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(false);
       });
 
-      it('should exclude everything when every rule has blank text', () => {
-        settings.exclusions.excludedFileNames = [rule('')];
-
-        expect(isExcludedByFileName('draft note.md', settings)).toBe(true);
+      it('should not report a subfolder a covering parent entry spares', () => {
+        settings.exclusions.excludedFiles = ['Notes/'];
+        expect(isFolderFullyExcludedByFileRules(work(), settings)).toBe(false);
       });
 
-      it('should still honour a live rule alongside a disabled one', () => {
-        settings.exclusions.excludedFileNames = [
-          rule('draft', { enabled: false }),
-          rule('keep'),
-        ];
+      it('should not report a folder holding a spared subfolder or note', () => {
+        settings.exclusions.excludedFiles = ['Notes/Work/'];
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(false);
+        settings.exclusions.excludedFiles = ['Notes/a.md'];
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(false);
+      });
 
-        expect(isExcludedByFileName('keep this.md', settings)).toBe(false);
-        expect(isExcludedByFileName('draft note.md', settings)).toBe(true);
+      it('should not report any folder while a regex is listed', () => {
+        settings.exclusions.excludedFiles = ['Archive/', '/draft-/'];
+        expect(isFolderFullyExcludedByFileRules(notes(), settings)).toBe(false);
+      });
+
+      it('should not report the vault root while any entry is listed', () => {
+        settings.exclusions.excludedFiles = ['Archive/'];
+        expect(isFolderFullyExcludedByFileRules(vaultRoot(), settings)).toBe(
+          false
+        );
       });
     });
+  });
 
-    // The empty-list verdict has to match the sibling sections': an empty allow-list
-    // excludes the whole vault there too, and a split here would be silent.
-    describe('empty-list parity with the folder strategy', () => {
+  describe('isTagFullyExcludedByTagRules', () => {
+    let getTags: Mock<() => Record<string, number>>;
+
+    beforeEach(() => {
+      settings.exclusions.tagScopeStrategy = EXCLUSION_STRATEGY.ONLY_EXCLUDE;
+      settings.exclusions.tagMatchingMode = 'In Properties and note body';
+      settings.exclusions.matchSubtags = true;
+      settings.exclusions.excludedTags = [];
+      // Obsidian's tag tree: keys carry the "#" and list a parent for every subtag.
+      getTags = vi.fn(() => ({ '#project': 3, '#project/alpha': 1 }));
+      app.metadataCache.getTags = getTags;
+    });
+
+    describe('"Only exclude..." strategy', () => {
+      it('should not report a tag as fully excluded when the list is empty', () => {
+        expect(isTagFullyExcludedByTagRules('project', settings, app)).toBe(
+          false
+        );
+      });
+
+      it('should report a listed tag as fully excluded, with or without its "#"', () => {
+        settings.exclusions.excludedTags = ['#project'];
+
+        expect(isTagFullyExcludedByTagRules('project', settings, app)).toBe(
+          true
+        );
+        expect(isTagFullyExcludedByTagRules('#project', settings, app)).toBe(
+          true
+        );
+      });
+
+      it('should not report an unlisted tag as fully excluded', () => {
+        settings.exclusions.excludedTags = ['#archive'];
+
+        expect(isTagFullyExcludedByTagRules('project', settings, app)).toBe(
+          false
+        );
+      });
+
+      it('should fold case when matching tags', () => {
+        settings.exclusions.excludedTags = ['#Project'];
+
+        expect(isTagFullyExcludedByTagRules('PROJECT', settings, app)).toBe(
+          true
+        );
+      });
+
+      it('should report a subtag as fully excluded when its parent tag is listed under subtag matching', () => {
+        settings.exclusions.excludedTags = ['#project'];
+
+        expect(
+          isTagFullyExcludedByTagRules('project/alpha', settings, app)
+        ).toBe(true);
+      });
+
+      it('should not report a subtag as fully excluded through its listed parent when subtag matching is off', () => {
+        settings.exclusions.excludedTags = ['#project'];
+        settings.exclusions.matchSubtags = false;
+
+        expect(
+          isTagFullyExcludedByTagRules('project/alpha', settings, app)
+        ).toBe(false);
+      });
+
+      it('should not read the tag tree when subtag matching settles the answer', () => {
+        settings.exclusions.excludedTags = ['#project'];
+
+        isTagFullyExcludedByTagRules('project', settings, app);
+
+        expect(getTags).not.toHaveBeenCalled();
+      });
+
+      it('should not report a listed tag as fully excluded when subtag matching is off and the tree holds an unlisted subtag', () => {
+        settings.exclusions.excludedTags = ['#project'];
+        settings.exclusions.matchSubtags = false;
+
+        expect(isTagFullyExcludedByTagRules('project', settings, app)).toBe(
+          false
+        );
+      });
+
+      it('should report a listed tag as fully excluded when subtag matching is off and every subtag in the tree is listed', () => {
+        settings.exclusions.excludedTags = ['#project', '#Project/Alpha'];
+        settings.exclusions.matchSubtags = false;
+
+        expect(isTagFullyExcludedByTagRules('project', settings, app)).toBe(
+          true
+        );
+      });
+
+      it.each(['In Properties only', 'In note body only'] as const)(
+        'should not report a listed tag as fully excluded when tag matching reads one source only: %s',
+        (mode) => {
+          settings.exclusions.excludedTags = ['#project'];
+          settings.exclusions.tagMatchingMode = mode;
+
+          expect(isTagFullyExcludedByTagRules('project', settings, app)).toBe(
+            false
+          );
+        }
+      );
+    });
+
+    describe('"Exclude all except..." strategy', () => {
       beforeEach(() => {
-        settings.exclusions.excludedFolders = [];
-        settings.exclusions.excludedTags = [];
-        settings.exclusions.excludedProperties = [];
-        settings.exclusions.tagScopeStrategy = 'Only exclude...';
-        settings.exclusions.propertyScopeStrategy = 'Only exclude...';
+        settings.exclusions.tagScopeStrategy =
+          EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT;
       });
 
-      it('should exclude nothing under "Only exclude...", as folders do', () => {
-        const file = createMockFile('Notes/test.md');
-        file.parent = new TFolder('Notes');
-        settings.exclusions.folderScopeStrategy = 'Only exclude...';
-
-        expect(shouldProcessFile(file, settings, app)).toBe(true);
-        expect(isExcludedByFileName('test.md', settings)).toBe(false);
+      it('should report every tag as fully excluded when the list is empty', () => {
+        expect(isTagFullyExcludedByTagRules('project', settings, app)).toBe(
+          true
+        );
       });
 
-      it('should exclude everything under "Exclude all except...", as folders do', () => {
-        const file = createMockFile('Notes/test.md');
-        file.parent = new TFolder('Notes');
-        settings.exclusions.folderScopeStrategy = 'Exclude all except...';
-        settings.exclusions.fileNameScopeStrategy = 'Exclude all except...';
+      it('should not report a listed tag as fully excluded', () => {
+        settings.exclusions.excludedTags = ['#project'];
 
-        expect(shouldProcessFile(file, settings, app)).toBe(false);
-        expect(isExcludedByFileName('test.md', settings)).toBe(true);
+        expect(isTagFullyExcludedByTagRules('project', settings, app)).toBe(
+          false
+        );
+      });
+
+      // A note carrying the unlisted tag can also carry a listed one, which only the note can tell.
+      it('should not report an unlisted tag as fully excluded', () => {
+        settings.exclusions.excludedTags = ['#archive'];
+
+        expect(isTagFullyExcludedByTagRules('project', settings, app)).toBe(
+          false
+        );
       });
     });
   });

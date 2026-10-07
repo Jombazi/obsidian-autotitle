@@ -11,15 +11,6 @@ export function filterNonEmpty(items: string[]): string[] {
 }
 
 /**
- * FLIT stores the vault root as "/", while every path normalizer — Obsidian's
- * `normalizePath` included — strips it to "". Folder path helpers short-circuit on
- * this so a root rule survives normalization.
- */
-export function isRootFolderPath(path: string): boolean {
-  return path.trim() === '/';
-}
-
-/**
  * Process forbidden characters in text according to settings
  * This is the shared logic used by both rename engine and link target generation
  */
@@ -56,6 +47,10 @@ export function processForbiddenChars(
           settings.characterReplacements.charReplacements.dot.replacement;
         if (replacement !== '') {
           // Has replacement - use it at any position
+          if (settings.characterReplacements.charReplacements.dot.trimLeft) {
+            // Remove trailing whitespace from result
+            result = result.trimEnd();
+          }
           if (settings.characterReplacements.charReplacements.dot.trimRight) {
             // Skip upcoming whitespace characters
             while (i + 1 < text.length && /\s/.test(text[i + 1])) {

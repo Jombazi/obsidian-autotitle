@@ -6,7 +6,7 @@ import {
   SettingDefinitionItem,
 } from 'obsidian';
 import { FirstLineIsTitlePlugin } from './settings-base';
-import { t } from '../i18n';
+import { getCurrentLocale, t } from '../i18n';
 import { normalizeExclusionLists } from '../utils';
 import { getPath, setPath } from './settings-paths';
 import { FIRST_ENABLE_CHAR_KEYS } from '../types/char-replacement';
@@ -21,7 +21,7 @@ import { buildExclusionsPage } from './exclusions';
 import { buildCharacterReplacementsPage } from './character-replacements';
 import { buildCustomReplacementsPage } from './custom-replacements';
 import { buildMarkupStrippingPage } from './markup-stripping';
-import { buildAliasPage } from './alias';
+import { buildFirstLinePropertyPage } from './first-line-property';
 import { buildCommandsPage } from './commands';
 import { buildOtherPage } from './other';
 
@@ -45,34 +45,10 @@ const CASCADES: Record<string, (plugin: FirstLineIsTitlePlugin) => void> = {
     settings.core.hasEnabledForbiddenChars = true;
   },
 
-  'customReplacements.enableCustomReplacements': (plugin) => {
-    const { settings } = plugin;
-    if (!settings.customReplacements.enableCustomReplacements) {
-      settings.markupStripping.applyCustomReplacementsInAlias = false;
-      return;
-    }
-    if (settings.core.hasEnabledCustomReplacements) return;
-    for (const replacement of settings.customReplacements.rules) {
-      replacement.enabled = true;
-    }
-    settings.core.hasEnabledCustomReplacements = true;
-  },
-
-  'aliases.enableAliases': (plugin) => {
-    const { settings } = plugin;
-    if (!settings.aliases.enableAliases || settings.core.hasEnabledAliases) {
-      return;
-    }
-    settings.aliases.keepEmptyAliasProperty = true;
-    settings.markupStripping.stripMarkupInAlias = true;
-    if (settings.customReplacements.enableCustomReplacements) {
-      settings.markupStripping.applyCustomReplacementsInAlias = true;
-    }
-    settings.core.hasEnabledAliases = true;
-  },
-
-  'aliases.hideAliasProperty': (plugin) => plugin.updatePropertyVisibility?.(),
-  'aliases.hideAliasInSidebar': (plugin) => plugin.updatePropertyVisibility?.(),
+  'firstLineProperty.hideProperty': (plugin) =>
+    plugin.updatePropertyVisibility?.(),
+  'firstLineProperty.hideInSidebar': (plugin) =>
+    plugin.updatePropertyVisibility?.(),
   'core.checkInterval': (plugin) =>
     plugin.editorLifecycle?.initializeCheckingSystem(),
 
@@ -95,8 +71,6 @@ const CASCADES: Record<string, (plugin: FirstLineIsTitlePlugin) => void> = {
  */
 const VALUE_MUTATING_KEYS = new Set([
   'characterReplacements.enableForbiddenCharReplacements',
-  'customReplacements.enableCustomReplacements',
-  'aliases.enableAliases',
 ]);
 
 export class FirstLineIsTitleSettings extends PluginSettingTab {
@@ -151,11 +125,15 @@ export class FirstLineIsTitleSettings extends PluginSettingTab {
         type: 'group',
         heading: t('settings.sections.advancedGroup'),
         items: [
-          buildAliasPage(this.plugin),
-          buildCharacterReplacementsPage(this.plugin),
-          buildCommandsPage(this.plugin),
-          buildCustomReplacementsPage(this.plugin, this),
-          buildMarkupStrippingPage(this.plugin),
+          // Sorted by displayed name so the order is alphabetical in every locale.
+          ...[
+            buildFirstLinePropertyPage(this.plugin, this),
+            buildCharacterReplacementsPage(this.plugin, this),
+            buildCommandsPage(this.plugin),
+            buildCustomReplacementsPage(this.plugin, this),
+            buildMarkupStrippingPage(this.plugin),
+          ].sort((a, b) => a.name.localeCompare(b.name, getCurrentLocale())),
+          // Last whatever its name: it holds what fits no other page.
           buildOtherPage(this.plugin, this),
         ],
       },

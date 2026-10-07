@@ -79,4 +79,66 @@ describe('locale key resolution', () => {
 
     expect(missing).toEqual([]);
   });
+
+  it('resolves every key-shaped literal handed to a helper that calls t()', () => {
+    const enKeys = leafPaths(en);
+    const missing: string[] = [];
+
+    for (const file of [
+      ...sourceFiles(join(ROOT, 'src')),
+      join(ROOT, 'main.ts'),
+    ]) {
+      const source = readFileSync(file, 'utf-8');
+      for (const [, key] of source.matchAll(
+        /'((?:settings|notifications|commands|modals|menu)\.[\w.]+)'/g
+      )) {
+        if (
+          !enKeys.some((leaf) => leaf === key || leaf.startsWith(`${key}.`))
+        ) {
+          missing.push(`${key} (${file.slice(ROOT.length + 1)})`);
+        }
+      }
+    }
+
+    expect(missing).toEqual([]);
+  });
+
+  it('resolves every key the settings builders assemble at runtime', () => {
+    const enKeySet = new Set(leafPaths(en));
+    const read = (path: string) => readFileSync(join(ROOT, path), 'utf-8');
+    const assembled: string[] = [];
+
+    for (const [, descKey, labelKey] of read(
+      'src/settings/first-line-property.ts'
+    ).matchAll(/buildLabelReferenceDescription\(\s*'([\w.]+)',\s*'(\w+)'/g)) {
+      assembled.push(
+        `${descKey}.part1`,
+        `${descKey}.${labelKey}`,
+        `${descKey}.part2`
+      );
+    }
+
+    const characterReplacements = read(
+      'src/settings/character-replacements.ts'
+    );
+    for (const mapName of ['CHAR_LABEL_KEYS', 'CHAR_NOTE_KEYS']) {
+      const body = new RegExp(`${mapName}[^{]*\\{([\\s\\S]*?)\\};`).exec(
+        characterReplacements
+      )?.[1];
+      expect(body, `${mapName} not found`).toBeDefined();
+      for (const [, value] of body!.matchAll(/:\s*'(\w+)'/g)) {
+        assembled.push(`settings.characterReplacements.characters.${value}`);
+      }
+    }
+
+    for (const [, id] of read('src/settings/markup-stripping.ts').matchAll(
+      /\bid:\s*'(\w+)'/g
+    )) {
+      assembled.push(`settings.markupStripping.${id}.name`);
+    }
+
+    // An empty list means a source pattern above stopped matching, not that every key resolves.
+    expect(assembled.length).toBeGreaterThan(30);
+    expect(assembled.filter((key) => !enKeySet.has(key))).toEqual([]);
+  });
 });

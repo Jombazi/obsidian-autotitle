@@ -66,8 +66,11 @@ vi.mock('../../src/settings/markup-stripping', () => ({
     name: 'Markup stripping',
   })),
 }));
-vi.mock('../../src/settings/alias', () => ({
-  buildAliasPage: vi.fn(() => ({ type: 'page', name: 'Alias' })),
+vi.mock('../../src/settings/first-line-property', () => ({
+  buildFirstLinePropertyPage: vi.fn(() => ({
+    type: 'page',
+    name: 'First line property',
+  })),
 }));
 vi.mock('../../src/settings/commands', () => ({
   buildCommandsPage: vi.fn(() => ({ type: 'page', name: 'Commands' })),
@@ -138,8 +141,7 @@ describe('FirstLineIsTitleSettings', () => {
 
     const advancedGroup = () =>
       tab.getSettingDefinitions()[advancedGroupIndex()] as
-        | { heading?: string; items?: { name?: string }[] }
-        | undefined;
+        { heading?: string; items?: { name?: string }[] } | undefined;
 
     it('keeps only Exclusions as a top-level page', () => {
       expect(topLevel()).toEqual(['Exclusions']);
@@ -149,10 +151,10 @@ describe('FirstLineIsTitleSettings', () => {
       const group = advancedGroup();
       expect(group?.heading).toBe(ADVANCED_HEADING);
       expect(group?.items?.map((i) => i.name)).toEqual([
-        'Alias',
         'Character replacements',
         'Commands',
         'Custom replacements',
+        'First line property',
         'Markup stripping',
         'Advanced',
       ]);
@@ -208,9 +210,10 @@ describe('FirstLineIsTitleSettings', () => {
     });
 
     it('still saves exactly once when a cascade mutates several settings', async () => {
+      plugin.settings.core.hasEnabledForbiddenChars = false;
       await tab.setControlValue(
-        'customReplacements.enableCustomReplacements',
-        false
+        'characterReplacements.enableForbiddenCharReplacements',
+        true
       );
       expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
     });
@@ -226,83 +229,13 @@ describe('FirstLineIsTitleSettings', () => {
       expect(plugin.settings.core.convertReplacementChars).toBe(true);
     });
 
-    it('clears applyCustomReplacementsInAlias when custom replacements go off', async () => {
-      plugin.settings.markupStripping.applyCustomReplacementsInAlias = true;
-      await tab.setControlValue(
-        'customReplacements.enableCustomReplacements',
-        false
-      );
-      expect(
-        plugin.settings.markupStripping.applyCustomReplacementsInAlias
-      ).toBe(false);
-    });
-
     it('re-renders via update() so force-written siblings never show a stale value', async () => {
       await tab.setControlValue(
-        'customReplacements.enableCustomReplacements',
+        'characterReplacements.enableForbiddenCharReplacements',
         false
       );
       expect(update).toHaveBeenCalledTimes(1);
       expect(refreshDomState).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('first-enable cascades', () => {
-    it('bulk-enables custom replacements the first time they are switched on', async () => {
-      plugin.settings.core.hasEnabledCustomReplacements = false;
-      plugin.settings.customReplacements.rules.forEach((rule) => {
-        rule.enabled = false;
-      });
-
-      await tab.setControlValue(
-        'customReplacements.enableCustomReplacements',
-        true
-      );
-
-      expect(
-        plugin.settings.customReplacements.rules.every((r) => r.enabled)
-      ).toBe(true);
-      expect(plugin.settings.core.hasEnabledCustomReplacements).toBe(true);
-    });
-
-    it('does not bulk-enable again once the latch is set', async () => {
-      plugin.settings.core.hasEnabledCustomReplacements = true;
-      plugin.settings.customReplacements.rules.forEach((rule) => {
-        rule.enabled = false;
-      });
-
-      await tab.setControlValue(
-        'customReplacements.enableCustomReplacements',
-        true
-      );
-
-      expect(
-        plugin.settings.customReplacements.rules.some((r) => r.enabled)
-      ).toBe(false);
-    });
-
-    it('seeds alias defaults the first time aliases are switched on', async () => {
-      plugin.settings.core.hasEnabledAliases = false;
-      plugin.settings.aliases.keepEmptyAliasProperty = false;
-      plugin.settings.markupStripping.stripMarkupInAlias = false;
-
-      await tab.setControlValue('aliases.enableAliases', true);
-
-      expect(plugin.settings.aliases.keepEmptyAliasProperty).toBe(true);
-      expect(plugin.settings.markupStripping.stripMarkupInAlias).toBe(true);
-      expect(plugin.settings.core.hasEnabledAliases).toBe(true);
-    });
-
-    it('does not seed applyCustomReplacementsInAlias when custom replacements are disabled', async () => {
-      plugin.settings.core.hasEnabledAliases = false;
-      plugin.settings.customReplacements.enableCustomReplacements = false;
-      plugin.settings.markupStripping.applyCustomReplacementsInAlias = false;
-
-      await tab.setControlValue('aliases.enableAliases', true);
-
-      expect(
-        plugin.settings.markupStripping.applyCustomReplacementsInAlias
-      ).toBe(false);
     });
   });
 
@@ -343,14 +276,14 @@ describe('FirstLineIsTitleSettings', () => {
       );
     });
 
-    it('leaves backslash off from either entry point', async () => {
+    it('enables backslash from either entry point', async () => {
       for (const settings of [
         await afterSettingsToggle(),
         await afterPluginLoad(),
       ]) {
         expect(
           settings.characterReplacements.charReplacements.backslash.enabled
-        ).toBe(false);
+        ).toBe(true);
       }
     });
 
@@ -368,12 +301,12 @@ describe('FirstLineIsTitleSettings', () => {
 
   describe('side-effect cascades', () => {
     it('refreshes property visibility when the hiding mode changes', async () => {
-      await tab.setControlValue('aliases.hideAliasProperty', 'always');
+      await tab.setControlValue('firstLineProperty.hideProperty', 'always');
       expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
     });
 
     it('refreshes property visibility when sidebar hiding changes', async () => {
-      await tab.setControlValue('aliases.hideAliasInSidebar', true);
+      await tab.setControlValue('firstLineProperty.hideInSidebar', true);
       expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
     });
 

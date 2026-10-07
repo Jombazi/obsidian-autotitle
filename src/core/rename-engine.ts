@@ -3,6 +3,7 @@ import {
   Editor,
   Notice,
   MarkdownView,
+  MarkdownFileInfo,
   getFrontMatterInfo,
 } from 'obsidian';
 import { TitleRegionCache, RenameOutcome, RenameOutcomeReason } from '../types';
@@ -11,7 +12,6 @@ import {
   verboseLog,
   shouldProcessFile,
   canModifyFile,
-  isExcludedByFileName,
   extractTitle,
   isValidHeading,
   findTitleSourceLine,
@@ -21,6 +21,11 @@ import {
 import { t } from '../i18n';
 import { RateLimiter } from './rate-limiter';
 import { readFileContent } from '../utils/content-reader';
+import {
+  SourceEditorTarget,
+  findSourceEditorForFile,
+} from '../utils/frontmatter-edit';
+import { hasFirstLinePropertyName } from '../utils/first-line-property-keys';
 
 import FirstLineIsTitle from '../../main';
 
@@ -59,14 +64,16 @@ export class RenameEngine {
    *
    * @param file - The file to update alias for
    * @param isManualCommand - Whether this is a manual command (determines if we should update)
+   * @param editor - Editor the rename was read from, which the alias is written into
    * @returns true if alias was updated, false if skipped
    */
   private async updateAliasWithCoordination(
     file: TFile,
-    _isManualCommand: boolean
+    _isManualCommand: boolean,
+    editor?: Editor
   ): Promise<boolean> {
-    // Update alias when aliases are enabled (for both manual and automatic modes)
-    if (!this.plugin.settings.aliases.enableAliases) {
+    // Update alias when a property name is set (for both manual and automatic modes)
+    if (!hasFirstLinePropertyName(this.plugin.settings)) {
       return false;
     }
 
@@ -83,25 +90,18 @@ export class RenameEngine {
     this.plugin.eventHandlerManager?.markAliasUpdatePending(file.path);
 
     try {
-      // Get editor if active view matches the file being updated
-      const activeView =
-        this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-      const editor = activeView?.file === file ? activeView.editor : undefined;
+      const target = this.findAliasTarget(file, editor);
 
       verboseLog(
         this.plugin,
-        `// EDITOR_LOOKUP (manual): activeView=${!!activeView}, activeView.file=${activeView?.file?.path ?? 'none'}, target=${file.path}, match=${activeView?.file === file}`
-      );
-      verboseLog(
-        this.plugin,
-        `// EDITOR_PASS (manual): Passing editor=${editor ? 'defined' : 'undefined'} to updateAliasIfNeeded`
+        `// EDITOR_PASS (manual): Passing target=${target ? 'editor' : 'file'} to updateAliasIfNeeded`
       );
 
       const aliasResult = await this.plugin.aliasManager.updateAliasIfNeeded(
         file,
         undefined,
         undefined,
-        editor
+        target
       );
       return aliasResult;
     } finally {
@@ -109,8 +109,45 @@ export class RenameEngine {
     }
   }
 
-  async processEditorChangeOptimal(editor: Editor, file: TFile): Promise<void> {
-    this.plugin.trackUsage();
+  /**
+   * Choose where the alias update goes: the editor the rename was read from when there is one, since that is where the user is typing, otherwise any editor showing the note.
+   * @param file - Note being renamed
+   * @param editor - Editor the rename was read from
+   * @returns The editor to write into, or null to write the file
+   */
+  private findAliasTarget(
+    file: TFile,
+    editor?: Editor
+  ): SourceEditorTarget | null {
+    const found = findSourceEditorForFile(this.plugin.app, file);
+    if (!editor || found?.editor === editor) {
+      return found ?? null;
+    }
+    // Manual commands pass `workspace.activeEditor.editor`, which a Reading view also has, and an edit through it never reaches the file.
+    const ownedByReadingView = this.plugin.app.workspace
+      .getLeavesOfType('markdown')
+      .some(
+        (leaf) =>
+          leaf.view instanceof MarkdownView &&
+          leaf.view.editor === editor &&
+          leaf.view.getMode() !== 'source'
+      );
+    return ownedByReadingView
+      ? (found ?? null)
+      : { editor, isDirty: () => false };
+  }
+
+  /**
+   * Process a throttled first-line edit.
+   * @param editor - Editor the edit came from
+   * @param file - Note that was edited
+   * @param owner - The `editor-change` event's `info`; the editor is read only while it still shows the note
+   */
+  async processEditorChangeOptimal(
+    editor: Editor,
+    file: TFile,
+    owner?: MarkdownView | MarkdownFileInfo
+  ): Promise<void> {
     const startTime = Date.now();
 
     try {
@@ -143,6 +180,30 @@ export class RenameEngine {
             `Skipping recheck - editor-change from background editor sync: ${file.path}`
           );
         }
+        return;
+      }
+
+      // A throttled change can outlive its editor: a deselected Canvas card's or closed page preview's destroyed view reads as empty and would rename the note "Untitled", and a tab switched to another note keeps the same editor holding that note's text. The file holds the card's flushed save or the tab's save on switch instead. Without an owner (the pending recheck, which re-resolves its editor just before calling), only teardown is detectable.
+      const editorStillShowsNote = owner
+        ? owner.file === file &&
+          owner.editor === editor &&
+          editor.cm?.dom.isConnected !== false
+        : !(editor.cm && !editor.cm.dom.isConnected);
+      if (!editorStillShowsNote) {
+        if (this.plugin.settings.core.debug) {
+          console.debug(
+            `Editor change read from file - editor no longer shows the note: ${file.path}`
+          );
+        }
+        await this.processFile(
+          file,
+          true,
+          false,
+          undefined,
+          false,
+          undefined,
+          true
+        );
         return;
       }
 
@@ -248,8 +309,7 @@ export class RenameEngine {
           `[TIMING] Content changed in ${timeSinceStart}ms: ${file.path}`
         );
       }
-      // Always pass fresh editor content (already read above with canvas delay if needed)
-      // This ensures canvas and regular editors use fresh content, not stale cache
+      // Editor content rather than the cache, which lags the editor by up to Obsidian's autosave delay
       const providedContent = currentContent;
       await this.processFileImmediate(file, providedContent, metadata, editor);
     } catch (error) {
@@ -372,14 +432,13 @@ export class RenameEngine {
     providedContent?: string,
     isBatchOperation = false,
     exclusionOverrides?: {
-      ignoreFolder?: boolean;
+      ignoreFiles?: boolean;
       ignoreTag?: boolean;
       ignoreProperty?: boolean;
     },
     hasActiveEditor?: boolean,
     editor?: Editor
   ): Promise<RenameOutcome> {
-    this.plugin.trackUsage();
     verboseLog(this.plugin, `Processing file: ${file.path}`, { noDelay });
 
     // Race condition check: File could be deleted between event trigger and processing
@@ -442,9 +501,9 @@ export class RenameEngine {
       ];
       if (
         aliasHandlingReasons.includes(result.reason) &&
-        this.plugin.settings.aliases.enableAliases
+        hasFirstLinePropertyName(this.plugin.settings)
       ) {
-        await this.updateAliasWithCoordination(file, showNotices);
+        await this.updateAliasWithCoordination(file, showNotices, editor);
       }
 
       return result;
@@ -465,34 +524,40 @@ export class RenameEngine {
           `Content changed during processing with pending alias: ${originalPath}`
         );
 
-        // Check if file is in active view (main editor)
-        const activeView =
-          this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-        const isInActiveView =
-          activeView && activeView.file?.path === newPath && activeView.editor;
-
-        if (isInActiveView) {
-          // File in main editor - clear flag and schedule immediate recheck
+        if (
+          this.plugin.fileStateManager.hasThrottleTimer(originalPath) ||
+          this.plugin.fileStateManager.hasThrottleTimer(newPath)
+        ) {
+          // A scheduled timer processes the latest text itself, and an immediate recheck would rename once more outside a linked note's delay.
+          this.plugin.cacheManager?.clearPendingAliasRecheck(originalPath);
+          if (newPath !== originalPath) {
+            this.plugin.cacheManager?.clearPendingAliasRecheck(newPath);
+          }
+          verboseLog(
+            this.plugin,
+            `Pending alias flag cleared, the scheduled timer processes the latest text: ${newPath}`
+          );
+        } else if (findSourceEditorForFile(this.plugin.app, file)) {
+          // Any editor counts, not just the active tab: keystrokes in a page preview or Canvas card set the flag too, and with no recheck the name would stop short of the first line until the next edit.
           this.plugin.cacheManager?.clearPendingAliasRecheck(originalPath);
           if (newPath !== originalPath) {
             this.plugin.cacheManager?.clearPendingAliasRecheck(newPath);
           }
 
-          // Schedule recheck after short delay to let UI settle
+          // Delayed so the editor's own change handling settles before the recheck reads it.
           window.setTimeout(() => {
             void (async () => {
               const recheckFile =
                 this.plugin.app.vault.getAbstractFileByPath(newPath);
               if (recheckFile && recheckFile instanceof TFile) {
-                const view =
-                  this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-                if (
-                  view &&
-                  view.file?.path === recheckFile.path &&
-                  view.editor
-                ) {
+                // Re-resolved rather than reused, because a tab's editor can switch to another note during the delay.
+                const target = findSourceEditorForFile(
+                  this.plugin.app,
+                  recheckFile
+                );
+                if (target) {
                   await this.processEditorChangeOptimal(
-                    view.editor,
+                    target.editor,
                     recheckFile
                   );
                 }
@@ -500,7 +565,7 @@ export class RenameEngine {
             })();
           }, TIMING.UI_SETTLE_DELAY_MS);
         } else {
-          // File not in the active view - the flag stays set and the next processFile on this file rechecks it
+          // No editor holds newer text to recheck against - the flag stays set and the next processFile on this file rechecks it
           verboseLog(
             this.plugin,
             `Pending alias flag stays set, next processFile on this file rechecks it: ${newPath}`
@@ -517,7 +582,7 @@ export class RenameEngine {
     providedContent?: string,
     isBatchOperation = false,
     exclusionOverrides?: {
-      ignoreFolder?: boolean;
+      ignoreFiles?: boolean;
       ignoreTag?: boolean;
       ignoreProperty?: boolean;
     },
@@ -530,7 +595,7 @@ export class RenameEngine {
         providedContent,
         providedEditor: editor, // Use editor from manual command
         preferFresh: true,
-        searchWorkspace: showNotices, // Manual commands search for open editors, page previews included
+        searchWorkspace: showNotices, // Manual commands search for open editors, page previews and Canvas cards included
       });
     } catch (error) {
       console.error(`Error reading file content: ${file.path}`, error);
@@ -607,34 +672,6 @@ export class RenameEngine {
       }
     }
 
-    // Runs before the content gate: this rule reads only the name, so paying for shouldProcessFile's YAML parses first would be wasted work. A file both name- and strategy-excluded therefore reports 'file-name-exclusion'.
-    // Check if filename matches any file name exclusions and skip if enabled (always respected)
-    if (isExcludedByFileName(file.name, this.plugin.settings)) {
-      if (showNotices && !isBatchOperation) {
-        // Rate limit: show notice max once per 2 seconds per file
-        if (
-          this.plugin.fileStateManager.canShowFileNameExclusionNotice(file.path)
-        ) {
-          verboseLog(
-            this.plugin,
-            `Showing notice: Excluded file name prevented rename of: ${file.basename}`
-          );
-          new Notice(
-            t('notifications.fileNameExclusionPreventedRename').replace(
-              '{{filename}}',
-              file.basename
-            )
-          );
-          this.plugin.fileStateManager.setFileNameExclusionNotice(file.path);
-        }
-      }
-      verboseLog(
-        this.plugin,
-        `Skipping file with excluded file name: ${file.path}`
-      );
-      return { success: false, reason: 'file-name-exclusion' };
-    }
-
     // Pass exclusionOverrides to skip checks for manual single-file commands
     if (
       !shouldProcessFile(
@@ -650,6 +687,11 @@ export class RenameEngine {
         this.plugin,
         `Skipping file based on include/exclude strategy: ${file.path}`
       );
+      if (showNotices && !isBatchOperation) {
+        new Notice(
+          t('notifications.notRenamedExcluded', { filename: file.basename })
+        );
+      }
       return { success: false, reason: 'excluded' };
     }
 
@@ -662,7 +704,7 @@ export class RenameEngine {
     let content = await readFileContent(this.plugin, file, {
       providedContent,
       providedEditor: editor, // Use editor from manual command
-      searchWorkspace: showNotices, // Manual commands search for open editors, page previews included
+      searchWorkspace: showNotices, // Manual commands search for open editors, page previews and Canvas cards included
     });
 
     const currentName = file.basename;
@@ -873,61 +915,58 @@ export class RenameEngine {
     let newTitle = titleSourceLine;
     verboseLog(
       this.plugin,
-      `Custom replacements enabled: ${this.plugin.settings.customReplacements.enableCustomReplacements}, count: ${this.plugin.settings.customReplacements.rules?.length || 0}`
+      `Custom replacements count: ${this.plugin.settings.customReplacements.rules?.length || 0}`
     );
 
     const applyCustomReplacements = () => {
-      if (this.plugin.settings.customReplacements.enableCustomReplacements) {
-        for (const replacement of this.plugin.settings.customReplacements
-          .rules) {
-          if (replacement.searchText === '' || !replacement.enabled) continue;
+      for (const replacement of this.plugin.settings.customReplacements.rules) {
+        if (replacement.searchText === '') continue;
 
-          verboseLog(this.plugin, `Checking custom replacement:`, {
-            searchText: replacement.searchText,
-            replaceText: replacement.replaceText,
-            onlyWholeLine: replacement.onlyWholeLine,
-            onlyAtStart: replacement.onlyAtStart,
-            enabled: replacement.enabled,
-            currentLine: newTitle,
-          });
+        verboseLog(this.plugin, `Checking custom replacement:`, {
+          searchText: replacement.searchText,
+          replaceText: replacement.replaceText,
+          onlyWholeLine: replacement.onlyWholeLine,
+          onlyAtStart: replacement.onlyAtStart,
+          currentLine: newTitle,
+        });
 
-          let tempLine = newTitle;
+        let tempLine = newTitle;
 
-          if (replacement.onlyWholeLine) {
-            // Only replace if the entire line matches
-            if (newTitle.trim() === replacement.searchText.trim()) {
-              tempLine = replacement.replaceText;
-              verboseLog(this.plugin, `Applied whole line replacement:`, {
-                from: newTitle,
-                to: tempLine,
-              });
-            }
-          } else if (replacement.onlyAtStart) {
-            if (tempLine.startsWith(replacement.searchText)) {
-              tempLine =
-                replacement.replaceText +
-                tempLine.slice(replacement.searchText.length);
-              verboseLog(this.plugin, `Applied start replacement:`, {
-                from: newTitle,
-                to: tempLine,
-              });
-            }
-          } else {
-            const beforeReplace = tempLine;
-            tempLine = tempLine.replaceAll(
-              replacement.searchText,
-              replacement.replaceText
-            );
-            if (beforeReplace !== tempLine) {
-              verboseLog(this.plugin, `Applied general replacement:`, {
-                from: beforeReplace,
-                to: tempLine,
-              });
-            }
+        if (replacement.onlyWholeLine) {
+          // Only replace if the entire line matches
+          if (newTitle.trim() === replacement.searchText.trim()) {
+            tempLine = replacement.replaceText;
+            verboseLog(this.plugin, `Applied whole line replacement:`, {
+              from: newTitle,
+              to: tempLine,
+            });
           }
-
-          newTitle = tempLine;
+        } else if (replacement.onlyAtStart) {
+          if (tempLine.startsWith(replacement.searchText)) {
+            tempLine =
+              replacement.replaceText +
+              tempLine.slice(replacement.searchText.length);
+            verboseLog(this.plugin, `Applied start replacement:`, {
+              from: newTitle,
+              to: tempLine,
+            });
+          }
+        } else {
+          const beforeReplace = tempLine;
+          // Replacer function so `$&` and `$$` in the user's replacement text stay literal.
+          tempLine = tempLine.replaceAll(
+            replacement.searchText,
+            () => replacement.replaceText
+          );
+          if (beforeReplace !== tempLine) {
+            verboseLog(this.plugin, `Applied general replacement:`, {
+              from: beforeReplace,
+              to: tempLine,
+            });
+          }
         }
+
+        newTitle = tempLine;
       }
 
       // If custom replacements resulted in empty string or whitespace only, use "Untitled"
@@ -1050,7 +1089,10 @@ export class RenameEngine {
             `Showing notice: Title unchanged: ${finalFileName}`
           );
           new Notice(
-            t('notifications.renamedTo').replace('{{filename}}', finalFileName)
+            t('notifications.renamedTo').replace(
+              '{{filename}}',
+              () => finalFileName
+            )
           );
         }
       }
@@ -1119,7 +1161,7 @@ export class RenameEngine {
               new Notice(
                 t('notifications.renamedTo').replace(
                   '{{filename}}',
-                  finalFileName
+                  () => finalFileName
                 )
               );
             }
@@ -1161,7 +1203,7 @@ export class RenameEngine {
           new Notice(
             t('notifications.notRenamedSelfReference').replace(
               '{{filename}}',
-              file.basename
+              () => file.basename
             )
           );
           this.plugin.fileStateManager.setLastSelfRefNotice(file.path);
@@ -1227,7 +1269,10 @@ export class RenameEngine {
             `Showing notice: Updated title: ${currentName} → ${finalFileName}`
           );
           new Notice(
-            t('notifications.renamedTo').replace('{{filename}}', finalFileName)
+            t('notifications.renamedTo').replace(
+              '{{filename}}',
+              () => finalFileName
+            )
           );
         }
       }

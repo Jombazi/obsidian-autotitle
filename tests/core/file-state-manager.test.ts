@@ -300,6 +300,28 @@ describe('FileStateManager', () => {
       expect(manager.getState('test.md')).toBeUndefined();
     });
 
+    it('removes a state whose lock, recheck and syncing flags were all cleared', () => {
+      manager.acquireLock('test.md');
+      manager.releaseLock('test.md');
+      manager.markPendingAliasRecheck('test.md');
+      manager.clearPendingAliasRecheck('test.md');
+      manager.markEditorSyncing('test.md');
+      manager.clearEditorSyncing('test.md');
+
+      manager.runMaintenance();
+
+      expect(manager.getState('test.md')).toBeUndefined();
+    });
+
+    it('removes a state whose lock went stale', () => {
+      manager.acquireLock('test.md');
+
+      vi.advanceTimersByTime(65 * 1000);
+      manager.runMaintenance();
+
+      expect(manager.getState('test.md')).toBeUndefined();
+    });
+
     it('should cleanup lastRenamedTime after 1 second', () => {
       manager.markRecentlyRenamed('test.md');
 
@@ -352,6 +374,77 @@ describe('FileStateManager', () => {
 
       expect(manager.hasThrottleTimer('test.md')).toBe(true);
     });
+
+    describe('delayed flag', () => {
+      const setDelayedTimer = (path: string) =>
+        manager.setThrottleTimer(
+          path,
+          window.setTimeout(() => {}, 2000),
+          true
+        );
+
+      it('should mark a delayed timer', () => {
+        setDelayedTimer('test.md');
+        manager.setThrottleTimer(
+          'plain.md',
+          window.setTimeout(() => {}, 1000)
+        );
+
+        expect(manager.hasDelayedThrottleTimer('test.md')).toBe(true);
+        expect(manager.hasDelayedThrottleTimer('plain.md')).toBe(false);
+      });
+
+      it('should drop the flag when a plain timer replaces a delayed one', () => {
+        setDelayedTimer('test.md');
+        manager.setThrottleTimer(
+          'test.md',
+          window.setTimeout(() => {}, 1000)
+        );
+
+        expect(manager.hasDelayedThrottleTimer('test.md')).toBe(false);
+      });
+
+      it('should clear the flag with the timer', () => {
+        setDelayedTimer('test.md');
+        manager.clearThrottleTimer('test.md');
+
+        expect(manager.hasDelayedThrottleTimer('test.md')).toBe(false);
+        expect(manager.getState('test.md')?.throttleTimerIsDelayed).toBe(
+          undefined
+        );
+      });
+
+      it('should clear the flag with all timers', () => {
+        setDelayedTimer('test.md');
+        manager.clearAllThrottleTimers();
+
+        expect(manager.hasDelayedThrottleTimer('test.md')).toBe(false);
+      });
+
+      it('should clear the flag when the file is deleted', () => {
+        setDelayedTimer('test.md');
+        manager.notifyFileDeleted('test.md');
+
+        expect(manager.hasDelayedThrottleTimer('test.md')).toBe(false);
+      });
+
+      it('should carry the flag to the new path on rename', () => {
+        setDelayedTimer('old.md');
+        manager.notifyFileRenamed('old.md', 'new.md');
+
+        expect(manager.hasDelayedThrottleTimer('new.md')).toBe(true);
+        expect(manager.hasDelayedThrottleTimer('old.md')).toBe(false);
+      });
+
+      it('should let maintenance drop a state whose timer was cleared', () => {
+        setDelayedTimer('test.md');
+        manager.clearThrottleTimer('test.md');
+
+        manager.runMaintenance();
+
+        expect(manager.getState('test.md')).toBeUndefined();
+      });
+    });
   });
 
   describe('creation delay timers', () => {
@@ -401,17 +494,6 @@ describe('FileStateManager', () => {
       // Advance past TTL (SELF_REF_NOTICE_TTL_MS = 2000ms)
       vi.advanceTimersByTime(2100);
       expect(manager.canShowSelfRefNotice('test.md')).toBe(true);
-    });
-
-    it('should rate limit file name exclusion notices', () => {
-      expect(manager.canShowFileNameExclusionNotice('test.md')).toBe(true);
-
-      manager.setFileNameExclusionNotice('test.md');
-      expect(manager.canShowFileNameExclusionNotice('test.md')).toBe(false);
-
-      // Advance past TTL (SELF_REF_NOTICE_TTL_MS = 2000ms)
-      vi.advanceTimersByTime(2100);
-      expect(manager.canShowFileNameExclusionNotice('test.md')).toBe(true);
     });
   });
 

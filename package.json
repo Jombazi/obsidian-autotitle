@@ -6,14 +6,13 @@
   "type": "module",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "npm run css && node esbuild.config.mjs production",
+    "build": "node esbuild.config.mjs production",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "css": "sass styles/main.scss styles.css --style=expanded --no-source-map",
-    "css:watch": "sass styles/main.scss styles.css --style=expanded --no-source-map --watch",
+    "css": "true",
     "knip": "knip",
     "preversion": "node version-bump.mjs --preflight",
     "version": "node version-bump.mjs",
@@ -28,13 +27,11 @@
       "tests/**/*.ts"
     ],
     "ignoreDependencies": [
-      "prettier",
-      "sass"
+      "prettier"
     ],
     "ignoreBinaries": [
       "eslint",
       "knip",
-      "sass",
       "tsc",
       "vitest"
     ],
@@ -50,6 +47,8 @@
   "author": "churnish",
   "license": "GPL-3.0-or-later",
   "devDependencies": {
+    "@codemirror/state": "^6.5.0",
+    "@codemirror/view": "^6.38.6",
     "@eslint-community/eslint-plugin-eslint-comments": "^4.7.1",
     "@types/node": "^24.10.1",
     "@vitest/coverage-v8": "^4.0.0",
@@ -61,7 +60,6 @@
     "jsdom": "^25.0.1",
     "obsidian": "^1.13.1",
     "prettier": "^3.8.1",
-    "sass": "^1.97.3",
     "tslib": "^2.8.1",
     "typescript": "^5.9.3",
     "vitest": "^4.0.0"

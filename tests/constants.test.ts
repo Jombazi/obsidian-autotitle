@@ -29,7 +29,25 @@ describe('shipped defaults', () => {
       DEFAULT_SETTINGS.characterReplacements.enableForbiddenCharReplacements
     ).toBe(false);
     expect(DEFAULT_SETTINGS.core.formatAsHeading).toBe(false);
-    expect(DEFAULT_SETTINGS.customReplacements.enableCustomReplacements).toBe(false);
+  });
+
+  it('ships no custom replacement rules, since every rule that exists applies', () => {
+    expect(DEFAULT_SETTINGS.customReplacements.rules).toEqual([]);
+  });
+
+  it('leaves the first line property off by shipping a blank property name', () => {
+    expect(DEFAULT_SETTINGS.firstLineProperty.propertyKey).toBe('');
+  });
+
+  it('ships the first line property options a first enable used to set', () => {
+    expect(DEFAULT_SETTINGS.firstLineProperty.keepEmptyProperty).toBe(true);
+    expect(
+      DEFAULT_SETTINGS.markupStripping.stripMarkupInFirstLineProperty
+    ).toBe(true);
+    expect(
+      DEFAULT_SETTINGS.markupStripping
+        .applyCustomReplacementsInFirstLineProperty
+    ).toBe(true);
   });
 
   it('does not delay or throttle note processing by default', () => {

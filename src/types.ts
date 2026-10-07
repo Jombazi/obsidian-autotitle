@@ -5,15 +5,6 @@ export interface CustomReplacement {
   replaceText: string;
   onlyAtStart: boolean;
   onlyWholeLine: boolean;
-  enabled: boolean;
-}
-
-export interface FileNameExclusion {
-  text: string;
-  onlyAtStart: boolean;
-  onlyWholeLine: boolean;
-  enabled: boolean;
-  caseSensitive: boolean;
 }
 
 export interface ExcludedProperty {
@@ -35,7 +26,6 @@ export type RenameOutcomeReason =
   | 'already-processing'
   | 'error'
   | 'excluded'
-  | 'file-name-exclusion'
   | 'file-not-found'
   | 'footnote-popover-edit'
   | 'global-rate-limited'
@@ -112,54 +102,23 @@ export interface CoreSettings {
   debugOutputFullContent: boolean;
   debugEnabledTimestamp: string;
   hasSetupExclusions: boolean;
-  lastUsageDate: string;
   hasEnabledForbiddenChars: boolean;
-  hasEnabledCustomReplacements: boolean;
-  hasEnabledAliases: boolean;
-  modalCheckboxStates: {
-    folderRename: {
-      includeSubfolders: boolean;
-      renameExcludedFolders: boolean;
-      renameExcludedTags: boolean;
-      renameExcludedProperties: boolean;
-    };
-    tagRename: {
-      includeSubtags: boolean;
-      renameExcludedFolders: boolean;
-      renameExcludedTags: boolean;
-      renameExcludedProperties: boolean;
-    };
-    searchRename: {
-      renameExcludedFolders: boolean;
-      renameExcludedTags: boolean;
-      renameExcludedProperties: boolean;
-    };
-    folderDisable: {
-      includeSubfolders: boolean;
-    };
-    tagDisable: {
-      includeSubtags: boolean;
-    };
-  };
 }
 
 /**
  * Exclusion and scoping settings
  */
 export interface ExclusionSettings {
-  folderScopeStrategy: ExclusionStrategy;
+  fileScopeStrategy: ExclusionStrategy;
   tagScopeStrategy: ExclusionStrategy;
   propertyScopeStrategy: ExclusionStrategy;
-  fileNameScopeStrategy: ExclusionStrategy;
-  excludedFolders: string[];
+  excludedFiles: string[];
   excludedTags: string[];
   excludedProperties: ExcludedProperty[];
-  matchSubfolders: boolean;
   tagMatchingMode: TagMatchingMode;
   matchSubtags: boolean;
   disableRenamingKey: string;
   disableRenamingValue: string;
-  excludedFileNames: FileNameExclusion[];
 }
 
 /**
@@ -175,7 +134,6 @@ export interface CharacterReplacementsSettings {
  * Custom replacements settings
  */
 export interface CustomReplacementsSettings {
-  enableCustomReplacements: boolean;
   rules: CustomReplacement[];
   applyAfterForbiddenChars: boolean;
 }
@@ -203,7 +161,7 @@ export interface MarkupStrippingSettings {
     comments: boolean;
     htmlTags: boolean;
   };
-  stripMarkupInAlias: boolean;
+  stripMarkupInFirstLineProperty: boolean;
   stripCommentsEntirely: boolean;
   stripTemplaterSyntax: boolean;
   stripTableMarkup: boolean;
@@ -212,22 +170,21 @@ export interface MarkupStrippingSettings {
   stripMathBlockMarkup: boolean;
   detectDiagrams: boolean;
   grabTitleFromCardLink: boolean;
-  applyCustomReplacementsInAlias: boolean;
+  applyCustomReplacementsInFirstLineProperty: boolean;
   applyCustomReplacementsAfterMarkupStripping: boolean;
 }
 
 /**
- * Alias management settings
+ * First line property settings
  */
-export interface AliasSettings {
-  enableAliases: boolean;
-  truncateAlias: boolean;
-  addAliasOnlyIfTitleDiffers: boolean;
-  aliasPropertyKey: string;
-  hideAliasProperty: PropertyHidingOption;
-  hideAliasInSidebar: boolean;
-  keepEmptyAliasProperty: boolean;
-  placeAliasLast: boolean;
+export interface FirstLinePropertySettings {
+  truncate: boolean;
+  addOnlyIfTitleDiffers: boolean;
+  propertyKey: string;
+  hideProperty: PropertyHidingOption;
+  hideInSidebar: boolean;
+  keepEmptyProperty: boolean;
+  placeLast: boolean;
 }
 
 /**
@@ -245,7 +202,7 @@ export interface PluginSettings {
   characterReplacements: CharacterReplacementsSettings;
   customReplacements: CustomReplacementsSettings;
   markupStripping: MarkupStrippingSettings;
-  aliases: AliasSettings;
+  firstLineProperty: FirstLinePropertySettings;
 }
 
 /**

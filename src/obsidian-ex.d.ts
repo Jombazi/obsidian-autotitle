@@ -3,16 +3,9 @@
  * These extend the official API with unofficial/undocumented properties
  */
 
-import {
-  Command,
-  TFile,
-  Editor,
-  EventRef,
-  Menu,
-  View,
-  Setting,
-} from 'obsidian';
-import type { PagePreviewEmbed } from './utils/page-preview';
+import { Command, TFile, EventRef, Menu, View, Setting } from 'obsidian';
+import type { EditorView } from '@codemirror/view';
+import type { EmbeddedEditor } from './utils/embedded-editors';
 
 declare module 'obsidian' {
   export class SettingGroup {
@@ -60,6 +53,27 @@ declare module 'obsidian' {
     id?: string;
   }
 
+  interface Editor {
+    /**
+     * CodeMirror view behind the editor (undocumented)
+     */
+    cm?: EditorView;
+  }
+
+  interface TextFileView {
+    /**
+     * True while the view holds changes it has not saved yet (undocumented)
+     */
+    dirty: boolean;
+  }
+
+  interface MarkdownFileInfo {
+    /**
+     * Heading or block a page preview or Canvas card embed shows, empty for the whole note (undocumented)
+     */
+    subpath?: string;
+  }
+
   interface Event {
     /**
      * Obsidian context menu cache (undocumented)
@@ -74,7 +88,14 @@ declare module 'obsidian' {
   type ViewWithFileEditor = View & {
     file?: TFile | null;
     editor?: Editor | null;
-    hoverPopover?: { targetEl?: HTMLElement; embed?: PagePreviewEmbed } | null;
+    hoverPopover?: { targetEl?: HTMLElement; embed?: EmbeddedEditor } | null;
+    /** Absent on a canvas leaf that is still deferred */
+    canvas?: {
+      nodes?: Map<
+        string,
+        { file?: TFile | null; child?: EmbeddedEditor | null }
+      >;
+    };
   };
 }
 

@@ -1,5 +1,6 @@
 import {
   TFile,
+  TFolder,
   App,
   getFrontMatterInfo,
   normalizePath,
@@ -8,58 +9,161 @@ import {
 import {
   EXCLUSION_STRATEGY,
   ExclusionStrategy,
-  FileNameExclusion,
   PluginSettings,
 } from '../types';
-import { filterNonEmpty, isRootFolderPath } from './string-processing';
-import { fileHasTargetTags, normalizeTag } from './tag-utils';
+import { filterNonEmpty } from './string-processing';
+import {
+  fileHasTargetTags,
+  normalizeTag,
+  tagMatchesTargetTag,
+} from './tag-utils';
 
-/**
- * Normalize a configured folder path for path matching, preserving case.
- * Distinct from `folderPathComparisonKey` in utils.ts, which folds case for equality.
- */
-function normalizeFolderPathForMatching(folder: string): string {
-  if (isRootFolderPath(folder)) {
-    return '/';
-  }
-  return normalizePath(folder);
+/** Same metacharacter set as Obsidian's own escape for Excluded files entries. */
+const REGEX_METACHARACTERS = /[.?*+^$[\]\\(){}|-]/g;
+
+/** An Excluded files entry is a regular expression when wrapped in slashes and longer than two characters, so `//` stays a plain prefix. */
+function isRegexFileEntry(trimmedEntry: string): boolean {
+  return (
+    trimmedEntry.length > 2 &&
+    trimmedEntry.startsWith('/') &&
+    trimmedEntry.endsWith('/')
+  );
 }
 
-/**
- * Check if file is in any of the configured folders
- * Supports subfolder checking if enabled in settings
- */
-export function isFileInConfiguredFolders(
-  file: TFile,
-  settings: PluginSettings
-): boolean {
-  // Filter out empty strings, normalize paths, and fold case so "Notes" and "notes" match the same rule
-  const nonEmptyFolders = filterNonEmpty(
-    settings.exclusions.excludedFolders
-  ).map((folder) => normalizeFolderPathForMatching(folder).toLowerCase());
-  if (nonEmptyFolders.length === 0) return false;
-
-  // Obsidian uses "" for root folder, but FLIT stores it as "/"
-  const filePath = (
-    file.parent?.path === '' ? '/' : file.parent?.path
-  )?.toLowerCase();
-  if (filePath && nonEmptyFolders.includes(filePath)) {
-    return true;
-  }
-
-  // Check subfolders if enabled
-  if (settings.exclusions.matchSubfolders) {
-    for (const folder of nonEmptyFolders) {
-      // Root folder "/" has no subfolders to check
-      if (folder === '/') continue;
-
-      if (filePath && filePath.startsWith(folder + '/')) {
-        return true;
-      }
+/** Mirrors Obsidian's own Excluded files: a regex entry matches anywhere in the path, any other entry is a path prefix, both ignoring case. */
+export function compileExcludedFileFilters(entries: string[]): RegExp[] {
+  const filters: RegExp[] = [];
+  for (const entry of entries) {
+    const trimmedEntry = entry.trim();
+    if (trimmedEntry === '') continue;
+    try {
+      filters.push(
+        isRegexFileEntry(trimmedEntry)
+          ? new RegExp(trimmedEntry.slice(1, -1), 'i')
+          : new RegExp(
+              '^' + trimmedEntry.replace(REGEX_METACHARACTERS, '\\$&'),
+              'i'
+            )
+      );
+    } catch {
+      // Obsidian skips an entry whose regex does not compile, so it neither excludes nor spares anything here either
     }
   }
+  return filters;
+}
 
-  return false;
+/** Tested against the full vault path, as Obsidian tests its own Excluded files. */
+export function isPathExcludedByFileRules(
+  path: string,
+  settings: PluginSettings
+): boolean {
+  const filters = compileExcludedFileFilters(settings.exclusions.excludedFiles);
+  return shouldExcludeUnderStrategy(
+    filters.some((filter) => filter.test(path)),
+    filters.length > 0,
+    settings.exclusions.fileScopeStrategy
+  );
+}
+
+/** Duplicate key for an Excluded files entry: plain entries fold case because they match ignoring it, while regex entries keep it because folding would merge `/\d/` with `/\D/`. */
+export function excludedFileEntryKey(entry: string): string {
+  const trimmedEntry = entry.trim();
+  return isRegexFileEntry(trimmedEntry)
+    ? trimmedEntry
+    : trimmedEntry.toLowerCase();
+}
+
+/** True when `entries` already holds `entry`, under the same duplicate rule as `normalizeExclusionLists`. */
+export function hasExcludedFileEntry(
+  entries: string[],
+  entry: string
+): boolean {
+  const key = excludedFileEntryKey(entry);
+  return entries.some((existing) => excludedFileEntryKey(existing) === key);
+}
+
+/** The entry Obsidian's own "Add exclusion" dialog writes for a picked folder; normalizePath also strips the slashes a user-typed folder setting may carry. */
+export function folderExclusionEntry(folderPath: string): string {
+  return normalizePath(folderPath) + '/';
+}
+
+/** The `hasTargets` half of the tag strategy: is any tag rule live? */
+function hasTagTargets(settings: PluginSettings): boolean {
+  return settings.exclusions.excludedTags.some((tag) => tag.trim() !== '');
+}
+
+/** Judged from the entries only, never from notes, because the context menu asks on every right-click; answers false wherever a regex or a partial entry makes the answer depend on individual notes. */
+export function isFolderFullyExcludedByFileRules(
+  folder: TFolder,
+  settings: PluginSettings
+): boolean {
+  const entries = settings.exclusions.excludedFiles;
+  // Every note path in the folder starts with this, and no other note path does
+  const foldedPrefix = folder.isRoot() ? '' : `${folder.path}/`.toLowerCase();
+  const trimmedEntries = filterNonEmpty(entries).map((entry) => entry.trim());
+  const foldedPlainEntries = trimmedEntries
+    .filter((entry) => !isRegexFileEntry(entry))
+    .map((entry) => entry.toLowerCase());
+
+  if (
+    settings.exclusions.fileScopeStrategy === EXCLUSION_STRATEGY.ONLY_EXCLUDE
+  ) {
+    // A regex can match only some of the folder's notes, so only a plain entry covering the whole folder proves it
+    return (
+      foldedPrefix !== '' &&
+      foldedPlainEntries.some((entry) => foldedPrefix.startsWith(entry))
+    );
+  }
+
+  // "Exclude all except..." with no live entry spares nothing
+  if (compileExcludedFileFilters(entries).length === 0) return true;
+  if (trimmedEntries.some(isRegexFileEntry)) return false;
+  // An entry that covers the folder spares all of it, and one inside it spares some
+  return !foldedPlainEntries.some(
+    (entry) => entry.startsWith(foldedPrefix) || foldedPrefix.startsWith(entry)
+  );
+}
+
+/** Judged from the rules and the tag tree, never from notes, because the context menu asks on every right-click; answers false wherever the answer depends on individual notes, so a caller only hides an action it can prove empty. */
+export function isTagFullyExcludedByTagRules(
+  tagName: string,
+  settings: PluginSettings,
+  app: App
+): boolean {
+  const { tagScopeStrategy, tagMatchingMode, matchSubtags } =
+    settings.exclusions;
+  const hasTargets = hasTagTargets(settings);
+
+  if (tagScopeStrategy !== EXCLUSION_STRATEGY.ONLY_EXCLUDE) {
+    // "Exclude all except..." spares a note for any listed tag it carries, which only the note can tell; an empty list spares none
+    return !hasTargets;
+  }
+  if (!hasTargets) return false;
+  // A mode that reads one tag source spares notes carrying the tag only in the other source, which only the note can tell
+  if (tagMatchingMode !== 'In Properties and note body') return false;
+
+  const foldedTargetTags = filterNonEmpty(settings.exclusions.excludedTags).map(
+    (tag) => normalizeTag(tag).toLowerCase()
+  );
+  const isCoveredByRule = (foldedTag: string): boolean =>
+    foldedTargetTags.some((foldedTargetTag) =>
+      tagMatchesTargetTag(foldedTag, foldedTargetTag, matchSubtags)
+    );
+
+  // getTags() counts a parent for every subtag, so the tree cannot show whether any note carries the tag itself; an uncovered tag keeps the action
+  const foldedTag = normalizeTag(tagName).toLowerCase();
+  if (!isCoveredByRule(foldedTag)) return false;
+  // Under subtag matching a rule covering the tag covers every subtag too, so the tag tree is only consulted without it
+  if (matchSubtags) return true;
+
+  // getTags() walks every note's cache, which is why it is reached only when subtag matching is off and the tag itself is listed
+  return Object.keys(app.metadataCache.getTags()).every((vaultTag) => {
+    const foldedVaultTag = normalizeTag(vaultTag).toLowerCase();
+    return (
+      !foldedVaultTag.startsWith(`${foldedTag}/`) ||
+      isCoveredByRule(foldedVaultTag)
+    );
+  });
 }
 
 /**
@@ -168,8 +272,8 @@ export function fileHasExcludedProperties(
  * - "Exclude all except...": exclude what the list does NOT match. An empty list excludes
  *   everything — there is no listed target to spare.
  *
- * Shared by every exclusion type, file names included, so the inversion and the empty-list
- * behaviour cannot drift between sections. `hasTargets` must be computed with the same
+ * Shared by every exclusion type so the inversion and the empty-list behaviour cannot drift
+ * between sections. `hasTargets` must be computed with the same
  * filter its own detector applies: if it counts rules the detector ignores, "Exclude all
  * except..." excludes every file while no rule can ever match one.
  */
@@ -188,19 +292,19 @@ function shouldExcludeUnderStrategy(
  * Determines whether a file should be processed based on the include/exclude strategy
  *
  * Logic summary:
- * - "Only exclude...": Process all files EXCEPT those in target folders/tags/properties
+ * - "Only exclude...": Process all files EXCEPT those matched by path, tag or property rules
  *   - If no targets specified: Process ALL files (default enabled)
  *   - If targets specified: Process files NOT in targets (traditional exclude)
  *
- * - "Exclude all except...": Process ONLY files in target folders/tags/properties
+ * - "Exclude all except...": Process ONLY files matched by path, tag or property rules
  *   - If no targets specified: Process NO files (default disabled)
  *   - If targets specified: Process ONLY files in targets (include-only mode)
  *
  * @param file The file to check
- * @param settings Plugin settings containing strategy, folders, tags, and properties
+ * @param settings Plugin settings containing each list's strategy and its excluded files, tags and properties
  * @param app The Obsidian app instance
  * @param content Optional file content (string) for real-time checking
- * @param exclusionOverrides Optional overrides to skip folder/tag/property checks
+ * @param exclusionOverrides Optional overrides to skip path/tag/property checks
  * @returns true if the file should be processed, false otherwise
  */
 export function shouldProcessFile(
@@ -209,30 +313,23 @@ export function shouldProcessFile(
   app: App,
   content?: string,
   exclusionOverrides?: {
-    ignoreFolder?: boolean;
+    ignoreFiles?: boolean;
     ignoreTag?: boolean;
     ignoreProperty?: boolean;
   },
   plugin?: { settings: PluginSettings }
 ): boolean {
   // Apply strategy for each exclusion type independently, respecting overrides.
-  // Each detector is called inside its branch, not hoisted: the bulk-rename path passes
-  // all three overrides, and each detector walks the metadata cache per file.
-  const shouldExcludeFromFolders = exclusionOverrides?.ignoreFolder
+  // Each detector is called inside its branch, not hoisted: the single-note command passes all three overrides, and the tag and property detectors walk the metadata cache.
+  const shouldExcludeFromFiles = exclusionOverrides?.ignoreFiles
     ? false
-    : shouldExcludeUnderStrategy(
-        isFileInConfiguredFolders(file, settings),
-        settings.exclusions.excludedFolders.some(
-          (folder) => folder.trim() !== ''
-        ),
-        settings.exclusions.folderScopeStrategy
-      );
+    : isPathExcludedByFileRules(file.path, settings);
 
   const shouldExcludeFromTags = exclusionOverrides?.ignoreTag
     ? false
     : shouldExcludeUnderStrategy(
         fileHasTargetTags(file, settings, app, content),
-        settings.exclusions.excludedTags.some((tag) => tag.trim() !== ''),
+        hasTagTargets(settings),
         settings.exclusions.tagScopeStrategy
       );
 
@@ -249,8 +346,8 @@ export function shouldProcessFile(
   // Log exclusion reasons if verbose logging enabled
   if (plugin?.settings.core.debug) {
     const reasons: string[] = [];
-    if (shouldExcludeFromFolders)
-      reasons.push(`folder (${settings.exclusions.folderScopeStrategy})`);
+    if (shouldExcludeFromFiles)
+      reasons.push(`files (${settings.exclusions.fileScopeStrategy})`);
     if (shouldExcludeFromTags)
       reasons.push(`tags (${settings.exclusions.tagScopeStrategy})`);
     if (shouldExcludeFromProperties)
@@ -264,90 +361,8 @@ export function shouldProcessFile(
   // A file should be processed if it doesn't meet the exclusion criteria for ANY exclusion type
   // OR logic: if ANY exclusion type says "exclude" (returns true), then we exclude
   return !(
-    shouldExcludeFromFolders ||
+    shouldExcludeFromFiles ||
     shouldExcludeFromTags ||
     shouldExcludeFromProperties
-  );
-}
-
-/**
- * A file-name rule the matcher will actually act on. Disabled rows and rows with no text
- * are inert, so they must not count as targets either — see `shouldExcludeUnderStrategy`.
- */
-function isActiveFileNameExclusion(exclusion: FileNameExclusion): boolean {
-  return exclusion.enabled && Boolean(exclusion.text);
-}
-
-/** The `hasTargets` half of the file-name strategy: is any rule live? */
-function hasActiveFileNameExclusions(settings: PluginSettings): boolean {
-  return settings.exclusions.excludedFileNames.some(isActiveFileNameExclusion);
-}
-
-/**
- * Raw matcher: does the name match any live rule? Strategy-agnostic, and deliberately not
- * exported — a caller gating a rename must go through `isExcludedByFileName` so the user's
- * exclusion mode is applied.
- */
-function containsFileNameExclusion(
-  filename: string,
-  settings: PluginSettings
-): boolean {
-  // Get filename without extension for comparison
-  const filenameWithoutExt = filename.replace(/\.md$/, '');
-
-  for (const exclusion of settings.exclusions.excludedFileNames) {
-    if (!isActiveFileNameExclusion(exclusion)) continue;
-
-    // Check against both full filename and filename without extension
-    const compareFullFilename = exclusion.caseSensitive
-      ? filename
-      : filename.toLowerCase();
-    const compareFilenameWithoutExt = exclusion.caseSensitive
-      ? filenameWithoutExt
-      : filenameWithoutExt.toLowerCase();
-    const compareText = exclusion.caseSensitive
-      ? exclusion.text
-      : exclusion.text.toLowerCase();
-
-    for (const compareFilename of [
-      compareFullFilename,
-      compareFilenameWithoutExt,
-    ]) {
-      if (exclusion.onlyWholeLine) {
-        // Only match if the entire filename matches
-        if (compareFilename.trim() === compareText.trim()) {
-          return true;
-        }
-      } else if (exclusion.onlyAtStart) {
-        if (compareFilename.startsWith(compareText)) {
-          return true;
-        }
-      } else {
-        if (compareFilename.includes(compareText)) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-/**
- * Should this file be skipped because of its name?
- *
- * Wraps the raw matcher in `fileNameScopeStrategy` so the list reads either as a blacklist
- * ("Only exclude...") or as an allow-list ("Exclude all except..."), exactly as the folder,
- * tag and property lists do. Deliberately not folded into `shouldProcessFile`: callers run
- * this first because it reads only the name — no YAML parsing — and report it as its own
- * skip reason.
- */
-export function isExcludedByFileName(
-  filename: string,
-  settings: PluginSettings
-): boolean {
-  return shouldExcludeUnderStrategy(
-    containsFileNameExclusion(filename, settings),
-    hasActiveFileNameExclusions(settings),
-    settings.exclusions.fileNameScopeStrategy
   );
 }

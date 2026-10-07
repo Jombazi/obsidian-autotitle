@@ -75,9 +75,10 @@ export function t(
       // Replace variables if provided
       if (vars) {
         for (const [varKey, varVal] of Object.entries(vars)) {
+          // Replacer function: a string replacement would expand `$&` and `$$` in values containing `$`.
           result = result.replace(
             new RegExp(`\\{\\{${varKey}\\}\\}`, 'g'),
-            String(varVal)
+            () => String(varVal)
           );
         }
       }
@@ -91,8 +92,8 @@ export function t(
   // Replace variables if provided
   if (vars) {
     for (const [key, val] of Object.entries(vars)) {
-      result = result.replace(
-        new RegExp(`\\{\\{${key}\\}\\}`, 'g'),
+      // Replacer function: a string replacement would expand `$&` and `$$` in values containing `$`.
+      result = result.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), () =>
         String(val)
       );
     }
@@ -140,7 +141,7 @@ export function getPluralForm(
 
 /**
  * Get translated plural message
- * @param keyPath - Dot-separated key path to plural forms object (e.g., 'modals.processNNotes')
+ * @param keyPath - Dot-separated key path to plural forms object (e.g., 'modals.renameNNotes')
  * @param count - Number to determine plural form
  * @param fallback - Fallback string if translation not found
  * @returns Translated plural string with {{count}} replaced
@@ -196,7 +197,7 @@ export function tp(keyPath: string, count: number, fallback?: string): string {
 
 /**
  * Get translated plural message parts for custom formatting
- * @param keyPath - Dot-separated key path to plural forms object (e.g., 'modals.processNNotes')
+ * @param keyPath - Dot-separated key path to plural forms object (e.g., 'modals.renameNNotes')
  * @param count - Number to determine plural form
  * @returns Object with before, noun, and after parts for custom formatting
  */

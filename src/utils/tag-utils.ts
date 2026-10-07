@@ -16,6 +16,18 @@ export function normalizeTag(tag: string): string {
   return tag.startsWith('#') ? tag.slice(1) : tag;
 }
 
+/** One tag-rule match, shared by the rename run and the tag context menu so the two cannot disagree; both sides must arrive without "#" and case-folded. */
+export function tagMatchesTargetTag(
+  foldedTag: string,
+  foldedTargetTag: string,
+  matchSubtags: boolean
+): boolean {
+  return (
+    foldedTag === foldedTargetTag ||
+    (matchSubtags && foldedTag.startsWith(foldedTargetTag + '/'))
+  );
+}
+
 /**
  * Parse tags from YAML frontmatter
  * Returns array of tag strings (without # prefix)
@@ -134,18 +146,14 @@ export function fileHasTargetTags(
 
       for (const fileTag of fileTags) {
         const normalizedFileTag = normalizeTag(String(fileTag)).toLowerCase();
-
-        // Exact match
-        if (normalizedFileTag === normalizedTargetTag) {
+        if (
+          tagMatchesTargetTag(
+            normalizedFileTag,
+            normalizedTargetTag,
+            settings.exclusions.matchSubtags
+          )
+        ) {
           return true;
-        }
-
-        // Check subtags if enabled (default true)
-        if (settings.exclusions.matchSubtags) {
-          // If file has subtag and target tag is parent
-          if (normalizedFileTag.startsWith(normalizedTargetTag + '/')) {
-            return true;
-          }
         }
       }
     }
@@ -168,17 +176,14 @@ export function fileHasTargetTags(
       const normalizedTargetTag = normalizeTag(targetTag).toLowerCase();
 
       for (const inlineTag of inlineTagsInContent) {
-        // Exact match
-        if (inlineTag === normalizedTargetTag) {
+        if (
+          tagMatchesTargetTag(
+            inlineTag,
+            normalizedTargetTag,
+            settings.exclusions.matchSubtags
+          )
+        ) {
           return true;
-        }
-
-        // Check subtags if enabled (default true)
-        if (settings.exclusions.matchSubtags) {
-          // If file has subtag and target tag is parent
-          if (inlineTag.startsWith(normalizedTargetTag + '/')) {
-            return true;
-          }
         }
       }
     }

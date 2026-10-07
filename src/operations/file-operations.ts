@@ -595,7 +595,7 @@ export class FileOperations {
   }
 
   /**
-   * Check if file is excluded from processing (folder/tag/property exclusions + disable property)
+   * Check if file is excluded from processing (path/tag/property exclusions + disable property)
    * Uses real-time content checking for tags if content provided
    * @param exclusionOverrides - Per-caller opt-outs; callers own which exclusion types apply
    */
@@ -603,7 +603,7 @@ export class FileOperations {
     file: TFile,
     content?: string,
     exclusionOverrides?: {
-      ignoreFolder?: boolean;
+      ignoreFiles?: boolean;
       ignoreTag?: boolean;
       ignoreProperty?: boolean;
     }

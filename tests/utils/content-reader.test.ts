@@ -359,6 +359,31 @@ describe('content-reader', () => {
       expect(result).toBe('Fallback content');
     });
 
+    it('should use the Canvas card editing this note', async () => {
+      const card = {
+        file,
+        editor: { getValue: vi.fn().mockReturnValue('Card content') },
+      };
+      app.workspace.getLeavesOfType = vi.fn((type: string) =>
+        type === 'canvas'
+          ? [
+              {
+                view: {
+                  canvas: { nodes: new Map([['node', { file, child: card }]]) },
+                },
+              },
+            ]
+          : []
+      ) as any;
+      app.vault.cachedRead = vi.fn().mockResolvedValue('Fallback content');
+
+      const result = await readFileContent(plugin, file, {
+        searchWorkspace: true,
+      });
+
+      expect(result).toBe('Card content');
+    });
+
     it('should use active view editor as fallback when file matches', async () => {
       const activeContent = 'Active view content';
       const mockActiveView = new MarkdownView(app);

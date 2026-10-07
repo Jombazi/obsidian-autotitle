@@ -1,4 +1,5 @@
 import { PluginSettings } from '../types';
+import { parseFirstLinePropertyKeys } from '../utils/first-line-property-keys';
 import FirstLineIsTitle from '../../main';
 
 export class PropertyVisibility {
@@ -15,10 +16,9 @@ export class PropertyVisibility {
    * @returns Array of property keys, empty when the setting is blank
    */
   private getAliasPropertyKeys(): string[] {
-    return this.settings.aliases.aliasPropertyKey
-      .split(',')
-      .map((key) => key.trim())
-      .filter((key) => key.length > 0);
+    return parseFirstLinePropertyKeys(
+      this.settings.firstLineProperty.propertyKey
+    );
   }
 
   /**
@@ -75,16 +75,18 @@ export class PropertyVisibility {
       // Determine if this property should be hidden based on the mode and context
       let shouldHide = false;
 
-      if (this.settings.aliases.hideAliasProperty === 'always') {
+      if (this.settings.firstLineProperty.hideProperty === 'always') {
         // Always hide, regardless of emptiness, but consider sidebar setting
-        if (isInSidebar && !this.settings.aliases.hideAliasInSidebar) {
+        if (isInSidebar && !this.settings.firstLineProperty.hideInSidebar) {
           // In sidebar but sidebar hiding is disabled - don't hide
           shouldHide = false;
         } else {
           // Either not in sidebar, or sidebar hiding is enabled - hide it
           shouldHide = true;
         }
-      } else if (this.settings.aliases.hideAliasProperty === 'when_empty') {
+      } else if (
+        this.settings.firstLineProperty.hideProperty === 'when_empty'
+      ) {
         // Only hide if property is empty, and consider sidebar setting
         const valueContainer = property.querySelector(
           '.metadata-property-value'
@@ -95,7 +97,7 @@ export class PropertyVisibility {
           valueContainer.children.length === 0;
 
         if (isEmpty) {
-          if (isInSidebar && !this.settings.aliases.hideAliasInSidebar) {
+          if (isInSidebar && !this.settings.firstLineProperty.hideInSidebar) {
             // In sidebar but sidebar hiding is disabled - don't hide even if empty
             shouldHide = false;
           } else {
@@ -221,7 +223,7 @@ export class PropertyVisibility {
 
     this.cleanupPropertyObserver();
 
-    if (this.settings.aliases.hideAliasProperty === 'never') {
+    if (this.settings.firstLineProperty.hideProperty === 'never') {
       return; // No hiding needed
     }
 
@@ -236,8 +238,8 @@ export class PropertyVisibility {
     }
 
     if (
-      this.settings.aliases.hideAliasProperty === 'always' ||
-      this.settings.aliases.hideAliasProperty === 'when_empty'
+      this.settings.firstLineProperty.hideProperty === 'always' ||
+      this.settings.firstLineProperty.hideProperty === 'when_empty'
     ) {
       // Use DOM observation for both modes to handle container hiding properly
       this.setupPropertyHiding(propertyKeys);

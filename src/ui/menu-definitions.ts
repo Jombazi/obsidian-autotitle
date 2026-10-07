@@ -5,6 +5,10 @@ import { ProcessTagModal, RenameFolderModal } from '../modals';
 import { t } from '../i18n';
 import { hasDisablePropertyInFile } from '../utils';
 import { setDisableRenamingProperty } from '../utils/property-value';
+import {
+  isFolderFullyExcludedByFileRules,
+  isTagFullyExcludedByTagRules,
+} from '../utils/file-exclusions';
 
 /**
  * Declarative Menu Definitions
@@ -39,7 +43,14 @@ export class MenuDefinitions {
           id: 'tag-put-first-line-in-title',
           title: t('commands.putFirstLineInTitle'),
           icon: 'file-type-corner',
-          visible: (_context) => this.plugin.settings.core.enableTagCommands,
+          // Hidden when exclusions leave no note to rename, since the dialog would only say so
+          visible: (context) =>
+            this.plugin.settings.core.enableTagCommands &&
+            !isTagFullyExcludedByTagRules(
+              (context as TagContext).tagName,
+              this.plugin.settings,
+              this.plugin.app
+            ),
           onClick: (context) => {
             const tagContext = context as TagContext;
             new ProcessTagModal(
@@ -51,13 +62,7 @@ export class MenuDefinitions {
         },
         {
           id: 'tag-disable-renaming',
-          title: (context) => {
-            const tagContext = context as TagContext;
-            const menuText = this.plugin.contextMenuManager.getTagMenuText(
-              tagContext.tagName
-            );
-            return menuText.disable;
-          },
+          title: this.plugin.contextMenuManager.getTagMenuText().disable,
           icon: 'pen-off',
           visible: (context) => {
             if (!this.plugin.settings.core.enableTagCommands) return false;
@@ -75,13 +80,7 @@ export class MenuDefinitions {
         },
         {
           id: 'tag-enable-renaming',
-          title: (context) => {
-            const tagContext = context as TagContext;
-            const menuText = this.plugin.contextMenuManager.getTagMenuText(
-              tagContext.tagName
-            );
-            return menuText.enable;
-          },
+          title: this.plugin.contextMenuManager.getTagMenuText().enable,
           icon: 'file-pen',
           visible: (context) => {
             if (!this.plugin.settings.core.enableTagCommands) return false;
@@ -111,7 +110,13 @@ export class MenuDefinitions {
           id: 'folder-put-first-line-in-title',
           title: t('commands.putFirstLineInTitle'),
           icon: 'file-type-corner',
-          visible: (_context) => this.plugin.settings.core.enableFolderCommands,
+          // Hidden when exclusions leave no note to rename, since the dialog would only say so
+          visible: (context) =>
+            this.plugin.settings.core.enableFolderCommands &&
+            !isFolderFullyExcludedByFileRules(
+              (context as FolderContext).folder,
+              this.plugin.settings
+            ),
           onClick: (context) => {
             const folderContext = context as FolderContext;
             new RenameFolderModal(
@@ -123,17 +128,13 @@ export class MenuDefinitions {
         },
         {
           id: 'folder-disable-renaming',
-          title: (context) => {
-            const folderContext = context as FolderContext;
-            const menuText = this.plugin.contextMenuManager.getFolderMenuText(
-              folderContext.folder.path
-            );
-            return menuText.disable;
-          },
+          title: this.plugin.contextMenuManager.getFolderMenuText().disable,
           icon: 'pen-off',
           visible: (context) => {
             if (!this.plugin.settings.core.enableFolderCommands) return false;
             const folderContext = context as FolderContext;
+            // The vault root has no entry of its own, as in Obsidian's Excluded files; the explorer passes it on a blank-area right-click
+            if (folderContext.folder.isRoot()) return false;
             const shouldShowDisable =
               this.plugin.contextMenuManager.shouldShowDisableMenuForFolder(
                 folderContext.folder.path
@@ -147,17 +148,12 @@ export class MenuDefinitions {
         },
         {
           id: 'folder-enable-renaming',
-          title: (context) => {
-            const folderContext = context as FolderContext;
-            const menuText = this.plugin.contextMenuManager.getFolderMenuText(
-              folderContext.folder.path
-            );
-            return menuText.enable;
-          },
+          title: this.plugin.contextMenuManager.getFolderMenuText().enable,
           icon: 'file-pen',
           visible: (context) => {
             if (!this.plugin.settings.core.enableFolderCommands) return false;
             const folderContext = context as FolderContext;
+            if (folderContext.folder.isRoot()) return false;
             const shouldShowDisable =
               this.plugin.contextMenuManager.shouldShowDisableMenuForFolder(
                 folderContext.folder.path
@@ -187,7 +183,7 @@ export class MenuDefinitions {
           onClick: async (context) => {
             const fileContext = context as FileContext;
             const exclusionOverrides = {
-              ignoreFolder: true,
+              ignoreFiles: true,
               ignoreTag: true,
               ignoreProperty: true,
             };

@@ -3,6 +3,7 @@
 
 .claude/
 .vscode/
+coverage/
 node_modules/
 plans/
 
@@ -13,4 +14,3 @@ plans/
 data.json
 main.js
 package-lock.json
-styles.css

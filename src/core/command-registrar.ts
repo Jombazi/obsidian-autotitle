@@ -47,7 +47,7 @@ export class CommandRegistrar {
 
   /**
    * Register command: Put first line in title
-   * Note: This command ignores folder/tag/property exclusions but ALWAYS respects disable property
+   * Note: This command ignores path/tag/property exclusions but ALWAYS respects disable property
    */
   private registerRenameCurrentFileCommand(): void {
     this.plugin.addCommand({
@@ -66,10 +66,10 @@ export class CommandRegistrar {
 
         verboseLog(
           this.plugin,
-          `Manual rename command triggered for ${activeEditor.file.path} (ignoring folder/tag/property exclusions, respecting disable property)`
+          `Manual rename command triggered for ${activeEditor.file.path} (ignoring path/tag/property exclusions, respecting disable property)`
         );
         const exclusionOverrides = {
-          ignoreFolder: true,
+          ignoreFiles: true,
           ignoreTag: true,
           ignoreProperty: true,
         };
@@ -191,13 +191,7 @@ export class CommandRegistrar {
       name: t('commands.toggleAutomaticRenaming'),
       icon: 'file-cog',
       callback: async () => {
-        const newValue = !this.settings.core.renameAutomatically;
-        this.settings.core.renameAutomatically = newValue;
-        await this.plugin.saveSettings();
-        const notificationKey = newValue
-          ? 'notifications.automaticRenamingEnabled'
-          : 'notifications.automaticRenamingDisabled';
-        new Notice(t(notificationKey));
+        await this.executeToggleAutomaticRenaming();
       },
     });
   }
@@ -217,10 +211,10 @@ export class CommandRegistrar {
     }
     verboseLog(
       this.plugin,
-      `Manual rename command triggered for ${activeEditor.file.path} (ignoring folder/tag/property exclusions, respecting disable property)`
+      `Manual rename command triggered for ${activeEditor.file.path} (ignoring path/tag/property exclusions, respecting disable property)`
     );
     const exclusionOverrides = {
-      ignoreFolder: true,
+      ignoreFiles: true,
       ignoreTag: true,
       ignoreProperty: true,
     };
@@ -272,6 +266,8 @@ export class CommandRegistrar {
     const newValue = !this.settings.core.renameAutomatically;
     this.settings.core.renameAutomatically = newValue;
     await this.plugin.saveSettings();
+    // Settings can stay open in its own window while the ribbon or command palette flips this.
+    this.plugin.refreshSettingsTab();
     const notificationKey = newValue
       ? 'notifications.automaticRenamingEnabled'
       : 'notifications.automaticRenamingDisabled';

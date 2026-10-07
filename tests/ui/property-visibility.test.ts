@@ -71,7 +71,7 @@ describe('PropertyVisibility', () => {
     it('should install no observer', () => {
       propertyVisibility = new PropertyVisibility(
         createMockPlugin({
-          aliases: { aliasPropertyKey: '', hideAliasProperty: 'always' },
+          firstLineProperty: { propertyKey: '', hideProperty: 'always' },
         })
       );
 
@@ -84,7 +84,7 @@ describe('PropertyVisibility', () => {
       renderPropertiesMarkup();
       propertyVisibility = new PropertyVisibility(
         createMockPlugin({
-          aliases: { aliasPropertyKey: '', hideAliasProperty: 'always' },
+          firstLineProperty: { propertyKey: '', hideProperty: 'always' },
         })
       );
 
@@ -101,7 +101,7 @@ describe('PropertyVisibility', () => {
     it('should un-hide what a previous key left hidden', () => {
       renderPropertiesMarkup();
       const plugin = createMockPlugin({
-        aliases: { aliasPropertyKey: 'aliases', hideAliasProperty: 'always' },
+        firstLineProperty: { propertyKey: 'aliases', hideProperty: 'always' },
       });
       propertyVisibility = new PropertyVisibility(plugin);
 
@@ -110,7 +110,7 @@ describe('PropertyVisibility', () => {
         true
       );
 
-      plugin.settings.aliases.aliasPropertyKey = '';
+      plugin.settings.firstLineProperty.propertyKey = '';
       propertyVisibility.updatePropertyVisibility();
 
       expect(aliasPropertyEl().classList.contains('flit-property-hidden')).toBe(
@@ -125,7 +125,7 @@ describe('PropertyVisibility', () => {
       renderPropertiesMarkup();
       propertyVisibility = new PropertyVisibility(
         createMockPlugin({
-          aliases: { aliasPropertyKey: 'aliases', hideAliasProperty: 'always' },
+          firstLineProperty: { propertyKey: 'aliases', hideProperty: 'always' },
         })
       );
 
@@ -141,7 +141,7 @@ describe('PropertyVisibility', () => {
       renderPropertiesMarkup();
       propertyVisibility = new PropertyVisibility(
         createMockPlugin({
-          aliases: { aliasPropertyKey: 'aliases', hideAliasProperty: 'always' },
+          firstLineProperty: { propertyKey: 'aliases', hideProperty: 'always' },
         })
       );
 
@@ -156,7 +156,7 @@ describe('PropertyVisibility', () => {
     it('should install no observer when hiding is off', () => {
       propertyVisibility = new PropertyVisibility(
         createMockPlugin({
-          aliases: { aliasPropertyKey: 'aliases', hideAliasProperty: 'never' },
+          firstLineProperty: { propertyKey: 'aliases', hideProperty: 'never' },
         })
       );
 

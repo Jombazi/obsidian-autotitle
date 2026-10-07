@@ -9,10 +9,7 @@ import FirstLineIsTitlePlugin from '../../main';
 import { TIMING } from '../constants/timing';
 import { verboseLog } from '../utils';
 // Leaf modules, not the '../utils' barrel: the coordinator suite mocks the barrel down to verboseLog
-import {
-  isExcludedByFileName,
-  shouldProcessFile,
-} from '../utils/file-exclusions';
+import { shouldProcessFile } from '../utils/file-exclusions';
 import {
   fileHasTargetTags,
   getFrontmatterTagsFromCache,
@@ -46,7 +43,7 @@ export interface FileCreationActions {
   shouldMoveCursor: boolean;
   shouldInsertTitle: boolean;
   placeCursorAtEnd: boolean;
-  decisionPath: string; // e.g., "feature-enabled:Y → folder-excluded:N → content-excluded:N → name-excluded:N → tag-property-exclusions:N → features:title → content-below-yaml:N"
+  decisionPath: string; // e.g., "feature-enabled:Y → path-excluded:N → content-excluded:N → tag-property-exclusions:N → features:title → content-below-yaml:N"
 }
 
 /** Decision-tree node names, recorded into `decisionPath`. Names rather than numbers: nothing
@@ -54,9 +51,8 @@ export interface FileCreationActions {
  * were inserted. */
 type DecisionNode =
   | 'feature-enabled'
-  | 'folder-excluded'
+  | 'path-excluded'
   | 'content-excluded'
-  | 'name-excluded'
   | 'tag-property-exclusions'
   | 'templater-enabled'
   | 'templater-trigger'
@@ -67,7 +63,7 @@ type DecisionNode =
   | 'regex-template-matches'
   | 'templater-event'
   | 'template-excluded'
-  | 'name-excluded-after-template'
+  | 'path-excluded-after-template'
   | 'features'
   | 'content-below-yaml'
   | 'cursor-at-end';
@@ -85,9 +81,8 @@ type DecisionOutcome = 'Y' | 'N' | 'title' | 'cursor' | 'both';
  *
  * Gates, in order (each falls through to the next unless it returns):
  * - feature-enabled: Either feature enabled? No → do nothing.
- * - folder-excluded: Folder excluded? Yes → do nothing.
+ * - path-excluded: Path matched by the Excluded files rules? Yes → do nothing.
  * - content-excluded: Tag/property/disable-renaming excluded, judged on real-time content? Yes → do nothing.
- * - name-excluded: File name excluded? Yes → do nothing.
  * - tag-property-exclusions: Any tag or property exclusions configured? No → settings hub.
  * - templater-enabled: Templater loaded? No → settings hub.
  * - templater-trigger: Templater's trigger on file creation on? No → settings hub.
@@ -98,7 +93,7 @@ type DecisionOutcome = 'Y' | 'N' | 'title' | 'cursor' | 'both';
  * - regex-template-matches: A file regex matches this path? Yes → Templater wait, No → settings hub.
  * - templater-event: Templater event arrived within the timeout? No → settings hub.
  * - template-excluded: Template carries an excluded tag/property? Yes → do nothing, No → settings hub.
- * - name-excluded-after-template: File name excluded once the template has run? Yes → do nothing.
+ * - path-excluded-after-template: Path excluded once the template has run? Yes → do nothing.
  *
  * Settings hub (features, cursor-at-end, content-below-yaml) then maps the
  * enabled features onto the final actions: `features:title`, `features:cursor`
@@ -134,17 +129,17 @@ export class FileCreationCoordinator {
     }
     this.recordDecision('feature-enabled', 'Y');
 
-    // folder-excluded runs before content-excluded because a path prefix test is far cheaper than the content gate, which parses YAML and reads the metadata cache
-    // folder-excluded: Is folder excluded?
-    if (this.isFolderExcluded(file)) {
+    // path-excluded runs before content-excluded because a path test is far cheaper than the content gate, which parses YAML and reads the metadata cache
+    // path-excluded: Is the path excluded?
+    if (this.isPathExcluded(file)) {
       this.recordDecisionAndLogOutcome(
-        'folder-excluded',
+        'path-excluded',
         'Y',
-        'Do nothing (folder excluded)'
+        'Do nothing (path excluded)'
       );
       return this.noActions(this.pathString());
     }
-    this.recordDecision('folder-excluded', 'N');
+    this.recordDecision('path-excluded', 'N');
 
     // content-excluded: Is file excluded by tag/property/disable-renaming (content-based, real-time)?
     if (this.isContentExcluded(file, context.initialContent)) {
@@ -156,17 +151,6 @@ export class FileCreationCoordinator {
       return this.noActions(this.pathString());
     }
     this.recordDecision('content-excluded', 'N');
-
-    // name-excluded: Is the file name excluded? Kept after content-excluded because the suite pins the content gate firing before the name check; the extra cost — the content-gate evaluation, not the name test — is paid only by name-excluded files.
-    if (this.isFileNameExcluded(file)) {
-      this.recordDecisionAndLogOutcome(
-        'name-excluded',
-        'Y',
-        'Do nothing (file name excluded)'
-      );
-      return this.noActions(this.pathString());
-    }
-    this.recordDecision('name-excluded', 'N');
 
     // tag-property-exclusions: Are there exclusions configured?
     if (this.hasExclusions()) {
@@ -279,26 +263,26 @@ export class FileCreationCoordinator {
     }
     this.recordDecision('template-excluded', 'N');
 
-    // name-excluded-after-template: Templater can rename across the exclusion boundary during the templater-event wait, so the name that name-excluded cleared may no longer be the file's.
-    // Not folded into template-excluded:Y: captured debug paths have to keep telling the two causes apart. The mirror case — excluded at creation, cleared by the template — is deliberately not re-opened, since name-excluded returns before the wait ever starts.
-    if (this.isFileNameExcluded(file)) {
+    // path-excluded-after-template: Templater can rename or move the note across an entry during the templater-event wait, so the path that path-excluded cleared may no longer be the file's.
+    // Not folded into template-excluded:Y: captured debug paths have to keep telling the two causes apart. The mirror case — excluded at creation, cleared by the template — is deliberately not re-opened, since path-excluded returns before the wait ever starts.
+    if (this.isPathExcluded(file)) {
       this.recordDecisionAndLogOutcome(
-        'name-excluded-after-template',
+        'path-excluded-after-template',
         'Y',
-        'Do nothing (file name excluded after template)'
+        'Do nothing (path excluded after template)'
       );
       return this.noActions(
         pathSoFar +
-          ' → templater-event:Y → template-excluded:N → name-excluded-after-template:Y'
+          ' → templater-event:Y → template-excluded:N → path-excluded-after-template:Y'
       );
     }
-    this.recordDecision('name-excluded-after-template', 'N');
+    this.recordDecision('path-excluded-after-template', 'N');
 
     return this.proceedToSettingsHub(
       file,
       context,
       pathSoFar +
-        ' → templater-event:Y → template-excluded:N → name-excluded-after-template:N'
+        ' → templater-event:Y → template-excluded:N → path-excluded-after-template:N'
     );
   }
 
@@ -436,10 +420,10 @@ export class FileCreationCoordinator {
   }
 
   /**
-   * folder-excluded: Check if folder is excluded
+   * path-excluded, path-excluded-after-template: Check the Excluded files rules, the same ones the rename path enforces
    */
-  private isFolderExcluded(file: TFile): boolean {
-    // Folder-only overrides on the shared gate: a local matcher drifted from it before
+  private isPathExcluded(file: TFile): boolean {
+    // Path-only overrides on the shared gate: a local matcher drifted from it before
     return !shouldProcessFile(
       file,
       this.plugin.settings,
@@ -459,21 +443,14 @@ export class FileCreationCoordinator {
     return this.plugin.fileOperations.isFileExcludedForCursorPositioning(
       file,
       initialContent,
-      // folder-excluded already ran this same folder check through this same gate: an optimization, not a semantic difference
-      { ignoreFolder: true }
+      // path-excluded already ran this same path check through this same gate: an optimization, not a semantic difference
+      { ignoreFiles: true }
     );
   }
 
   /**
-   * name-excluded, name-excluded-after-template: Check file-name exclusions, the same ones the rename path enforces in rename-engine.ts.
-   */
-  private isFileNameExcluded(file: TFile): boolean {
-    return isExcludedByFileName(file.name, this.plugin.settings);
-  }
-
-  /**
    * tag-property-exclusions: Check if any tags or properties are configured in Exclusions
-   * Note: Folders are checked separately in folder-excluded
+   * Note: Paths are checked separately in path-excluded
    */
   private hasExclusions(): boolean {
     const excl = this.plugin.settings.exclusions;
@@ -488,8 +465,7 @@ export class FileCreationCoordinator {
    */
   private getTemplaterSettings(): Record<string, unknown> | undefined {
     const templater = this.plugin.app.plugins.plugins['templater-obsidian'] as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     return templater?.settings as Record<string, unknown> | undefined;
   }
 

@@ -34,7 +34,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
     }) as typeof parseYaml);
 
     settings = createTestSettings();
-    settings.exclusions.excludedFolders = [];
+    settings.exclusions.excludedFiles = [];
     settings.exclusions.excludedTags = [];
     settings.exclusions.excludedProperties = [];
 
@@ -65,7 +65,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
     it('is excluded when content frontmatter carries the listed property', () => {
       const content = '---\nstatus: draft\n---\n';
-      yamlFixtures.set('status: draft', { status: 'draft' });
+      yamlFixtures.set('status: draft\n', { status: 'draft' });
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, content)
@@ -74,7 +74,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
     it('is not excluded when content frontmatter drops a property the cache still holds', () => {
       const content = '---\nstatus: published\n---\n';
-      yamlFixtures.set('status: published', { status: 'published' });
+      yamlFixtures.set('status: published\n', { status: 'published' });
       app.metadataCache.getFileCache = vi.fn().mockReturnValue({
         frontmatter: { status: 'draft' },
       });
@@ -113,7 +113,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
     it('matches property keys and values case-insensitively', () => {
       const content = '---\nStatus: Draft\n---\n';
-      yamlFixtures.set('Status: Draft', { Status: 'Draft' });
+      yamlFixtures.set('Status: Draft\n', { Status: 'Draft' });
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, content)
@@ -130,8 +130,8 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
     it('"Only exclude..." excludes only files carrying the listed property', () => {
       settings.exclusions.propertyScopeStrategy = 'Only exclude...';
-      yamlFixtures.set('status: draft', { status: 'draft' });
-      yamlFixtures.set('status: published', { status: 'published' });
+      yamlFixtures.set('status: draft\n', { status: 'draft' });
+      yamlFixtures.set('status: published\n', { status: 'published' });
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(
@@ -149,8 +149,8 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
     it('"Exclude all except..." excludes every file that lacks the listed property', () => {
       settings.exclusions.propertyScopeStrategy = 'Exclude all except...';
-      yamlFixtures.set('status: draft', { status: 'draft' });
-      yamlFixtures.set('status: published', { status: 'published' });
+      yamlFixtures.set('status: draft\n', { status: 'draft' });
+      yamlFixtures.set('status: published\n', { status: 'published' });
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(
@@ -169,11 +169,11 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
   describe('caller override shapes', () => {
     beforeEach(() => {
-      settings.exclusions.excludedFolders = ['Notes'];
+      settings.exclusions.excludedFiles = ['Notes/'];
       settings.exclusions.excludedProperties = [
         { key: 'status', value: 'draft' },
       ];
-      yamlFixtures.set('status: draft', { status: 'draft' });
+      yamlFixtures.set('status: draft\n', { status: 'draft' });
     });
 
     it('applies every exclusion type for the title-insertion caller (no overrides)', () => {
@@ -182,10 +182,10 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
       );
     });
 
-    it('skips the folder check but keeps properties for the creation-coordinator overrides', () => {
+    it('skips the path check but keeps properties for the creation-coordinator overrides', () => {
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, '', {
-          ignoreFolder: true,
+          ignoreFiles: true,
         })
       ).toBe(false);
 
@@ -193,7 +193,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
         fileOperations.isFileExcludedForCursorPositioning(
           file,
           '---\nstatus: draft\n---\n',
-          { ignoreFolder: true }
+          { ignoreFiles: true }
         )
       ).toBe(true);
     });
@@ -203,7 +203,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, '', {
-          ignoreFolder: true,
+          ignoreFiles: true,
           ignoreTag: true,
           ignoreProperty: true,
         })
@@ -214,7 +214,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
   describe('disable-renaming property', () => {
     it('is excluded when content frontmatter carries the disable property', () => {
       const content = '---\nno rename: true\n---\n';
-      yamlFixtures.set('no rename: true', { 'no rename': true });
+      yamlFixtures.set('no rename: true\n', { 'no rename': true });
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, content)
@@ -223,7 +223,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
     it('matches the disable key and value case-insensitively', () => {
       const content = '---\nNo Rename: TRUE\n---\n';
-      yamlFixtures.set('No Rename: TRUE', { 'No Rename': 'TRUE' });
+      yamlFixtures.set('No Rename: TRUE\n', { 'No Rename': 'TRUE' });
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, content)
@@ -232,7 +232,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
     it('matches a disable value inside a list', () => {
       const content = '---\nno rename:\n  - true\n---\n';
-      yamlFixtures.set('no rename:\n  - true', { 'no rename': ['true'] });
+      yamlFixtures.set('no rename:\n  - true\n', { 'no rename': ['true'] });
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, content)
@@ -241,7 +241,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
     it('ignores a matching value stored under a different key', () => {
       const content = '---\nstatus: true\n---\n';
-      yamlFixtures.set('status: true', { status: true });
+      yamlFixtures.set('status: true\n', { status: true });
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, content)

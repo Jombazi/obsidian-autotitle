@@ -48,54 +48,47 @@
     "processedNotesWithErrors": "Processed {{processed}}/{{total}} notes with {{errors}} errors. Check console for details.",
     "noNotesFoundWithTag": "No notes found with #{{tag}}",
     "noNotesFoundInFolders": "No notes found in selected folders",
-    "disabledRenamingFor": "Disabled renaming for: {{filename}}",
+    "noNotesFoundInFolder": "No notes found in “{{folder}}”",
+    "noNotesToRename": "No notes to rename",
+    "disabledRenamingFor": "Disabled renaming for “{{filename}}”",
     "failedToDisable": "Failed to disable renaming. Check console for details.",
-    "enabledRenamingFor": "Enabled renaming for: {{filename}}",
+    "enabledRenamingFor": "Enabled renaming for “{{filename}}”",
     "failedToEnable": "Failed to enable renaming. Check console for details.",
     "automaticRenamingEnabled": "Automatic renaming enabled",
     "automaticRenamingDisabled": "Automatic renaming disabled",
     "settingsCleared": "Settings have been cleared",
     "settingsImported": "Settings have been imported successfully",
     "invalidImportFile": "Invalid settings file. Please select a valid JSON file.",
-    "settingsReset": "Due to major changes, all First Line is Title settings have been reset. A backup of your settings can be found in your Obsidian config folder under plugins/first-line-is-title/data_backup.json.",
-    "inactivityNotice": "First Line is Title is still active. Please ensure your settings and file backups are up to date.",
+    "settingsReset": "Due to major changes, all First Line is Title settings have been reset. A backup of your previous settings was saved to your vault as “{{path}}”.",
+    "settingsResetWithoutBackup": "Due to major changes, all First Line is Title settings have been reset. Your previous settings could not be backed up.",
     "disabledRenamingForNNotes": "Disabled renaming for {{count}} notes",
     "enabledRenamingForNNotes": "Enabled renaming for {{count}} notes",
     "renameEngineNotInitialized": "Rename engine not initialized. Please restart Obsidian.",
     "propertyManagerNotInitialized": "Property manager not initialized. Please restart Obsidian.",
-    "renamedTo": "Renamed to: {{filename}}",
-    "notRenamedSelfReference": "Note not renamed due to self-referential link in first line: {{filename}}",
-    "notRenamedNoHeading": "Note not renamed due to no heading in first line: {{filename}}",
-    "notRenamedExcluded": "Note not renamed due to being excluded: {{filename}}",
-    "fileNameExclusionPreventedRename": "Excluded file name prevented rename of: {{filename}}",
-    "disabledRenamingInFolder": "Disabled renaming in: {{folder}}",
-    "enabledRenamingInFolder": "Enabled renaming in: {{folder}}",
+    "renamedTo": "Renamed to “{{filename}}”",
+    "notRenamedSelfReference": "“{{filename}}” not renamed due to self-referential link in first line",
+    "notRenamedNoHeading": "“{{filename}}” not renamed due to no heading in first line",
+    "notRenamedExcluded": "“{{filename}}” not renamed due to being excluded",
+    "disabledRenamingInFolder": "Disabled renaming in “{{folder}}”",
+    "enabledRenamingInFolder": "Enabled renaming in “{{folder}}”",
     "enabledRenamingInNFolders": "Enabled renaming in {{count}} folders",
     "disabledRenamingInNFolders": "Disabled renaming in {{count}} folders"
   },
   "modals": {
-    "caution": "Caution",
-    "processNNotes": {
+    "renameNotes": "Rename notes",
+    "bulkCaution": "Please ensure your files are backed up, and exclusions are configured as expected in plugin settings.",
+    "renameNNotes": {
       "one": {
-        "before": "This will process ",
+        "before": "This will rename ",
         "noun": "note",
         "after": "."
       },
       "many": {
-        "before": "This will process ",
+        "before": "This will rename ",
         "noun": "notes",
         "after": "."
       }
     },
-    "ensure": "Please ensure:",
-    "filesBackedUp": "Your files are backed up in case of errors.",
-    "exclusionsConfigured": "Excluded folders, tags and properties are configured correctly in plugin settings.",
-    "ensureFilesBackedUp": "Please ensure your files are backed up in case of errors.",
-    "renameInAllSubfolders": "Rename notes in all subfolders",
-    "renameInExcludedFolders": "Rename notes in excluded folders",
-    "renameWithExcludedTags": "Rename notes with excluded tags",
-    "renameWithExcludedProperties": "Rename notes with excluded properties",
-    "renameWithSubtags": "Rename notes with subtags (e.g., #tag/subtag)",
     "resetAllSettings": "This will reset all First Line is Title settings to default and delete all user rules. This cannot be undone.",
     "disableEnableAddProperty": "This will add the property ",
     "disableEnableRemoveProperty": "This will remove the property ",
@@ -103,20 +96,6 @@
     "propertyFrom": " from ",
     "internalLink": "Internal link",
     "enterText": "Enter text...",
-    "backedUpLinkText": "backed up",
-    "processNotesMessage": {
-      "one": {
-        "before": "This will process ",
-        "noun": "note",
-        "after": "."
-      },
-      "many": {
-        "before": "This will process ",
-        "noun": "notes",
-        "after": "."
-      }
-    },
-    "ensureBackup": "Please ensure your files are backed up in case of errors.",
     "propertyIn": " property in ",
     "note": "note",
     "noteFew": "notes",
@@ -124,24 +103,71 @@
     "notesPrepositional": "notes",
     "buttons": {
       "cancel": "Cancel",
+      "done": "Done",
+      "save": "Save",
       "rename": "Rename",
       "clear": "Clear",
       "disable": "Disable",
       "enable": "Enable",
       "add": "Add"
+    },
+    "addExcludedFile": {
+      "title": "Add exclusion",
+      "editTitle": "Edit exclusion",
+      "help": "Enter a path or a regular expression, e.g. /daily-.*/",
+      "emptyFilter": "Filter cannot be empty"
+    },
+    "settingsTransfer": {
+      "export": {
+        "title": "Export settings",
+        "editor": {
+          "name": "Settings JSON",
+          "desc": "Only settings that differ from the defaults are included."
+        },
+        "copy": "Copy",
+        "download": "Download",
+        "copied": "Settings copied to clipboard",
+        "errors": {
+          "copyFailed": "Failed to copy settings: {{message}}"
+        }
+      },
+      "import": {
+        "title": "Import settings",
+        "file": {
+          "name": "Settings file",
+          "desc": "Select a settings file to load it into the editor below.",
+          "button": "Select file"
+        },
+        "editor": {
+          "name": "Settings JSON",
+          "desc": "Paste a settings file here, or edit the loaded one before importing.",
+          "placeholder": "Paste settings JSON here"
+        },
+        "button": "Import",
+        "confirm": {
+          "title": "Caution",
+          "message": "This replaces every plugin setting. Any setting missing from the file returns to its default. A backup of your current settings is saved to your vault first.",
+          "button": "Import"
+        },
+        "errors": {
+          "readFailed": "Failed to read file: {{message}}"
+        }
+      }
     }
   },
   "settings": {
     "common": {
       "restoreDefault": "Restore default",
-      "enabled": "Enabled"
+      "enabled": "Enabled",
+      "edit": "Edit",
+      "delete": "Delete"
     },
     "sections": {
       "exclusions": "Exclusions",
       "characterReplacements": "Character replacements",
       "customReplacements": "Custom replacements",
       "markupStripping": "Markup stripping",
-      "alias": "Alias",
+      "firstLineProperty": "First line property",
       "commands": "Commands",
       "other": "Other",
       "advancedGroup": "Advanced",
@@ -195,7 +221,7 @@
       },
       "renameAllNotes": {
         "name": "Rename all notes",
-        "desc": "Rename every note in the vault. Can also be run from Command palette.",
+        "desc": "Rename every note in the vault.",
         "button": "Rename"
       },
       "sendFeedback": {
@@ -212,25 +238,20 @@
     "exclusions": {
       "desc": "Set how notes should be excluded from renaming.",
       "note": "Note: A file is skipped if any rule excludes it, even if another rule includes it. For example, a note in an excluded folder but with an included tag will not be renamed.",
-      "folders": {
-        "title": "Folders",
-        "renamedWarning": "Renamed, moved or deleted folders are not reflected below. Update manually if paths change.",
-        "matchSubfolders": {
-          "name": "Match subfolders",
-          "desc": "Also apply to all subfolders of folders listed below."
-        },
+      "files": {
+        "title": "Excluded files",
+        "renamedWarning": "Renamed, moved or deleted files and folders are not reflected below. Update manually if paths change.",
         "exclusionMode": {
           "name": "Exclusion mode",
-          "desc": "Set how folders should be excluded.",
+          "desc": "How files should be excluded.",
           "onlyExclude": "Only exclude...",
           "excludeAllExcept": "Exclude all except..."
         },
-        "placeholder": "Folder name",
-        "addButton": "Add folder",
-        "emptyState": "No folders added."
+        "addButton": "Add exclusion",
+        "emptyState": "No files excluded."
       },
       "tags": {
-        "title": "Tags",
+        "title": "Excluded tags",
         "excludeAllNote": {
           "part1": "",
           "excludeAllExcept": "Exclude all except...",
@@ -239,7 +260,7 @@
         "tagWranglerWarning": "Renamed tags are not reflected below. Update manually after renaming.",
         "matchTags": {
           "name": "Match tags",
-          "desc": "Set where tags should be matched.",
+          "desc": "Where tags should be matched.",
           "inPropertiesAndBody": "In properties and note body",
           "inPropertiesOnly": "In properties only",
           "inBodyOnly": "In note body only"
@@ -250,14 +271,14 @@
         },
         "exclusionMode": {
           "name": "Exclusion mode",
-          "desc": "Set how tags should be excluded."
+          "desc": "How tags should be excluded."
         },
         "placeholder": "Tag name",
         "addButton": "Add tag",
-        "emptyState": "No tags added."
+        "emptyState": "No tags excluded."
       },
       "properties": {
-        "title": "Properties",
+        "title": "Excluded properties",
         "leaveBlank": {
           "part1": "Leave ",
           "value": "Property value",
@@ -272,56 +293,36 @@
         "renamedWarning": "Renamed property names aren't reflected below. Update manually after renaming.",
         "exclusionMode": {
           "name": "Exclusion mode",
-          "desc": "Set how properties should be excluded."
+          "desc": "How properties should be excluded."
         },
         "keyPlaceholder": "Property name",
         "valuePlaceholder": "Property value",
         "separator": ":",
         "addButton": "Add property",
-        "emptyState": "No properties added."
+        "emptyState": "No properties excluded."
       },
       "disableProperty": {
         "title": "Property that disables renaming",
         "alwaysRespected": "Always respected — cannot get overridden by any command.",
         "caseInsensitive": "Case-insensitive.",
         "updateWarning": "Changing this will not automatically update properties that have been previously added to notes. Update manually after changing."
-      },
-      "fileNames": {
-        "title": "File name matches",
-        "exclusionMode": {
-          "name": "Exclusion mode",
-          "desc": "Set how file names should be excluded."
-        },
-        "addButton": "Add match",
-        "emptyState": "No matches added.",
-        "headers": {
-          "enable": "Enable",
-          "text": "Text",
-          "onlyMatchStart": "Only match file name start",
-          "onlyMatchWhole": "Only match whole file name",
-          "caseSensitive": "Case-sensitive"
-        }
       }
     },
-    "alias": {
+    "firstLineProperty": {
       "desc": "Copy the first line to a property when renaming.",
-      "addAlias": {
-        "name": "Add alias",
-        "desc": "Copy the first line to a property when renaming."
-      },
-      "aliasPropertyName": {
-        "name": "Alias property name",
-        "desc": "Set the property name in which to insert the alias.",
-        "quickSwitcher": "Use “aliases” to make the alias searchable in Quick switcher and link suggestions.",
-        "multipleProperties": "To populate multiple properties, separate by comma (e.g., “aliases, title”).",
+      "propertyName": {
+        "name": "First line property",
+        "desc": "Property name in which to insert the first line when renaming.",
+        "quickSwitcher": "Use “aliases” to make the first line searchable in the Quick switcher and link suggestions.",
+        "multipleProperties": "To populate multiple properties, separate by comma.",
         "placeholder": "Property name"
       },
-      "addAliasOnlyIfTitleDiffers": {
-        "name": "Add alias only if title differs from first line",
-        "desc": "For example, if the file name was truncated, or some characters have been omitted or replaced."
+      "addOnlyIfTitleDiffers": {
+        "name": "Add only if title differs from first line",
+        "desc": "For example, if the file name was truncated, or some characters have been replaced or removed."
       },
-      "truncateAlias": {
-        "name": "Truncate alias",
+      "truncate": {
+        "name": "Truncate",
         "desc": {
           "part1": "In accordance with the ",
           "charCount": "Character count",
@@ -333,7 +334,7 @@
       "applyCustomReplacements": {
         "name": "Apply custom replacements",
         "desc": {
-          "part1": "Apply custom text replacements to alias, as set in ",
+          "part1": "Apply custom text replacements to the property, as set in ",
           "customReplacements": "Custom replacements",
           "part2": " settings."
         }
@@ -341,22 +342,22 @@
       "stripMarkup": {
         "name": "Strip markup",
         "desc": {
-          "part1": "Omit markup syntax in alias, as set in ",
+          "part1": "Omit markup syntax in the property, as set in ",
           "markupStripping": "Markup stripping",
           "part2": " settings."
         }
       },
-      "keepEmptyAliasProperty": {
-        "name": "Keep empty alias property",
-        "desc": "When the plugin removes the first line alias and no other aliases remain, keep the empty property rather than delete it."
+      "keepEmptyProperty": {
+        "name": "Keep empty property",
+        "desc": "When the plugin removes its value and no other values remain, keep the empty property rather than delete it."
       },
-      "placeAliasLast": {
+      "placeLast": {
         "name": "Place last in list",
-        "desc": "Place alias last in list-type property."
+        "desc": "Place the first line last in list-type property."
       },
-      "hideAliasProperty": {
-        "name": "Hide alias property",
-        "desc": "Hide the alias property in Reading view and Live Preview. Will always remain visible in Source view.",
+      "hideProperty": {
+        "name": "Hide property",
+        "desc": "Hide the property in Reading view and Live Preview. Will always remain visible in Source view.",
         "never": "Never",
         "onlyWhenEmpty": "Only when empty",
         "always": "Always"
@@ -364,23 +365,12 @@
       "hideInSidebar": {
         "name": "Hide in sidebar",
         "desc": "Also hide the property in the properties sidebar."
-      },
-      "limitations": {
-        "bullet1": "First line alias will not update when editing in Canvas.",
-        "bullet2": "Due to Obsidian bug, “modified externally” notifications may occasionally appear when updating alias."
       }
     },
     "characterReplacements": {
       "name": "Replace forbidden characters",
       "desc": "Replace characters forbidden in file name with safe alternatives.",
-      "toggleDesc": "Replace characters not allowed in Obsidian file names with safe alternatives. Turn this off to strip them entirely.",
-      "trimNote": {
-        "part1": "Enable ",
-        "trimLeft": "Trim left",
-        "part2": " to strip spaces before the character in file name. Enable ",
-        "trimRight": "Trim right",
-        "part3": " to remove spaces after the character."
-      },
+      "toggleDesc": "Replace characters not allowed in Obsidian file names with safe alternatives. Turn this off to remove them entirely.",
       "allOSes": {
         "title": "All OSes",
         "desc": "Replace characters that are forbidden in Obsidian file names on every operating system."
@@ -390,11 +380,22 @@
         "desc": "Replace characters that are forbidden in Obsidian file names on Windows and Android only."
       },
       "headers": {
-        "enable": "Enable",
-        "character": "Character",
         "replaceWith": "Replace with",
         "trimLeft": "Trim left",
         "trimRight": "Trim right"
+      },
+      "dialog": {
+        "replace": "Replace",
+        "trimLeftDesc": "Remove spaces before the character in the file name.",
+        "trimRightDesc": "Remove spaces after the character in the file name."
+      },
+      "summary": {
+        "replacedWith": "Replaced with “{{replacement}}”",
+        "trimsLeft": ", trims left",
+        "trimsRight": ", trims right",
+        "trimsBoth": ", trims both sides",
+        "removed": "Removed",
+        "keptExceptAtStart": "Kept, except at the start of the file name"
       },
       "characters": {
         "leftBracket": "Left bracket [",
@@ -403,6 +404,7 @@
         "caret": "Caret ^",
         "pipe": "Pipe |",
         "backslash": "Backslash \\",
+        "backslashNote": "Note: The backslash is replaced only when it's visible in Reading view.",
         "forwardSlash": "Forward slash /",
         "colon": "Colon :",
         "dot": "Dot .",
@@ -416,24 +418,22 @@
       "emptyPlaceholder": "Empty"
     },
     "customReplacements": {
-      "name": "Enable custom replacements",
       "desc": "Configure custom text replacements for file name.",
-      "toggleDesc": "Apply custom text replacements to file name.",
       "rulesApplyTopToBottom": "Rules apply top to bottom.",
       "whitespacePreserved": "Whitespace preserved.",
-      "leaveBlank": {
-        "part1": "Leave ",
-        "replaceWith": "Replace with",
-        "part2": " blank to omit text entirely."
+      "leaveBlank": "Leave empty to omit text entirely.",
+      "summary": {
+        "onlyAtLineStart": ", only at line start",
+        "onlyWholeLine": ", only as the whole line"
       },
       "headers": {
-        "enable": "Enable",
         "textToReplace": "Text to replace",
         "replaceWith": "Replace with",
         "onlyMatchLineStart": "Only match line start",
         "onlyMatchWholeLine": "Only match whole line"
       },
       "addReplacement": "Add replacement",
+      "editReplacement": "Edit replacement",
       "processingOrder": {
         "applyAfterForbidden": "Apply after stripping or replacing forbidden characters",
         "asSetInReplace": {
@@ -448,11 +448,10 @@
           "part2": " settings."
         }
       },
-      "emptyState": "No custom replacements.",
-      "emptyRule": "Empty rule"
+      "emptyState": "No custom replacements."
     },
     "markupStripping": {
-      "desc": "Omit markup syntax in file name.",
+      "desc": "Remove markup syntax in file name.",
       "headings": {
         "name": "Strip heading markup",
         "desc": {
@@ -613,7 +612,7 @@
           "part1": "For example, turn ",
           "example1": "Hello[^1]",
           "part2": " or ",
-          "example2": "Hello^[footnote]",
+          "example2": "Hello^[There]",
           "part3": " into ",
           "example3": "Hello",
           "part4": "."
@@ -699,14 +698,14 @@
       }
     },
     "other": {
-      "desc": "Fine-tune, troubleshoot, and manage settings.",
+      "desc": "Fine-tune, troubleshoot, manage settings.",
       "charCount": {
         "name": "Character count",
         "desc": "The maximum number of characters to put in file name."
       },
       "notificationMode": {
         "name": "Show notification when renaming manually",
-        "desc": "Set when to show notifications for manual rename commands.",
+        "desc": "When to show notifications for manual rename commands.",
         "always": "Always",
         "onTitleChange": "On title change",
         "never": "Never"
@@ -756,7 +755,7 @@
       },
       "clearSettings": {
         "name": "Clear settings",
-        "desc": "Reset all plugin settings to default.",
+        "desc": "Reset all First Line is Title settings to default.",
         "button": "Clear"
       },
       "titleCase": {
@@ -769,7 +768,6 @@
     },
     "errors": {
       "saveFailed": "Failed to save settings",
-      "importFailed": "Failed to import settings",
       "importIncompatible": "This settings file comes from an incompatible plugin version. Your current settings were left unchanged."
     },
     "ruleCount": {

@@ -21,6 +21,7 @@ export interface FileState {
   // Lifecycle timers
   creationDelayTimer?: number;
   throttleTimer?: number; // checkInterval > 0 delayed processing
+  throttleTimerIsDelayed?: boolean; // The timer waits for typing in a linked note to pause, so each new first-line edit restarts it
 
   // Content tracking
   lastEditorContent?: string;
@@ -29,7 +30,6 @@ export interface FileState {
   lastSavedContentTimestamp?: number;
   titleRegionCache?: TitleRegionCache;
   lastSelfRefNotice?: number; // timestamp
-  lastFileNameExclusionNotice?: number; // timestamp
 
   // Operation tracking
   operationData?: OperationData;
@@ -106,13 +106,20 @@ export class FileStateManager {
 
   /**
    * Set throttle timer for a file (checkInterval > 0 delayed processing)
+   * @param delayed - True when the timer waits out a linked note's typing pause
    */
-  setThrottleTimer(path: string, timer: number): void {
+  setThrottleTimer(path: string, timer: number, delayed = false): void {
     const state = this.getOrCreateState(path);
     if (state.throttleTimer) {
       window.clearTimeout(state.throttleTimer);
     }
     state.throttleTimer = timer;
+    if (delayed) {
+      state.throttleTimerIsDelayed = true;
+    } else {
+      // Deleted rather than set to false, so runMaintenance can still drop an otherwise empty state.
+      delete state.throttleTimerIsDelayed;
+    }
   }
 
   /**
@@ -123,6 +130,7 @@ export class FileStateManager {
     if (state?.throttleTimer) {
       window.clearTimeout(state.throttleTimer);
       delete state.throttleTimer;
+      delete state.throttleTimerIsDelayed;
     }
   }
 
@@ -134,6 +142,14 @@ export class FileStateManager {
   }
 
   /**
+   * Check if file has a throttle timer waiting out a linked note's typing pause
+   */
+  hasDelayedThrottleTimer(path: string): boolean {
+    const state = this.fileStates.get(path);
+    return !!state?.throttleTimer && state.throttleTimerIsDelayed === true;
+  }
+
+  /**
    * Clear all throttle timers (used on settings change)
    */
   clearAllThrottleTimers(): void {
@@ -141,6 +157,7 @@ export class FileStateManager {
       if (state.throttleTimer) {
         window.clearTimeout(state.throttleTimer);
         delete state.throttleTimer;
+        delete state.throttleTimerIsDelayed;
       }
     }
   }
@@ -266,26 +283,6 @@ export class FileStateManager {
     return Date.now() - state.lastSelfRefNotice > TIMING.SELF_REF_NOTICE_TTL_MS;
   }
 
-  /**
-   * Set last file name exclusion notice timestamp
-   */
-  setFileNameExclusionNotice(path: string): void {
-    const state = this.getOrCreateState(path);
-    state.lastFileNameExclusionNotice = Date.now();
-  }
-
-  /**
-   * Check if can show file name exclusion notice (rate limit)
-   */
-  canShowFileNameExclusionNotice(path: string): boolean {
-    const state = this.fileStates.get(path);
-    if (!state?.lastFileNameExclusionNotice) return true;
-    return (
-      Date.now() - state.lastFileNameExclusionNotice >
-      TIMING.SELF_REF_NOTICE_TTL_MS
-    );
-  }
-
   // ============================================================================
   // OPERATION TRACKING
   // ============================================================================
@@ -342,7 +339,8 @@ export class FileStateManager {
   releaseLock(path: string): void {
     const state = this.fileStates.get(path);
     if (state) {
-      state.isLocked = false;
+      // Flags are deleted, never set to false, so runMaintenance can drop a state once nothing else is held
+      delete state.isLocked;
       delete state.lockTimestamp;
     }
   }
@@ -359,7 +357,7 @@ export class FileStateManager {
    */
   clearAllLocks(): void {
     for (const state of this.fileStates.values()) {
-      state.isLocked = false;
+      delete state.isLocked;
     }
   }
 
@@ -384,7 +382,7 @@ export class FileStateManager {
   clearPendingAliasRecheck(path: string): void {
     const state = this.fileStates.get(path);
     if (state) {
-      state.pendingAliasRecheck = false;
+      delete state.pendingAliasRecheck;
     }
   }
 
@@ -424,7 +422,7 @@ export class FileStateManager {
   clearEditorSyncing(path: string): void {
     const state = this.fileStates.get(path);
     if (state) {
-      state.isSyncingEditors = false;
+      delete state.isSyncingEditors;
     }
   }
 
@@ -512,7 +510,7 @@ export class FileStateManager {
       if (state.isLocked && state.lockTimestamp) {
         const age = now - state.lockTimestamp;
         if (age > TIMING.FILE_LOCK_STALE_THRESHOLD_MS) {
-          state.isLocked = false;
+          delete state.isLocked;
           delete state.lockTimestamp;
         }
       }
@@ -537,17 +535,11 @@ export class FileStateManager {
         }
       }
 
-      // Clean up stale self-ref and file name exclusion notice timestamps
+      // Clean up stale self-ref notice timestamps
       if (state.lastSelfRefNotice) {
         const age = now - state.lastSelfRefNotice;
         if (age > staleThreshold) {
           delete state.lastSelfRefNotice;
-        }
-      }
-      if (state.lastFileNameExclusionNotice) {
-        const age = now - state.lastFileNameExclusionNotice;
-        if (age > staleThreshold) {
-          delete state.lastFileNameExclusionNotice;
         }
       }
 

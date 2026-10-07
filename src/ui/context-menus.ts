@@ -7,6 +7,12 @@ import { MenuRenderer } from './menu-config';
 import { MenuDefinitions } from './menu-definitions';
 import { TIMING } from '../constants/timing';
 import { EXCLUSION_STRATEGY } from '../types';
+import {
+  folderExclusionEntry,
+  hasExcludedFileEntry,
+  isFolderFullyExcludedByFileRules,
+  isTagFullyExcludedByTagRules,
+} from '../utils/file-exclusions';
 
 /**
  * Manages all context menu operations for the First Line is Title plugin.
@@ -44,12 +50,15 @@ export class ContextMenuManager {
    * Determines whether to show disable menu option for a folder based on scope strategy.
    */
   shouldShowDisableMenuForFolder(folderPath: string): boolean {
-    const isInList =
-      this.plugin.settings.exclusions.excludedFolders.includes(folderPath);
+    const folderEntry = folderExclusionEntry(folderPath);
+    const isInList = hasExcludedFileEntry(
+      this.plugin.settings.exclusions.excludedFiles,
+      folderEntry
+    );
 
     let result: boolean;
     if (
-      this.plugin.settings.exclusions.folderScopeStrategy ===
+      this.plugin.settings.exclusions.fileScopeStrategy ===
       EXCLUSION_STRATEGY.ONLY_EXCLUDE
     ) {
       // Only exclude strategy: list contains DISABLED folders
@@ -64,7 +73,8 @@ export class ContextMenuManager {
     }
 
     verboseLog(this.plugin, `shouldShowDisableMenuForFolder(${folderPath})`, {
-      folderScopeStrategy: this.plugin.settings.exclusions.folderScopeStrategy,
+      fileScopeStrategy: this.plugin.settings.exclusions.fileScopeStrategy,
+      folderEntry,
       isInList,
       result,
       willShow: result ? 'DISABLE menu' : 'ENABLE menu',
@@ -98,7 +108,7 @@ export class ContextMenuManager {
     }
 
     verboseLog(this.plugin, `shouldShowDisableMenuForTag(${tagName})`, {
-      folderScopeStrategy: this.plugin.settings.exclusions.folderScopeStrategy,
+      tagScopeStrategy: this.plugin.settings.exclusions.tagScopeStrategy,
       tagToFind,
       isInList,
       result,
@@ -109,47 +119,26 @@ export class ContextMenuManager {
   }
 
   /**
-   * Gets the appropriate menu text for folder operations based on scope strategy.
+   * Menu text for folder operations. The scope strategy inverts which half of
+   * the pair is visible - see shouldShowDisableMenuForFolder - never its wording,
+   * so there is one phrasing per action rather than one per strategy.
    */
-  getFolderMenuText(_folderPath: string): { disable: string; enable: string } {
-    if (
-      this.plugin.settings.exclusions.folderScopeStrategy ===
-      EXCLUSION_STRATEGY.ONLY_EXCLUDE
-    ) {
-      // Only exclude strategy: list contains DISABLED folders
-      return {
-        disable: t('commands.disableRenamingInFolder'),
-        enable: t('commands.enableRenamingInFolder'),
-      };
-    } else {
-      // Exclude all except strategy: list contains ENABLED folders
-      return {
-        disable: t('commands.disableRenamingInFolder'),
-        enable: t('commands.enableRenamingInFolder'),
-      };
-    }
+  getFolderMenuText(): { disable: string; enable: string } {
+    return {
+      disable: t('commands.disableRenamingInFolder'),
+      enable: t('commands.enableRenamingInFolder'),
+    };
   }
 
   /**
-   * Gets the appropriate menu text for tag operations based on scope strategy.
+   * Menu text for tag operations. Strategy-independent for the same reason as
+   * getFolderMenuText.
    */
-  getTagMenuText(_tagName: string): { disable: string; enable: string } {
-    if (
-      this.plugin.settings.exclusions.tagScopeStrategy ===
-      EXCLUSION_STRATEGY.ONLY_EXCLUDE
-    ) {
-      // Only exclude strategy: list contains DISABLED tags
-      return {
-        disable: t('commands.disableRenamingForTag'),
-        enable: t('commands.enableRenamingForTag'),
-      };
-    } else {
-      // Exclude all except strategy: list contains ENABLED tags
-      return {
-        disable: t('commands.disableRenamingForTag'),
-        enable: t('commands.enableRenamingForTag'),
-      };
-    }
+  getTagMenuText(): { disable: string; enable: string } {
+    return {
+      disable: t('commands.disableRenamingForTag'),
+      enable: t('commands.enableRenamingForTag'),
+    };
   }
 
   /**
@@ -190,9 +179,16 @@ export class ContextMenuManager {
     if (!this.plugin.settings.core.enableTagCommands) return;
 
     const shouldShowDisable = this.shouldShowDisableMenuForTag(tagName);
-    const menuText = this.getTagMenuText(tagName);
+    const menuText = this.getTagMenuText();
 
-    {
+    // Hidden when exclusions leave no note to rename, since the dialog would only say so
+    if (
+      !isTagFullyExcludedByTagRules(
+        tagName,
+        this.plugin.settings,
+        this.plugin.app
+      )
+    ) {
       const menuItem = menuEl.createDiv({ cls: 'menu-item' });
       const iconEl = menuItem.createDiv({ cls: 'menu-item-icon' });
       setIcon(iconEl, 'file-type-corner');
@@ -250,7 +246,12 @@ export class ContextMenuManager {
       totalFiles += files.length;
     });
 
-    const hasRenameCommand = totalFiles > 0;
+    // Hidden when exclusions leave no note to rename, since the dialog would only say so
+    const hasRenameCommand =
+      totalFiles > 0 &&
+      !folders.every((folder) =>
+        isFolderFullyExcludedByFileRules(folder, this.plugin.settings)
+      );
 
     // No separator here — see MenuRenderer.render for why.
     if (hasRenameCommand) {

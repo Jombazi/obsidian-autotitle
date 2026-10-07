@@ -12,6 +12,12 @@ import { tp } from '../i18n';
 import { RenameModal, DisableEnableModal } from '../modals';
 import { around } from 'monkey-around';
 import { detectTagFromDOM, detectTagFromEditor } from '../utils/tag-detection';
+import {
+  SourceEditorTarget,
+  findSourceEditorForFile,
+} from '../utils/frontmatter-edit';
+import { isCanvasCardEmbed } from '../utils/embedded-editors';
+import { hasFirstLinePropertyName } from '../utils/first-line-property-keys';
 import { TIMING } from '../constants/timing';
 
 // In `Cache` and `File` read modes the `modify` handler's own `processFile` can still hold the lock when `changed` arrives.
@@ -51,13 +57,35 @@ export class EventHandlerManager {
     return this.notesShownInEditor.has(file);
   }
 
-  /** Check if a note is open in an editor, or was edited in one recently enough that a closed page preview's pending save still belongs to that edit. */
+  /** Check if a note is open in an editor, or was edited in one recently enough that a closed page preview's or deselected Canvas card's pending save still belongs to that edit. */
   private isEditingNote(file: TFile): boolean {
     return (
       isFileOpenInAnyEditor(file, this.plugin.app) ||
       Date.now() - (this.lastEditorEditAt.get(file) ?? 0) <
-        TIMING.PAGE_PREVIEW_SAVE_GRACE_MS
+        TIMING.EMBED_SAVE_GRACE_MS
     );
+  }
+
+  /**
+   * Choose where a background alias update goes, from the file text the handler just read.
+   * @param file - Note whose alias may change
+   * @param fileContent - Text the handler read from the file
+   * @returns `'user-typing'` to skip the update, since the rename path owns alias updates while the user has unsaved typing or a scheduled rename; the editor to write into; or null to write the file
+   */
+  private findBackgroundAliasTarget(
+    file: TFile,
+    fileContent: string
+  ): SourceEditorTarget | 'user-typing' | null {
+    // A tab, card or preview saves 2 s after its first unsaved keystroke, while typing may go on, and a linked note's rename can still be waiting for typing to pause.
+    if (this.plugin.fileStateManager.hasThrottleTimer(file.path)) {
+      return 'user-typing';
+    }
+    const target = findSourceEditorForFile(this.plugin.app, file);
+    if (target?.isDirty()) {
+      return 'user-typing';
+    }
+    // An editor holding other text has not loaded an outside change yet; the file write lets Obsidian reload it silently.
+    return target && target.editor.getValue() === fileContent ? target : null;
   }
 
   /**
@@ -371,6 +399,16 @@ export class EventHandlerManager {
           return;
         }
 
+        // A page preview or Canvas card showing one section passes itself as `info`, and its editor's first line is the section's, not the note's.
+        if ('subpath' in info && info.subpath) {
+          if (this.plugin.settings.core.debug) {
+            console.debug(
+              `Skipping editor-change: section embed (${info.subpath})`
+            );
+          }
+          return;
+        }
+
         this.rememberIfBlockingRename(info.file);
         this.lastEditorEditAt.set(info.file, Date.now());
         this.rememberSavedContentBaseline(info.file);
@@ -396,10 +434,16 @@ export class EventHandlerManager {
           return;
         }
 
+        // A card just added to a canvas is missing from the resolved links until the canvas saves and is re-indexed, about 2 s, so a card counts as linked by where it is.
+        const inCanvasCard =
+          !(info instanceof MarkdownView) &&
+          isCanvasCardEmbed(this.plugin.app, info);
+
         // Use optimal editor change handler
         this.plugin.editorLifecycle.handleEditorChangeWithThrottle(
           editor,
-          info.file
+          info.file,
+          { inCanvasCard, owner: info }
         );
       })
     );
@@ -596,19 +640,27 @@ export class EventHandlerManager {
             this.plugin.settings.core.renameAutomatically &&
             this.plugin.isFullyLoaded
           ) {
-            verboseLog(
-              this.plugin,
-              `Modify event: processing ${file.path} (contentReadMethod: ${this.plugin.settings.core.contentReadMethod})`
-            );
-            await this.plugin.renameEngine.processFile(file, true);
+            // A save during a linked note's delay, from an autosave or a card deselect, would otherwise rename it at once while its timer still waits.
+            if (this.plugin.fileStateManager.hasThrottleTimer(file.path)) {
+              verboseLog(
+                this.plugin,
+                `Modify event: skipping ${file.path}, its scheduled timer processes it`
+              );
+            } else {
+              verboseLog(
+                this.plugin,
+                `Modify event: processing ${file.path} (contentReadMethod: ${this.plugin.settings.core.contentReadMethod})`
+              );
+              await this.plugin.renameEngine.processFile(file, true);
+            }
           }
         }
 
-        // Update aliases if enabled (respects manual/automatic mode)
+        // Update aliases if a property name is set (respects manual/automatic mode)
         // Note: Alias updates happen on save events only (not every keystroke) to reduce
         // "modified externally" notifications from processFrontMatter writes.
         if (
-          this.plugin.settings.aliases.enableAliases &&
+          hasFirstLinePropertyName(this.plugin.settings) &&
           this.plugin.settings.core.renameAutomatically
         ) {
           // Skip if file has pending metadata update from processFrontMatter
@@ -665,26 +717,30 @@ export class EventHandlerManager {
               return;
             }
 
-            // Get editor if active view matches the file being updated
-            const activeView =
-              this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-            const editor =
-              activeView?.file === file ? activeView.editor : undefined;
+            const target = this.findBackgroundAliasTarget(file, currentContent);
+            if (target === 'user-typing') {
+              verboseLog(
+                this.plugin,
+                `Skipping modify-alias update - unsaved typing or a scheduled rename: ${file.path}`
+              );
+              // Still update lastSavedContent even when skipping
+              this.plugin.fileStateManager.setLastSavedContent(
+                file.path,
+                currentContent
+              );
+              return;
+            }
 
             verboseLog(
               this.plugin,
-              `// EDITOR_LOOKUP (modify): activeView=${!!activeView}, activeView.file=${activeView?.file?.path ?? 'none'}, target=${file.path}, match=${activeView?.file === file}`
-            );
-            verboseLog(
-              this.plugin,
-              `// EDITOR_PASS (modify): Passing editor=${editor ? 'defined' : 'undefined'} to updateAliasIfNeeded`
+              `// EDITOR_PASS (modify): Passing target=${target ? 'editor' : 'file'} to updateAliasIfNeeded`
             );
 
             await this.plugin.aliasManager.updateAliasIfNeeded(
               file,
               currentContent,
               undefined,
-              editor
+              target
             );
 
             // Update lastSavedContent after processing
@@ -702,7 +758,7 @@ export class EventHandlerManager {
     // Metadata change handler
     this.plugin.registerEvent(
       this.plugin.app.metadataCache.on('changed', async (file) => {
-        if (!this.plugin.settings.aliases.enableAliases) return;
+        if (!hasFirstLinePropertyName(this.plugin.settings)) return;
         if (!this.plugin.settings.core.renameAutomatically) return;
         if (file.extension !== 'md') return;
 
@@ -777,26 +833,30 @@ export class EventHandlerManager {
           }
           // No previousContent means no baseline: a note open or just edited but not yet seeded, or purged, so a YAML-only edit cannot be told apart and the alias update proceeds
 
-          // Get editor if active view matches the file being updated
-          const activeView =
-            this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-          const editor =
-            activeView?.file === file ? activeView.editor : undefined;
+          const target = this.findBackgroundAliasTarget(file, currentContent);
+          if (target === 'user-typing') {
+            verboseLog(
+              this.plugin,
+              `Skipping metadata-alias update - unsaved typing or a scheduled rename: ${file.path}`
+            );
+            // Still update lastSavedContent even when skipping
+            this.plugin.fileStateManager.setLastSavedContent(
+              file.path,
+              currentContent
+            );
+            return;
+          }
 
           verboseLog(
             this.plugin,
-            `// EDITOR_LOOKUP (metadata): activeView=${!!activeView}, activeView.file=${activeView?.file?.path ?? 'none'}, target=${file.path}, match=${activeView?.file === file}`
-          );
-          verboseLog(
-            this.plugin,
-            `// EDITOR_PASS (metadata): Passing editor=${editor ? 'defined' : 'undefined'} to updateAliasIfNeeded`
+            `// EDITOR_PASS (metadata): Passing target=${target ? 'editor' : 'file'} to updateAliasIfNeeded`
           );
 
           await this.plugin.aliasManager.updateAliasIfNeeded(
             file,
             currentContent,
             undefined,
-            editor
+            target
           );
 
           // Update lastSavedContent after processing

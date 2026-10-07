@@ -1,17 +1,31 @@
-import { Modal, App, TFile, TFolder, Notice } from 'obsidian';
-import { verboseLog, shouldProcessFile, normalizeTag } from './utils';
+import {
+  ConfirmationModal,
+  App,
+  TFile,
+  TFolder,
+  Notice,
+  Platform,
+} from 'obsidian';
+import {
+  verboseLog,
+  shouldProcessFile,
+  normalizeTag,
+  canModifyFile,
+} from './utils';
 import { t, getPluralForm, tpSplit } from './i18n';
 import { FirstLineIsTitlePlugin } from './settings/settings-base';
 import { setDisableRenamingProperty } from './utils/property-value';
+import { addFlitModalClass } from './modals/flit-modal-class';
+import { addFormSheetHeaderButtons } from './modals/form-sheet-header';
 
-// External documentation URL - dynamic construction avoids false positive from hardcoded-config-path rule
-const OBSIDIAN_HELP_DOMAIN =
-  'help' +
-  String.fromCharCode(46) +
-  'obsidian' +
-  String.fromCharCode(46) +
-  'md';
-const OBSIDIAN_BACKUP_DOCS_URL = `https://${OBSIDIAN_HELP_DOMAIN}/backup`;
+/** The caution every bulk-action modal shows above its buttons. */
+function appendBulkCaution(containerEl: HTMLElement): void {
+  // Obsidian's own `mod-warning` class gives the theme's warning color, so no plugin CSS is needed.
+  containerEl.createEl('p', {
+    text: t('modals.bulkCaution'),
+    cls: 'mod-warning',
+  });
+}
 
 // Deliberately small: enough concurrency to hide per-file await latency, not
 // enough to flood the vault adapter on mobile.
@@ -37,98 +51,113 @@ async function forEachInChunks<T>(
   }
 }
 
-export class RenameAllFilesModal extends Modal {
+/**
+ * Whether a bulk rename processes `file`, judged from the metadata cache without reading the note.
+ * Applies the gates `RenameEngine.processFile` applies, so a note whose first line already matches its name still counts.
+ */
+function isProcessedByBulkRename(
+  file: TFile,
+  plugin: FirstLineIsTitlePlugin
+): boolean {
+  const { app, settings } = plugin;
+
+  // `true` because processFile treats a bulk run as a manual command, which only the rename-blocking property stops.
+  const { canModify } = canModifyFile(
+    file,
+    app,
+    settings.exclusions.disableRenamingKey,
+    settings.exclusions.disableRenamingValue,
+    true
+  );
+  if (!canModify) return false;
+
+  return shouldProcessFile(file, settings, app, undefined, undefined, plugin);
+}
+
+/** True when `file` sits anywhere under `folder`, subfolders included. */
+function isFileUnderFolder(file: TFile, folder: TFolder): boolean {
+  // The vault root's path is "/", which no note path starts with.
+  return folder.isRoot() || file.path.startsWith(`${folder.path}/`);
+}
+
+/**
+ * A bulk "Put first line in title" action. The exclusion settings alone decide
+ * which notes it covers, so the dialog only confirms the run.
+ */
+abstract class BulkRenameModal extends ConfirmationModal {
   plugin: FirstLineIsTitlePlugin;
+  protected readonly focusesCancelOnOpen: boolean = false;
+  // Filled once: the modal is too short-lived for the vault to drift between the preview and the run.
+  private filesToProcess: TFile[] | null = null;
 
   constructor(app: App, plugin: FirstLineIsTitlePlugin) {
     super(app);
+    addFlitModalClass(this);
     this.plugin = plugin;
+  }
+
+  /** Every Markdown note the action targets, before exclusions. */
+  protected abstract getNotesInScope(): TFile[];
+
+  /** Shown in place of the dialog when exclusions leave no note to process. */
+  protected abstract getNothingToRenameMessage(): string;
+
+  // The one list behind both the dialog's count and the run, so the two cannot disagree.
+  private getFilesToProcess(): TFile[] {
+    if (!this.filesToProcess) {
+      this.filesToProcess = this.getNotesInScope().filter((file) =>
+        isProcessedByBulkRename(file, this.plugin)
+      );
+    }
+    return this.filesToProcess;
+  }
+
+  open(): void {
+    if (this.getFilesToProcess().length === 0) {
+      new Notice(this.getNothingToRenameMessage());
+      return;
+    }
+    // Added here, not in onOpen, because ConfirmationModal.open reads setInitialFocus before it runs onOpen
+    this.addButton((btn) =>
+      btn
+        .setButtonText(t('modals.buttons.rename'))
+        .setCta()
+        .onClick(() => {
+          void this.renameFilesToProcess();
+        })
+    );
+    this.addButton((btn) => {
+      btn.setButtonText(t('modals.buttons.cancel')).setCancel();
+      if (this.focusesCancelOnOpen) btn.setInitialFocus();
+    });
+    super.open();
   }
 
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
 
-    this.setTitle(t('modals.caution'));
+    this.setTitle(t('modals.renameNotes'));
 
-    // Count all Markdown files
-    const allFiles = this.app.vault.getMarkdownFiles();
-    const count = allFiles.length;
-
+    const count = this.getFilesToProcess().length;
     const messagePara = contentEl.createEl('p');
-    const parts = tpSplit('modals.processNNotes', count);
+    const parts = tpSplit('modals.renameNNotes', count);
     messagePara.appendText(parts.before);
     messagePara.createEl('strong', { text: `${count} ${parts.noun}` });
     messagePara.appendText(parts.after);
 
-    contentEl.createEl('p', {
-      text: t('modals.ensure'),
-      cls: 'flit-margin-top-10 flit-margin-bottom-10',
-    });
-
-    const ul = contentEl.createEl('ul', {
-      cls: 'flit-margin-0 flit-padding-left-20',
-    });
-
-    const li1 = ul.createEl('li');
-    const backupText = t('modals.filesBackedUp');
-    const backupParts = backupText.split(t('modals.backedUpLinkText'));
-    li1.appendText(backupParts[0]);
-    li1.createEl('a', {
-      text: t('modals.backedUpLinkText'),
-      href: OBSIDIAN_BACKUP_DOCS_URL,
-    });
-    if (backupParts[1]) li1.appendText(backupParts[1]);
-
-    ul.createEl('li', { text: t('modals.exclusionsConfigured') });
-
-    const buttonContainer = contentEl.createDiv({
-      cls: 'modal-button-container flit-modal-button-container',
-    });
-
-    const renameButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.rename'),
-    });
-    renameButton.addClass('mod-cta');
-    renameButton.onclick = () => {
-      this.close();
-      void this.renameAllFiles();
-    };
-
-    const cancelButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.cancel'),
-    });
-    cancelButton.onclick = () => this.close();
-
-    // Renaming every note in the vault is the most destructive thing the plugin
-    // does, so the safe choice takes focus and Enter confirms it. Deferred
-    // because Modal moves focus to the first focusable child after onOpen().
-    window.setTimeout(() => cancelButton.focus(), 0);
+    appendBulkCaution(contentEl);
   }
 
-  async renameAllFiles() {
+  async renameFilesToProcess() {
     if (!this.plugin.renameEngine) {
       const notice = new Notice(t('notifications.renameEngineNotInitialized'));
       notice.containerEl.addClass('mod-warning');
       return;
     }
 
-    let filesToRename: TFile[] = [];
-    this.app.vault.getMarkdownFiles().forEach((file) => {
-      if (
-        shouldProcessFile(
-          file,
-          this.plugin.settings,
-          this.app,
-          undefined,
-          undefined,
-          this.plugin
-        )
-      ) {
-        filesToRename.push(file);
-      }
-    });
-
+    // Copied because the sort below would otherwise reorder the cached list.
+    const filesToRename = [...this.getFilesToProcess()];
     filesToRename.sort((a, b) => a.stat.ctime - b.stat.ctime);
 
     const renamingMsg = t('notifications.renamingNNotes').replace(
@@ -138,29 +167,18 @@ export class RenameAllFilesModal extends Modal {
     verboseLog(this.plugin, `Showing notice: ${renamingMsg}`);
     const pleaseWaitNotice = new Notice(renamingMsg, 0);
 
-    verboseLog(
-      this.plugin,
-      `Starting bulk rename of ${filesToRename.length} files`
-    );
-
-    const exclusionOverrides = {
-      ignoreFolder: true,
-      ignoreTag: true,
-      ignoreProperty: true,
-    };
-
     let renamedFileCount = 0;
     const errors: string[] = [];
     try {
       await forEachInChunks(filesToRename, async (file) => {
         try {
+          // No exclusion overrides: processFile re-applies the gates to the note's live content, which can be ahead of the cache the count came from.
           const result = await this.plugin.renameEngine?.processFile(
             file,
             true,
             true,
             undefined,
-            true,
-            exclusionOverrides
+            true
           );
           if (result?.success) {
             renamedFileCount++;
@@ -186,10 +204,6 @@ export class RenameAllFilesModal extends Modal {
     } finally {
       if (this.plugin.cacheManager) {
         this.plugin.cacheManager.clearReservedPaths();
-        verboseLog(
-          this.plugin,
-          'Cache cleaned up immediately after batch operation'
-        );
       }
 
       pleaseWaitNotice.hide();
@@ -214,624 +228,90 @@ export class RenameAllFilesModal extends Modal {
   }
 }
 
-export class RenameFolderModal extends Modal {
-  plugin: FirstLineIsTitlePlugin;
+export class RenameAllFilesModal extends BulkRenameModal {
+  // Renaming every note in the vault is the most destructive thing the plugin does, so the safe choice takes focus and Enter confirms it.
+  protected readonly focusesCancelOnOpen = true;
+
+  protected getNotesInScope(): TFile[] {
+    return this.app.vault.getMarkdownFiles();
+  }
+
+  protected getNothingToRenameMessage(): string {
+    return t('notifications.noNotesToRename');
+  }
+}
+
+export class RenameFolderModal extends BulkRenameModal {
   folder: TFolder;
 
   constructor(app: App, plugin: FirstLineIsTitlePlugin, folder: TFolder) {
-    super(app);
-    this.plugin = plugin;
+    super(app, plugin);
     this.folder = folder;
   }
 
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-
-    this.setTitle(t('modals.caution'));
-
-    const count = this.app.vault
+  protected getNotesInScope(): TFile[] {
+    return this.app.vault
       .getMarkdownFiles()
-      .filter(
-        (f: TFile) =>
-          f.path.startsWith(this.folder.path + '/') ||
-          f.parent?.path === this.folder.path
-      ).length;
-
-    const messagePara = contentEl.createEl('p');
-    const parts = tpSplit('modals.processNNotes', count);
-    messagePara.appendText(parts.before);
-    messagePara.createEl('strong', { text: `${count} ${parts.noun}` });
-    messagePara.appendText(parts.after);
-    messagePara.createEl('br');
-    messagePara.createEl('br');
-    const backupText = t('modals.ensureFilesBackedUp');
-    const backupParts = backupText.split(t('modals.backedUpLinkText'));
-    messagePara.appendText(backupParts[0]);
-    messagePara.createEl('a', {
-      text: t('modals.backedUpLinkText'),
-      href: OBSIDIAN_BACKUP_DOCS_URL,
-    });
-    if (backupParts[1]) messagePara.appendText(backupParts[1]);
-
-    const optionsContainer = contentEl.createDiv({ cls: 'flit-modal-options' });
-
-    // Checkboxes
-    const subfoldersContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const subfoldersCheckbox = subfoldersContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    subfoldersCheckbox.id = 'rename-subfolders';
-    subfoldersCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.folderRename.includeSubfolders;
-
-    const subfoldersLabel = subfoldersContainer.createEl('label');
-    subfoldersLabel.setAttribute('for', 'rename-subfolders');
-    subfoldersLabel.textContent = t('modals.renameInAllSubfolders');
-
-    const excludedFoldersContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedFoldersCheckbox = excludedFoldersContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedFoldersCheckbox.id = 'rename-excluded-folders';
-    excludedFoldersCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedFolders;
-
-    const excludedFoldersLabel = excludedFoldersContainer.createEl('label');
-    excludedFoldersLabel.setAttribute('for', 'rename-excluded-folders');
-    excludedFoldersLabel.textContent = t('modals.renameInExcludedFolders');
-
-    // Rename excluded tags checkbox
-    const excludedTagsContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedTagsCheckbox = excludedTagsContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedTagsCheckbox.id = 'rename-excluded-tags';
-    excludedTagsCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedTags;
-
-    const excludedTagsLabel = excludedTagsContainer.createEl('label');
-    excludedTagsLabel.setAttribute('for', 'rename-excluded-tags');
-    excludedTagsLabel.textContent = t('modals.renameWithExcludedTags');
-
-    // Rename excluded properties checkbox
-    const excludedPropsContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedPropsCheckbox = excludedPropsContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedPropsCheckbox.id = 'rename-excluded-properties';
-    excludedPropsCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedProperties;
-
-    const excludedPropsLabel = excludedPropsContainer.createEl('label');
-    excludedPropsLabel.setAttribute('for', 'rename-excluded-properties');
-    excludedPropsLabel.textContent = t('modals.renameWithExcludedProperties');
-
-    const buttonContainer = contentEl.createDiv({
-      cls: 'modal-button-container flit-modal-button-container',
-    });
-
-    const renameButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.rename'),
-    });
-    renameButton.addClass('mod-cta');
-    renameButton.onclick = async () => {
-      this.plugin.settings.core.modalCheckboxStates.folderRename.includeSubfolders =
-        subfoldersCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedFolders =
-        excludedFoldersCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedTags =
-        excludedTagsCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedProperties =
-        excludedPropsCheckbox.checked;
-      // Save checkbox preferences - operation continues even if save fails (preferences are non-critical)
-      try {
-        await this.plugin.saveSettings();
-      } catch (error) {
-        console.debug('Failed to save modal checkbox preferences:', error);
-      }
-
-      this.close();
-      await this.renameFolderFiles(
-        subfoldersCheckbox.checked,
-        excludedFoldersCheckbox.checked,
-        excludedTagsCheckbox.checked,
-        excludedPropsCheckbox.checked
-      );
-    };
-
-    const cancelButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.cancel'),
-    });
-    cancelButton.onclick = () => this.close();
+      .filter((file) => isFileUnderFolder(file, this.folder));
   }
 
-  async renameFolderFiles(
-    includeSubfolders: boolean,
-    renameExcludedFolders: boolean,
-    renameExcludedTags: boolean,
-    renameExcludedProperties: boolean
-  ) {
-    if (!this.plugin.renameEngine) {
-      const notice = new Notice(t('notifications.renameEngineNotInitialized'));
-      notice.containerEl.addClass('mod-warning');
-      return;
-    }
-
-    const allFiles = this.app.vault.getMarkdownFiles();
-    const directFolderFiles: TFile[] = [];
-    const subfolderFiles: TFile[] = [];
-
-    for (const file of allFiles) {
-      const isInFolder = file.parent?.path === this.folder.path;
-      const isInSubfolder =
-        file.path.startsWith(this.folder.path + '/') &&
-        file.parent?.path !== this.folder.path;
-
-      if (isInFolder) {
-        directFolderFiles.push(file);
-      } else if (includeSubfolders && isInSubfolder) {
-        subfolderFiles.push(file);
-      }
-    }
-
-    // Calculate total files in folder (including all subfolders, regardless of checkbox)
-    const totalFiles = allFiles.filter(
-      (file) =>
-        file.path.startsWith(this.folder.path + '/') ||
-        file.parent?.path === this.folder.path
-    ).length;
-    directFolderFiles.sort((a, b) => a.stat.ctime - b.stat.ctime);
-    subfolderFiles.sort((a, b) => a.stat.ctime - b.stat.ctime);
-
-    const renamingMsg = t('notifications.renamingNNotes').replace(
-      '{{count}}',
-      String(totalFiles)
-    );
-    verboseLog(this.plugin, renamingMsg);
-    const pleaseWaitNotice = new Notice(renamingMsg, 0);
-
-    let renamedFileCount = 0;
-    const errors: string[] = [];
-    try {
-      // Process direct folder files - always ignore folder exclusion for selected folder
-      const directFolderOverrides = {
-        ignoreFolder: true,
-        ignoreTag: renameExcludedTags,
-        ignoreProperty: renameExcludedProperties,
-      };
-
-      await forEachInChunks(directFolderFiles, async (file) => {
-        try {
-          const result = await this.plugin.renameEngine?.processFile(
-            file,
-            true,
-            true,
-            undefined,
-            true,
-            directFolderOverrides
-          );
-          if (result?.success) {
-            renamedFileCount++;
-          }
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          errors.push(`Failed to rename ${file.path}: ${errorMessage}`);
-          console.error(`Error processing ${file.path}`, error);
-        }
-      });
-
-      // Process subfolder files - respect renameExcludedFolders checkbox for subfolders
-      const subfolderOverrides = {
-        ignoreFolder: renameExcludedFolders,
-        ignoreTag: renameExcludedTags,
-        ignoreProperty: renameExcludedProperties,
-      };
-
-      await forEachInChunks(subfolderFiles, async (file) => {
-        try {
-          const result = await this.plugin.renameEngine?.processFile(
-            file,
-            true,
-            true,
-            undefined,
-            true,
-            subfolderOverrides
-          );
-          if (result?.success) {
-            renamedFileCount++;
-          }
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          errors.push(`Failed to rename ${file.path}: ${errorMessage}`);
-          console.error(`Error processing ${file.path}`, error);
-        }
-      });
-
-      if (errors.length > 0) {
-        const errorMsg = t('notifications.renamedNotesWithErrors')
-          .replace('{{renamed}}', String(renamedFileCount))
-          .replace('{{total}}', String(totalFiles))
-          .replace('{{errors}}', String(errors.length));
-        const errorNotice = new Notice(errorMsg, 0);
-        errorNotice.containerEl.addClass('mod-warning');
-        console.error('Rename errors:', errors);
-      }
-    } finally {
-      if (this.plugin.cacheManager) {
-        this.plugin.cacheManager.clearReservedPaths();
-      }
-
-      pleaseWaitNotice.hide();
-      if (errors.length === 0) {
-        verboseLog(
-          this.plugin,
-          `Renamed ${renamedFileCount}/${totalFiles} notes.`
-        );
-        const renamedMsg = t('notifications.renamedNotes')
-          .replace('{{renamed}}', String(renamedFileCount))
-          .replace('{{total}}', String(totalFiles));
-        const successNotice = new Notice(renamedMsg, 0);
-        successNotice.containerEl.addClass('mod-success');
-      }
-    }
-  }
-
-  onClose() {
-    const { contentEl } = this;
-    contentEl.empty();
+  protected getNothingToRenameMessage(): string {
+    return t('notifications.noNotesFoundInFolder', {
+      folder: this.folder.path,
+    });
   }
 }
 
-export class RenameMultipleFoldersModal extends Modal {
-  plugin: FirstLineIsTitlePlugin;
+export class RenameMultipleFoldersModal extends BulkRenameModal {
   folders: TFolder[];
 
   constructor(app: App, plugin: FirstLineIsTitlePlugin, folders: TFolder[]) {
-    super(app);
-    this.plugin = plugin;
+    super(app, plugin);
     this.folders = folders;
   }
 
-  // Shared by onOpen's preview and renameMultipleFolders' run so their counts cannot fork again — that fork was the actual bug.
-  private classifyFileAgainstFolders(file: TFile): {
-    isInFolder: boolean;
-    isInSubfolder: boolean;
-  } {
-    let isInFolder = false;
-    let isInSubfolder = false;
-
-    for (const folder of this.folders) {
-      // Direct child wins over nested-in-another-selected-folder so a file is never double-counted.
-      if (file.parent?.path === folder.path) {
-        isInFolder = true;
-        break;
-      }
-      if (file.path.startsWith(folder.path + '/')) {
-        isInSubfolder = true;
-      }
-    }
-
-    return { isInFolder, isInSubfolder };
-  }
-
-  // Same predicate renameMultipleFolders' totalFiles uses, kept separate from DOM rendering so it stays testable on its own.
-  private countTotalFiles(allFiles: TFile[]): number {
-    let total = 0;
-    for (const file of allFiles) {
-      const { isInFolder, isInSubfolder } =
-        this.classifyFileAgainstFolders(file);
-      if (isInFolder || isInSubfolder) {
-        total++;
-      }
-    }
-    return total;
-  }
-
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-
-    this.setTitle(t('modals.caution'));
-
-    const totalFiles = this.countTotalFiles(this.app.vault.getMarkdownFiles());
-
-    const messagePara = contentEl.createEl('p');
-    const parts = tpSplit('modals.processNNotes', totalFiles);
-    messagePara.appendText(parts.before);
-    messagePara.createEl('strong', { text: `${totalFiles} ${parts.noun}` });
-    messagePara.appendText(parts.after);
-    messagePara.createEl('br');
-    messagePara.createEl('br');
-    const backupText = t('modals.ensureFilesBackedUp');
-    const backupParts = backupText.split(t('modals.backedUpLinkText'));
-    messagePara.appendText(backupParts[0]);
-    messagePara.createEl('a', {
-      text: t('modals.backedUpLinkText'),
-      href: OBSIDIAN_BACKUP_DOCS_URL,
-    });
-    if (backupParts[1]) messagePara.appendText(backupParts[1]);
-
-    const optionsContainer = contentEl.createDiv({ cls: 'flit-modal-options' });
-
-    // Checkboxes
-    const subfoldersContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const subfoldersCheckbox = subfoldersContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    subfoldersCheckbox.id = 'rename-subfolders';
-    subfoldersCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.folderRename.includeSubfolders;
-
-    const subfoldersLabel = subfoldersContainer.createEl('label');
-    subfoldersLabel.setAttribute('for', 'rename-subfolders');
-    subfoldersLabel.textContent = t('modals.renameInAllSubfolders');
-
-    const excludedFoldersContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedFoldersCheckbox = excludedFoldersContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedFoldersCheckbox.id = 'rename-excluded-folders';
-    excludedFoldersCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedFolders;
-
-    const excludedFoldersLabel = excludedFoldersContainer.createEl('label');
-    excludedFoldersLabel.setAttribute('for', 'rename-excluded-folders');
-    excludedFoldersLabel.textContent = t('modals.renameInExcludedFolders');
-
-    const excludedTagsContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedTagsCheckbox = excludedTagsContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedTagsCheckbox.id = 'rename-excluded-tags';
-    excludedTagsCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedTags;
-
-    const excludedTagsLabel = excludedTagsContainer.createEl('label');
-    excludedTagsLabel.setAttribute('for', 'rename-excluded-tags');
-    excludedTagsLabel.textContent = t('modals.renameWithExcludedTags');
-
-    const excludedPropsContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedPropsCheckbox = excludedPropsContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedPropsCheckbox.id = 'rename-excluded-properties';
-    excludedPropsCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedProperties;
-
-    const excludedPropsLabel = excludedPropsContainer.createEl('label');
-    excludedPropsLabel.setAttribute('for', 'rename-excluded-properties');
-    excludedPropsLabel.textContent = t('modals.renameWithExcludedProperties');
-
-    const buttonContainer = contentEl.createDiv({
-      cls: 'modal-button-container flit-modal-button-container',
-    });
-
-    const renameButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.rename'),
-    });
-    renameButton.addClass('mod-cta');
-    renameButton.onclick = async () => {
-      this.plugin.settings.core.modalCheckboxStates.folderRename.includeSubfolders =
-        subfoldersCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedFolders =
-        excludedFoldersCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedTags =
-        excludedTagsCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.folderRename.renameExcludedProperties =
-        excludedPropsCheckbox.checked;
-      // Save checkbox preferences - operation continues even if save fails (preferences are non-critical)
-      try {
-        await this.plugin.saveSettings();
-      } catch (error) {
-        console.debug('Failed to save modal checkbox preferences:', error);
-      }
-
-      this.close();
-      await this.renameMultipleFolders(
-        subfoldersCheckbox.checked,
-        excludedFoldersCheckbox.checked,
-        excludedTagsCheckbox.checked,
-        excludedPropsCheckbox.checked
+  // One pass over the vault, so a note under a selected folder and its selected subfolder is counted and renamed once.
+  protected getNotesInScope(): TFile[] {
+    return this.app.vault
+      .getMarkdownFiles()
+      .filter((file) =>
+        this.folders.some((folder) => isFileUnderFolder(file, folder))
       );
-    };
-
-    const cancelButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.cancel'),
-    });
-    cancelButton.onclick = () => this.close();
   }
 
-  async renameMultipleFolders(
-    includeSubfolders: boolean,
-    renameExcludedFolders: boolean,
-    renameExcludedTags: boolean,
-    renameExcludedProperties: boolean
-  ) {
-    if (!this.plugin.renameEngine) {
-      const notice = new Notice(t('notifications.renameEngineNotInitialized'));
-      notice.containerEl.addClass('mod-warning');
-      return;
-    }
-
-    const allFiles = this.app.vault.getMarkdownFiles();
-    const directFolderFiles: TFile[] = [];
-    const subfolderFiles: TFile[] = [];
-    // Total counts every note under the selection regardless of the subfolder
-    // checkbox, so it accumulates alongside the two processing buckets.
-    let totalFiles = 0;
-
-    for (const file of allFiles) {
-      const { isInFolder, isInSubfolder } =
-        this.classifyFileAgainstFolders(file);
-
-      if (isInFolder) {
-        directFolderFiles.push(file);
-      } else if (includeSubfolders && isInSubfolder) {
-        subfolderFiles.push(file);
-      }
-      if (isInFolder || isInSubfolder) {
-        totalFiles++;
-      }
-    }
-
-    directFolderFiles.sort((a, b) => a.stat.ctime - b.stat.ctime);
-    subfolderFiles.sort((a, b) => a.stat.ctime - b.stat.ctime);
-
-    const renamingMsg = t('notifications.renamingNNotes').replace(
-      '{{count}}',
-      String(totalFiles)
-    );
-    verboseLog(this.plugin, renamingMsg);
-    const pleaseWaitNotice = new Notice(renamingMsg, 0);
-
-    let renamedFileCount = 0;
-    const errors: string[] = [];
-    try {
-      // Process direct folder files - always ignore folder exclusion for selected folders
-      const directFolderOverrides = {
-        ignoreFolder: true,
-        ignoreTag: renameExcludedTags,
-        ignoreProperty: renameExcludedProperties,
-      };
-
-      await forEachInChunks(directFolderFiles, async (file) => {
-        try {
-          const result = await this.plugin.renameEngine?.processFile(
-            file,
-            true,
-            true,
-            undefined,
-            true,
-            directFolderOverrides
-          );
-          if (result?.success) {
-            renamedFileCount++;
-          }
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          errors.push(`Failed to rename ${file.path}: ${errorMessage}`);
-          console.error(`Error processing ${file.path}`, error);
-        }
-      });
-
-      // Process subfolder files - respect renameExcludedFolders checkbox for subfolders
-      const subfolderOverrides = {
-        ignoreFolder: renameExcludedFolders,
-        ignoreTag: renameExcludedTags,
-        ignoreProperty: renameExcludedProperties,
-      };
-
-      await forEachInChunks(subfolderFiles, async (file) => {
-        try {
-          const result = await this.plugin.renameEngine?.processFile(
-            file,
-            true,
-            true,
-            undefined,
-            true,
-            subfolderOverrides
-          );
-          if (result?.success) {
-            renamedFileCount++;
-          }
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          errors.push(`Failed to rename ${file.path}: ${errorMessage}`);
-          console.error(`Error processing ${file.path}`, error);
-        }
-      });
-
-      if (errors.length > 0) {
-        const errorMsg = t('notifications.renamedNotesWithErrors')
-          .replace('{{renamed}}', String(renamedFileCount))
-          .replace('{{total}}', String(totalFiles))
-          .replace('{{errors}}', String(errors.length));
-        const errorNotice = new Notice(errorMsg, 0);
-        errorNotice.containerEl.addClass('mod-warning');
-        console.error('Rename errors:', errors);
-      }
-    } finally {
-      if (this.plugin.cacheManager) {
-        this.plugin.cacheManager.clearReservedPaths();
-      }
-
-      pleaseWaitNotice.hide();
-      if (errors.length === 0) {
-        verboseLog(
-          this.plugin,
-          `Renamed ${renamedFileCount}/${totalFiles} notes.`
-        );
-        const renamedMsg = t('notifications.renamedNotes')
-          .replace('{{renamed}}', String(renamedFileCount))
-          .replace('{{total}}', String(totalFiles));
-        const successNotice = new Notice(renamedMsg, 0);
-        successNotice.containerEl.addClass('mod-success');
-      }
-    }
-  }
-
-  onClose() {
-    const { contentEl } = this;
-    contentEl.empty();
+  protected getNothingToRenameMessage(): string {
+    return t('notifications.noNotesFoundInFolders');
   }
 }
 
-export class ProcessTagModal extends Modal {
-  plugin: FirstLineIsTitlePlugin;
+export class ProcessTagModal extends BulkRenameModal {
   tag: string;
   private normalizedTag: string;
-  // The preview count and the run repeat the same full-vault metadata scan, and
-  // the modal is too short-lived for the result to drift between them. Keyed by
-  // `includeSubtags` because the checkbox widens the match.
-  private matchingFilesCache = new Map<boolean, TFile[]>();
 
   constructor(app: App, plugin: FirstLineIsTitlePlugin, tag: string) {
-    super(app);
-    this.plugin = plugin;
+    super(app, plugin);
     this.tag = tag;
     this.normalizedTag = normalizeTag(tag);
   }
 
-  /** Every Markdown file carrying the tag, optionally widened to its subtags. */
-  private getMatchingFiles(includeSubtags: boolean): TFile[] {
-    const cached = this.matchingFilesCache.get(includeSubtags);
-    if (cached) return cached;
-
-    const matches = this.app.vault
+  /** Every Markdown file carrying the tag or one of its subtags. */
+  protected getNotesInScope(): TFile[] {
+    return this.app.vault
       .getMarkdownFiles()
-      .filter((file) => this.fileHasTag(file, includeSubtags));
-    this.matchingFilesCache.set(includeSubtags, matches);
-    return matches;
+      .filter((file) => this.fileHasTag(file));
   }
 
-  private fileHasTag(file: TFile, includeSubtags: boolean): boolean {
+  protected getNothingToRenameMessage(): string {
+    return t('notifications.noNotesFoundWithTag', { tag: this.tag });
+  }
+
+  private fileHasTag(file: TFile): boolean {
     const cache = this.app.metadataCache.getFileCache(file);
     const isMatch = (rawTag: string): boolean => {
       const normalized = normalizeTag(rawTag);
       return (
         normalized === this.normalizedTag ||
-        (includeSubtags && normalized.startsWith(`${this.normalizedTag}/`))
+        normalized.startsWith(`${this.normalizedTag}/`)
       );
     };
 
@@ -845,439 +325,26 @@ export class ProcessTagModal extends Modal {
     // Body tags live in the metadata cache rather than the frontmatter block.
     return cache?.tags?.some((tagCache) => isMatch(tagCache.tag)) ?? false;
   }
-
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-
-    this.setTitle(t('modals.caution'));
-
-    // Count files with exact tag match (base scope - checkboxes expand this)
-    const count = this.getMatchingFiles(false).length;
-
-    const messagePara = contentEl.createEl('p');
-    const parts = tpSplit('modals.processNotesMessage', count);
-    messagePara.appendText(parts.before);
-    messagePara.createEl('strong', { text: `${count} ${parts.noun}` });
-    messagePara.appendText(parts.after);
-    messagePara.createEl('br');
-    messagePara.createEl('br');
-    const backupText = t('modals.ensureFilesBackedUp');
-    const backupParts = backupText.split(t('modals.backedUpLinkText'));
-    messagePara.appendText(backupParts[0]);
-    messagePara.createEl('a', {
-      text: t('modals.backedUpLinkText'),
-      href: OBSIDIAN_BACKUP_DOCS_URL,
-    });
-    if (backupParts[1]) messagePara.appendText(backupParts[1]);
-
-    const optionsContainer = contentEl.createDiv({ cls: 'flit-modal-options' });
-
-    // Rename notes with subtags checkbox
-    const subtagsContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const subtagsCheckbox = subtagsContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    subtagsCheckbox.id = 'rename-subtags';
-    subtagsCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.tagRename.includeSubtags;
-
-    const subtagsLabel = subtagsContainer.createEl('label');
-    subtagsLabel.setAttribute('for', 'rename-subtags');
-    subtagsLabel.textContent = t('modals.renameWithSubtags');
-
-    // Rename excluded folders checkbox
-    const excludedFoldersContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedFoldersCheckbox = excludedFoldersContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedFoldersCheckbox.id = 'rename-excluded-folders';
-    excludedFoldersCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.tagRename.renameExcludedFolders;
-
-    const excludedFoldersLabel = excludedFoldersContainer.createEl('label');
-    excludedFoldersLabel.setAttribute('for', 'rename-excluded-folders');
-    excludedFoldersLabel.textContent = t('modals.renameInExcludedFolders');
-
-    // Rename excluded tags checkbox
-    const excludedTagsContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedTagsCheckbox = excludedTagsContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedTagsCheckbox.id = 'rename-excluded-tags';
-    excludedTagsCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.tagRename.renameExcludedTags;
-
-    const excludedTagsLabel = excludedTagsContainer.createEl('label');
-    excludedTagsLabel.setAttribute('for', 'rename-excluded-tags');
-    excludedTagsLabel.textContent = t('modals.renameWithExcludedTags');
-
-    // Rename excluded properties checkbox
-    const excludedPropsContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedPropsCheckbox = excludedPropsContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedPropsCheckbox.id = 'rename-excluded-properties';
-    excludedPropsCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.tagRename.renameExcludedProperties;
-
-    const excludedPropsLabel = excludedPropsContainer.createEl('label');
-    excludedPropsLabel.setAttribute('for', 'rename-excluded-properties');
-    excludedPropsLabel.textContent = t('modals.renameWithExcludedProperties');
-
-    const buttonContainer = contentEl.createDiv({
-      cls: 'modal-button-container flit-modal-button-container',
-    });
-
-    const renameButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.rename'),
-    });
-    renameButton.addClass('mod-cta');
-    renameButton.onclick = async () => {
-      // Save checkbox states only when command is run
-      this.plugin.settings.core.modalCheckboxStates.tagRename.includeSubtags =
-        subtagsCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.tagRename.renameExcludedFolders =
-        excludedFoldersCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.tagRename.renameExcludedTags =
-        excludedTagsCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.tagRename.renameExcludedProperties =
-        excludedPropsCheckbox.checked;
-      // Operation continues even if save fails (preferences are non-critical)
-      try {
-        await this.plugin.saveSettings();
-      } catch (error) {
-        console.debug('Failed to save modal checkbox preferences:', error);
-      }
-
-      this.close();
-      await this.processTagFiles(
-        subtagsCheckbox.checked,
-        excludedFoldersCheckbox.checked,
-        excludedTagsCheckbox.checked,
-        excludedPropsCheckbox.checked
-      );
-    };
-
-    const cancelButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.cancel'),
-    });
-    cancelButton.onclick = () => this.close();
-  }
-
-  async processTagFiles(
-    includeSubtags: boolean,
-    renameExcludedFolders: boolean,
-    renameExcludedTags: boolean,
-    renameExcludedProperties: boolean
-  ) {
-    if (!this.plugin.renameEngine) {
-      const notice = new Notice(t('notifications.renameEngineNotInitialized'));
-      notice.containerEl.addClass('mod-warning');
-      return;
-    }
-
-    // Copied because the sort below would otherwise reorder the cached list.
-    const filesToProcess = [...this.getMatchingFiles(includeSubtags)];
-
-    if (filesToProcess.length === 0) {
-      verboseLog(this.plugin, `No notes found with ${this.tag}`);
-      new Notice(
-        t('notifications.noNotesFoundWithTag').replace('{{tag}}', this.tag)
-      );
-      return;
-    }
-
-    filesToProcess.sort((a, b) => a.stat.ctime - b.stat.ctime);
-
-    verboseLog(
-      this.plugin,
-      `Renaming ${filesToProcess.length} files with tag ${this.tag}...`
-    );
-    const renamingMsg = t('notifications.renamingNNotes').replace(
-      '{{count}}',
-      String(filesToProcess.length)
-    );
-    const pleaseWaitNotice = new Notice(renamingMsg, 0);
-    let renamedCount = 0;
-    const errors: string[] = [];
-
-    const exclusionOverrides = {
-      ignoreFolder: renameExcludedFolders,
-      ignoreTag: renameExcludedTags,
-      ignoreProperty: renameExcludedProperties,
-    };
-
-    try {
-      await forEachInChunks(filesToProcess, async (file) => {
-        try {
-          const result = await this.plugin.renameEngine?.processFile(
-            file,
-            true,
-            true,
-            undefined,
-            true,
-            exclusionOverrides
-          );
-          if (result?.success) {
-            renamedCount++;
-          }
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          errors.push(`Failed to rename ${file.path}: ${errorMessage}`);
-          console.error(`Error processing ${file.path}`, error);
-        }
-      });
-
-      if (errors.length > 0) {
-        const errorMsg = t('notifications.renamedNotesWithErrors')
-          .replace('{{renamed}}', String(renamedCount))
-          .replace('{{total}}', String(filesToProcess.length))
-          .replace('{{errors}}', String(errors.length));
-        const errorNotice = new Notice(errorMsg, 0);
-        errorNotice.containerEl.addClass('mod-warning');
-        console.error('Rename errors:', errors);
-      }
-    } finally {
-      if (this.plugin.cacheManager) {
-        this.plugin.cacheManager.clearReservedPaths();
-      }
-
-      pleaseWaitNotice.hide();
-      if (errors.length === 0) {
-        verboseLog(
-          this.plugin,
-          `Renamed ${renamedCount}/${filesToProcess.length} files with tag ${this.tag}`
-        );
-        const renamedMsg = t('notifications.renamedNotes')
-          .replace('{{renamed}}', String(renamedCount))
-          .replace('{{total}}', String(filesToProcess.length));
-        const successNotice = new Notice(renamedMsg, 0);
-        successNotice.containerEl.addClass('mod-success');
-      }
-    }
-  }
-
-  onClose() {
-    const { contentEl } = this;
-    contentEl.empty();
-  }
 }
 
-export class RenameModal extends Modal {
-  plugin: FirstLineIsTitlePlugin;
+export class RenameModal extends BulkRenameModal {
   files: TFile[];
 
   constructor(app: App, plugin: FirstLineIsTitlePlugin, files: TFile[]) {
-    super(app);
-    this.plugin = plugin;
+    super(app, plugin);
     this.files = files;
   }
 
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-
-    this.setTitle(t('modals.caution'));
-
-    const count = this.files.length;
-    const messagePara = contentEl.createEl('p');
-    const parts = tpSplit('modals.processNotesMessage', count);
-    messagePara.appendText(parts.before);
-    messagePara.createEl('strong', { text: `${count} ${parts.noun}` });
-    messagePara.appendText(parts.after);
-    messagePara.createEl('br');
-    messagePara.createEl('br');
-    const backupText = t('modals.ensureFilesBackedUp');
-    const backupParts = backupText.split(t('modals.backedUpLinkText'));
-    messagePara.appendText(backupParts[0]);
-    messagePara.createEl('a', {
-      text: t('modals.backedUpLinkText'),
-      href: OBSIDIAN_BACKUP_DOCS_URL,
-    });
-    if (backupParts[1]) messagePara.appendText(backupParts[1]);
-
-    // Checkbox container
-    const optionsContainer = contentEl.createDiv({ cls: 'flit-modal-options' });
-
-    // Rename excluded folders checkbox
-    const excludedFoldersContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedFoldersCheckbox = excludedFoldersContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedFoldersCheckbox.id = 'rename-excluded-folders';
-    excludedFoldersCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.searchRename.renameExcludedFolders;
-
-    const excludedFoldersLabel = excludedFoldersContainer.createEl('label');
-    excludedFoldersLabel.setAttribute('for', 'rename-excluded-folders');
-    excludedFoldersLabel.textContent = t('modals.renameInExcludedFolders');
-
-    // Rename excluded tags checkbox
-    const excludedTagsContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedTagsCheckbox = excludedTagsContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedTagsCheckbox.id = 'rename-excluded-tags';
-    excludedTagsCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.searchRename.renameExcludedTags;
-
-    const excludedTagsLabel = excludedTagsContainer.createEl('label');
-    excludedTagsLabel.setAttribute('for', 'rename-excluded-tags');
-    excludedTagsLabel.textContent = t('modals.renameWithExcludedTags');
-
-    // Rename excluded properties checkbox
-    const excludedPropsContainer = optionsContainer.createDiv({
-      cls: 'flit-checkbox-container',
-    });
-    const excludedPropsCheckbox = excludedPropsContainer.createEl('input', {
-      type: 'checkbox',
-    });
-    excludedPropsCheckbox.id = 'rename-excluded-properties';
-    excludedPropsCheckbox.checked =
-      this.plugin.settings.core.modalCheckboxStates.searchRename.renameExcludedProperties;
-
-    const excludedPropsLabel = excludedPropsContainer.createEl('label');
-    excludedPropsLabel.setAttribute('for', 'rename-excluded-properties');
-    excludedPropsLabel.textContent = t('modals.renameWithExcludedProperties');
-
-    const buttonContainer = contentEl.createDiv({
-      cls: 'modal-button-container flit-modal-button-container',
-    });
-
-    const renameButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.rename'),
-    });
-    renameButton.addClass('mod-cta');
-    renameButton.onclick = async () => {
-      // Save checkbox states only when command is run
-      this.plugin.settings.core.modalCheckboxStates.searchRename.renameExcludedFolders =
-        excludedFoldersCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.searchRename.renameExcludedTags =
-        excludedTagsCheckbox.checked;
-      this.plugin.settings.core.modalCheckboxStates.searchRename.renameExcludedProperties =
-        excludedPropsCheckbox.checked;
-      // Operation continues even if save fails (preferences are non-critical)
-      try {
-        await this.plugin.saveSettings();
-      } catch (error) {
-        console.debug('Failed to save modal checkbox preferences:', error);
-      }
-
-      this.close();
-      await this.renameFiles(
-        excludedFoldersCheckbox.checked,
-        excludedTagsCheckbox.checked,
-        excludedPropsCheckbox.checked
-      );
-    };
-
-    const cancelButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.cancel'),
-    });
-    cancelButton.onclick = () => this.close();
+  protected getNotesInScope(): TFile[] {
+    return this.files;
   }
 
-  async renameFiles(
-    renameExcludedFolders: boolean,
-    renameExcludedTags: boolean,
-    renameExcludedProperties: boolean
-  ) {
-    if (!this.plugin.renameEngine) {
-      const notice = new Notice(t('notifications.renameEngineNotInitialized'));
-      notice.containerEl.addClass('mod-warning');
-      return;
-    }
-
-    const filesToProcess = [...this.files];
-    filesToProcess.sort((a, b) => a.stat.ctime - b.stat.ctime);
-
-    verboseLog(this.plugin, `Renaming ${filesToProcess.length} notes...`);
-    const renamingMsg = t('notifications.renamingNNotes').replace(
-      '{{count}}',
-      String(filesToProcess.length)
-    );
-    const pleaseWaitNotice = new Notice(renamingMsg, 0);
-
-    const exclusionOverrides = {
-      ignoreFolder: renameExcludedFolders,
-      ignoreTag: renameExcludedTags,
-      ignoreProperty: renameExcludedProperties,
-    };
-
-    let renamedFileCount = 0;
-    const errors: string[] = [];
-    try {
-      await forEachInChunks(filesToProcess, async (file) => {
-        try {
-          const result = await this.plugin.renameEngine?.processFile(
-            file,
-            true,
-            true,
-            undefined,
-            true,
-            exclusionOverrides
-          );
-          if (result?.success) {
-            renamedFileCount++;
-          }
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          errors.push(`Failed to rename ${file.path}: ${errorMessage}`);
-          console.error(`Error processing ${file.path}`, error);
-        }
-      });
-
-      if (errors.length > 0) {
-        const errorMsg = t('notifications.renamedNotesWithErrors')
-          .replace('{{renamed}}', String(renamedFileCount))
-          .replace('{{total}}', String(filesToProcess.length))
-          .replace('{{errors}}', String(errors.length));
-        const errorNotice = new Notice(errorMsg, 0);
-        errorNotice.containerEl.addClass('mod-warning');
-        console.error('Rename errors:', errors);
-      }
-    } finally {
-      if (this.plugin.cacheManager) {
-        this.plugin.cacheManager.clearReservedPaths();
-      }
-
-      pleaseWaitNotice.hide();
-      if (errors.length === 0) {
-        verboseLog(
-          this.plugin,
-          `Renamed ${renamedFileCount}/${filesToProcess.length} notes.`
-        );
-        const renamedMsg = t('notifications.renamedNotes')
-          .replace('{{renamed}}', String(renamedFileCount))
-          .replace('{{total}}', String(filesToProcess.length));
-        const successNotice = new Notice(renamedMsg, 0);
-        successNotice.containerEl.addClass('mod-success');
-      }
-    }
-  }
-
-  onClose() {
-    const { contentEl } = this;
-    contentEl.empty();
+  protected getNothingToRenameMessage(): string {
+    return t('notifications.noNotesToRename');
   }
 }
 
-export class DisableEnableModal extends Modal {
+export class DisableEnableModal extends ConfirmationModal {
   plugin: FirstLineIsTitlePlugin;
   files: TFile[];
   action: 'disable' | 'enable';
@@ -1289,6 +356,7 @@ export class DisableEnableModal extends Modal {
     action: 'disable' | 'enable'
   ) {
     super(app);
+    addFlitModalClass(this);
     this.plugin = plugin;
     this.files = files;
     this.action = action;
@@ -1298,7 +366,13 @@ export class DisableEnableModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
 
-    this.setTitle(t('modals.caution'));
+    this.setTitle(
+      t(
+        this.action === 'disable'
+          ? 'commands.disableRenaming'
+          : 'commands.enableRenaming'
+      )
+    );
 
     const key = this.plugin.settings.exclusions.disableRenamingKey;
     const value = this.plugin.settings.exclusions.disableRenamingValue;
@@ -1329,37 +403,21 @@ export class DisableEnableModal extends Modal {
           : t('modals.notesPrepositional');
     messagePara.createEl('strong', { text: `${count} ${nounForm}` });
     messagePara.appendText('.');
-    messagePara.createEl('br');
-    messagePara.createEl('br');
-    const backupText = t('modals.ensureFilesBackedUp');
-    const backupParts = backupText.split(t('modals.backedUpLinkText'));
-    messagePara.appendText(backupParts[0]);
-    messagePara.createEl('a', {
-      text: t('modals.backedUpLinkText'),
-      href: OBSIDIAN_BACKUP_DOCS_URL,
-    });
-    if (backupParts[1]) messagePara.appendText(backupParts[1]);
+    appendBulkCaution(contentEl);
 
-    const buttonContainer = contentEl.createDiv({
-      cls: 'modal-button-container flit-modal-button-container',
-    });
-
-    const actionButton = buttonContainer.createEl('button', {
-      text:
-        this.action === 'disable'
-          ? t('modals.buttons.disable')
-          : t('modals.buttons.enable'),
-    });
-    actionButton.addClass('mod-cta');
-    actionButton.onclick = () => {
-      this.close();
-      void this.processFiles();
-    };
-
-    const cancelButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.cancel'),
-    });
-    cancelButton.onclick = () => this.close();
+    this.addButton((btn) =>
+      btn
+        .setButtonText(
+          this.action === 'disable'
+            ? t('modals.buttons.disable')
+            : t('modals.buttons.enable')
+        )
+        .setCta()
+        .onClick(() => {
+          void this.processFiles();
+        })
+    );
+    this.addCancelButton(t('modals.buttons.cancel'));
   }
 
   async processFiles() {
@@ -1448,7 +506,7 @@ export class DisableEnableModal extends Modal {
   }
 }
 
-export class InternalLinkModal extends Modal {
+export class InternalLinkModal extends ConfirmationModal {
   plugin: FirstLineIsTitlePlugin;
   onSubmit: (linkTarget: string, linkDisplayText?: string) => void;
   withDisplayText: boolean;
@@ -1461,6 +519,7 @@ export class InternalLinkModal extends Modal {
     withDisplayText: boolean = false
   ) {
     super(app);
+    addFlitModalClass(this);
     this.plugin = plugin;
     this.onSubmit = onSubmit;
     this.withDisplayText = withDisplayText;
@@ -1470,10 +529,7 @@ export class InternalLinkModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
 
-    contentEl.createEl('h3', {
-      text: t('modals.internalLink'),
-      cls: 'flit-modal-heading-left',
-    });
+    this.setTitle(t('modals.internalLink'));
 
     // Single text input - always just one field
     const inputContainer = contentEl.createDiv({ cls: 'flit-input-container' });
@@ -1484,35 +540,38 @@ export class InternalLinkModal extends Modal {
     });
     textInput.focus();
 
-    const buttonContainer = contentEl.createDiv({
-      cls: 'modal-button-container flit-modal-button-container',
-    });
-
-    const handleSubmit = () => {
+    // Returns true while the input is empty, which keeps the confirmation dialog open
+    const handleSubmit = (): true | undefined => {
       const inputText = textInput.value.trim();
-      if (inputText) {
-        this.close();
-        this.onSubmit(inputText, this.withDisplayText ? inputText : undefined);
-      }
+      if (!inputText) return true;
+      this.close();
+      this.onSubmit(inputText, this.withDisplayText ? inputText : undefined);
     };
 
-    const addButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.add'),
-    });
-    addButton.addClass('mod-cta');
-    addButton.onclick = handleSubmit;
-
-    const cancelButton = buttonContainer.createEl('button', {
-      text: t('modals.buttons.cancel'),
-    });
-    cancelButton.onclick = () => this.close();
+    const headerSubmitEl = Platform.isPhone
+      ? addFormSheetHeaderButtons(this, () => {
+          handleSubmit();
+        })
+      : null;
+    if (headerSubmitEl === null) {
+      this.addButton((btn) =>
+        btn
+          .setButtonText(t('modals.buttons.add'))
+          .setCta()
+          .onClick(handleSubmit)
+      );
+      this.addCancelButton(t('modals.buttons.cancel'));
+    } else {
+      // ConfirmationModal builds the row in its constructor; left empty, it would still leave a margin under the input
+      this.buttonContainerEl.remove();
+    }
 
     // Handle Enter key
     this.enterKeyHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleSubmit();
-      }
+      // An Enter that confirms an IME composition (e.g., CJK input) belongs to the input method, not to the dialog
+      if (e.isComposing || e.key !== 'Enter') return;
+      e.preventDefault();
+      handleSubmit();
     };
     textInput.addEventListener('keydown', this.enterKeyHandler);
   }

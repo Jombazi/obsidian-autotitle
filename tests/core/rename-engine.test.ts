@@ -10,7 +10,9 @@ import {
   splitFrontMatter,
 } from '../testUtils';
 import { CustomReplacement } from '../../src/types';
+import * as mockObsidian from '../mockObsidian';
 import { TFile, Editor } from '../mockObsidian';
+import { TIMING } from '../../src/constants/timing';
 
 // Mock plugin for RenameEngine
 function createMockPlugin() {
@@ -20,7 +22,6 @@ function createMockPlugin() {
   return {
     app,
     settings,
-    trackUsage: vi.fn(),
     cacheManager: {
       isLocked: vi.fn().mockReturnValue(false),
       acquireLock: vi.fn().mockReturnValue(true),
@@ -78,8 +79,6 @@ function createMockPlugin() {
       // Notice rate limiting
       setLastSelfRefNotice: vi.fn(),
       canShowSelfRefNotice: vi.fn().mockReturnValue(true),
-      setFileNameExclusionNotice: vi.fn(),
-      canShowFileNameExclusionNotice: vi.fn().mockReturnValue(true),
       // Operation tracking
       getOperationData: vi.fn().mockReturnValue(undefined),
       setOperationData: vi.fn(),
@@ -417,7 +416,6 @@ describe('RenameEngine', () => {
       expect(plugin.cacheManager.markPendingAliasRecheck).toHaveBeenCalledWith(
         file.path
       );
-      expect(plugin.trackUsage).toHaveBeenCalled();
     });
 
     it('should not mark for recheck when editor is syncing', async () => {
@@ -525,10 +523,105 @@ describe('RenameEngine', () => {
       expect(plugin.fileStateManager.setTitleRegionCache).toHaveBeenCalled();
     });
 
-    it('should track usage on every call', async () => {
+    // A deselected Canvas card's or closed page preview's editor reads as empty once CodeMirror has destroyed its view
+    it('should process from the file when the editor has been torn down', async () => {
+      (editor as any).cm = { dom: document.createElement('div') };
+      const processFile = vi
+        .spyOn(renameEngine, 'processFile')
+        .mockResolvedValue({ success: true } as any);
+
       await renameEngine.processEditorChangeOptimal(editor, file);
 
-      expect(plugin.trackUsage).toHaveBeenCalled();
+      expect(processFile).toHaveBeenCalledTimes(1);
+      expect(processFile).toHaveBeenCalledWith(
+        file,
+        true,
+        false,
+        undefined,
+        false,
+        undefined,
+        true
+      );
+      expect(editor.getValue).not.toHaveBeenCalled();
+    });
+
+    it('should read the editor while its view is still attached', async () => {
+      const dom = document.createElement('div');
+      document.body.appendChild(dom);
+      (editor as any).cm = { dom };
+      const processFile = vi.spyOn(renameEngine, 'processFile');
+
+      await renameEngine.processEditorChangeOptimal(editor, file);
+      dom.remove();
+
+      expect(editor.getValue).toHaveBeenCalled();
+      expect(processFile).not.toHaveBeenCalledWith(
+        file,
+        true,
+        false,
+        undefined,
+        false,
+        undefined,
+        true
+      );
+    });
+
+    // A tab switched to another note keeps the same editor, which then holds that note's text.
+    describe('with the editor-change owner', () => {
+      const fileReadArgs = [
+        true,
+        false,
+        undefined,
+        false,
+        undefined,
+        true,
+      ] as const;
+
+      it('should process from the file when the owner shows another note', async () => {
+        const owner = { file: createMockFile('other.md'), editor };
+        const processFile = vi
+          .spyOn(renameEngine, 'processFile')
+          .mockResolvedValue({ success: true } as any);
+
+        await renameEngine.processEditorChangeOptimal(
+          editor,
+          file,
+          owner as any
+        );
+
+        expect(processFile).toHaveBeenCalledWith(file, ...fileReadArgs);
+        expect(editor.getValue).not.toHaveBeenCalled();
+      });
+
+      it('should process from the file when the owner no longer has the editor', async () => {
+        const owner = { file, editor: undefined };
+        const processFile = vi
+          .spyOn(renameEngine, 'processFile')
+          .mockResolvedValue({ success: true } as any);
+
+        await renameEngine.processEditorChangeOptimal(
+          editor,
+          file,
+          owner as any
+        );
+
+        expect(processFile).toHaveBeenCalledWith(file, ...fileReadArgs);
+        expect(editor.getValue).not.toHaveBeenCalled();
+      });
+
+      it('should read the editor while the owner still shows the note in it', async () => {
+        const owner = { file, editor };
+        const processFile = vi.spyOn(renameEngine, 'processFile');
+
+        await renameEngine.processEditorChangeOptimal(
+          editor,
+          file,
+          owner as any
+        );
+
+        expect(editor.getValue).toHaveBeenCalled();
+        expect(processFile).not.toHaveBeenCalledWith(file, ...fileReadArgs);
+      });
     });
   });
 
@@ -547,14 +640,6 @@ describe('RenameEngine', () => {
 
       expect(result.success).toBe(false);
       expect(result.reason).toBe('file-not-found');
-    });
-
-    it('should track usage', async () => {
-      plugin.app.vault.getAbstractFileByPath = vi.fn().mockReturnValue(null);
-
-      await renameEngine.processFile(file);
-
-      expect(plugin.trackUsage).toHaveBeenCalled();
     });
 
     it('should use provided content when available', async () => {
@@ -576,7 +661,6 @@ describe('RenameEngine', () => {
       replaceText: 'Archive/Done',
       onlyAtStart: false,
       onlyWholeLine: false,
-      enabled: true,
       ...overrides,
     });
 
@@ -603,7 +687,20 @@ describe('RenameEngine', () => {
       );
       plugin.app.vault.getAllLoadedFiles = vi.fn().mockReturnValue([]);
       plugin.app.vault.read = vi.fn().mockResolvedValue('');
-      plugin.settings.customReplacements.enableCustomReplacements = true;
+    });
+
+    it('applies a custom replacement rule with no enable toggle', async () => {
+      plugin.settings.customReplacements.rules = [
+        makeRule({ replaceText: 'Done' }),
+      ];
+
+      expect(await renameWith('TODO item')).toBe('Notes/Done item.md');
+    });
+
+    it('applies nothing when there are no custom replacement rules', async () => {
+      plugin.settings.customReplacements.rules = [];
+
+      expect(await renameWith('TODO item')).toBe('Notes/TODO item.md');
     });
 
     describe('custom replacements containing a path separator', () => {
@@ -713,9 +810,9 @@ describe('RenameEngine', () => {
 
     beforeEach(() => {
       yamlFixtures = new Map<string, unknown>([
-        ['no rename: true', { 'no rename': true }],
-        ['no rename: false', { 'no rename': false }],
-        ['status: draft', { status: 'draft' }],
+        ['no rename: true\n', { 'no rename': true }],
+        ['no rename: false\n', { 'no rename': false }],
+        ['status: draft\n', { status: 'draft' }],
       ]);
       // Cleared first: the read-error case asserts the gate never parsed anything, and earlier describes leave calls behind
       vi.mocked(getFrontMatterInfo)
@@ -797,6 +894,70 @@ describe('RenameEngine', () => {
 
       expect(result.reason).toBe('property-disabled');
       expect(plugin.app.fileManager.renameFile).not.toHaveBeenCalled();
+    });
+  });
+
+  // The manual "unless excluded" command passes no overrides, so an excluded note has to say why nothing happened
+  describe('exclusion notice', () => {
+    let noticeMessages: string[];
+    let note: TFile;
+
+    beforeEach(() => {
+      noticeMessages = [];
+      // A regular function, not an arrow: the engine calls `new Notice(...)`
+      vi.spyOn(mockObsidian, 'Notice').mockImplementation(function (
+        message: string
+      ) {
+        noticeMessages.push(message);
+        return { containerEl: document.createElement('div') } as any;
+      } as any);
+
+      note = createMockFile('Notes/Source note.md');
+      note.parent = createMockFolder('Notes');
+      plugin.app.vault.getAbstractFileByPath = vi.fn((path: string) =>
+        path === note.path ? note : null
+      );
+      plugin.app.vault.read = vi.fn().mockResolvedValue('Title\n');
+      plugin.app.metadataCache.getFileCache = vi.fn().mockReturnValue(null);
+      plugin.settings.exclusions.excludedFiles = ['Notes/'];
+    });
+
+    afterEach(() => {
+      vi.mocked(mockObsidian.Notice).mockRestore();
+    });
+
+    it('notifies a manual command that a path rule skipped the note', async () => {
+      const result = await renameEngine.processFile(note, true, true);
+
+      expect(result.reason).toBe('excluded');
+      expect(noticeMessages).toHaveLength(1);
+      expect(noticeMessages[0]).toContain('Source note');
+    });
+
+    it('stays silent for automatic renames and batch runs', async () => {
+      // hasActiveEditor, since the always-on safeguard stops an automatic rename with no editor before any exclusion rule
+      const automatic = await renameEngine.processFile(
+        note,
+        true,
+        false,
+        undefined,
+        false,
+        undefined,
+        true
+      );
+      const batch = await renameEngine.processFile(
+        note,
+        true,
+        true,
+        undefined,
+        true
+      );
+
+      expect([automatic.reason, batch.reason]).toEqual([
+        'excluded',
+        'excluded',
+      ]);
+      expect(noticeMessages).toEqual([]);
     });
   });
 
@@ -1056,7 +1217,7 @@ describe('RenameEngine', () => {
   // handlers call updateAliasIfNeeded themselves.
   describe('processFile alias gate', () => {
     beforeEach(() => {
-      plugin.settings.aliases.enableAliases = true;
+      plugin.settings.firstLineProperty.propertyKey = 'aliases';
       plugin.app.vault.getAbstractFileByPath = vi.fn().mockReturnValue(file);
     });
 
@@ -1098,13 +1259,110 @@ describe('RenameEngine', () => {
       expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
     });
 
-    it('should not update the alias when aliases are disabled', async () => {
-      plugin.settings.aliases.enableAliases = false;
+    it('should not update the alias when the property name is blank', async () => {
+      plugin.settings.firstLineProperty.propertyKey = '';
       stubOutcome({ success: true, reason: 'renamed' });
 
       await renameEngine.processFile(file);
 
       expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+    });
+  });
+
+  // Keystrokes that land while processFile holds the lock only set the pending flag. A page preview or Canvas card is never the active MarkdownView, so a recheck gated on that left the name a few characters short of the first line.
+  describe('processFile pending recheck', () => {
+    let processEditorChangeOptimal: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      plugin.app.vault.getAbstractFileByPath = vi.fn().mockReturnValue(file);
+      plugin.cacheManager.hasPendingAliasRecheck = vi
+        .fn()
+        .mockReturnValue(true);
+      plugin.cacheManager.clearPendingAliasRecheck = vi.fn();
+      vi.spyOn(renameEngine as any, 'processFileInternal').mockResolvedValue({
+        success: false,
+        reason: 'excluded',
+      });
+      processEditorChangeOptimal = vi
+        .spyOn(renameEngine, 'processEditorChangeOptimal')
+        .mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should recheck through an editing embed when no tab shows the note', async () => {
+      const embedEditor = new Editor();
+      const embed = { file, dirty: true, editor: embedEditor };
+      plugin.app.workspace.iterateAllLeaves = vi.fn(
+        (callback: (leaf: unknown) => void) =>
+          callback({ view: { hoverPopover: { embed } } })
+      );
+
+      await renameEngine.processFile(file);
+
+      expect(plugin.cacheManager.clearPendingAliasRecheck).toHaveBeenCalledWith(
+        file.path
+      );
+      expect(processEditorChangeOptimal).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(TIMING.UI_SETTLE_DELAY_MS);
+
+      expect(processEditorChangeOptimal).toHaveBeenCalledTimes(1);
+      expect(processEditorChangeOptimal).toHaveBeenCalledWith(
+        embedEditor,
+        file
+      );
+    });
+
+    it('should recheck through the active tab when it edits the note', async () => {
+      const view = Object.assign(new mockObsidian.MarkdownView(plugin.app), {
+        file,
+        getMode: () => 'source',
+      });
+      plugin.app.workspace.getActiveViewOfType = vi.fn().mockReturnValue(view);
+
+      await renameEngine.processFile(file);
+      await vi.advanceTimersByTimeAsync(TIMING.UI_SETTLE_DELAY_MS);
+
+      expect(plugin.cacheManager.clearPendingAliasRecheck).toHaveBeenCalledWith(
+        file.path
+      );
+      expect(processEditorChangeOptimal).toHaveBeenCalledTimes(1);
+      expect(processEditorChangeOptimal).toHaveBeenCalledWith(
+        view.editor,
+        file
+      );
+    });
+
+    // A newer delayed timer processes the latest text, and an immediate recheck would rename outside a linked note's delay.
+    it('should clear the flag and schedule nothing when a timer is scheduled', async () => {
+      const embed = { file, dirty: true, editor: new Editor() };
+      plugin.app.workspace.iterateAllLeaves = vi.fn(
+        (callback: (leaf: unknown) => void) =>
+          callback({ view: { hoverPopover: { embed } } })
+      );
+      plugin.fileStateManager.hasThrottleTimer = vi.fn().mockReturnValue(true);
+
+      await renameEngine.processFile(file);
+
+      expect(plugin.cacheManager.clearPendingAliasRecheck).toHaveBeenCalledWith(
+        file.path
+      );
+      expect(vi.getTimerCount()).toBe(0);
+      expect(processEditorChangeOptimal).not.toHaveBeenCalled();
+    });
+
+    it('should leave the flag set and schedule nothing when no editor shows the note', async () => {
+      await renameEngine.processFile(file);
+
+      expect(vi.getTimerCount()).toBe(0);
+      expect(
+        plugin.cacheManager.clearPendingAliasRecheck
+      ).not.toHaveBeenCalled();
+      expect(processEditorChangeOptimal).not.toHaveBeenCalled();
     });
   });
 });

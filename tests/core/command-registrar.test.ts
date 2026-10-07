@@ -48,6 +48,7 @@ describe('CommandRegistrar', () => {
       addSafeInternalLinkWithDisplayText: vi.fn(),
       addInternalLinkWithDisplayTextAndCustomTarget: vi.fn(),
       saveSettings: vi.fn().mockResolvedValue(undefined),
+      refreshSettingsTab: vi.fn(),
       disableRenamingForNote: vi.fn().mockResolvedValue(undefined),
       enableRenamingForNote: vi.fn().mockResolvedValue(undefined),
     };
@@ -272,7 +273,7 @@ describe('CommandRegistrar', () => {
         true,
         undefined,
         false,
-        { ignoreFolder: true, ignoreTag: true, ignoreProperty: true },
+        { ignoreFiles: true, ignoreTag: true, ignoreProperty: true },
         true,
         mockEditor
       );
@@ -361,6 +362,43 @@ describe('CommandRegistrar', () => {
 
       expect(mockPlugin.settings.core.renameAutomatically).toBe(true);
       expect(mockPlugin.saveSettings).toHaveBeenCalled();
+    });
+
+    it('should refresh the settings tab after saving', async () => {
+      const { CommandRegistrar } =
+        await import('../../src/core/command-registrar');
+      const registrar = new CommandRegistrar(mockPlugin);
+      const order: string[] = [];
+      mockPlugin.saveSettings.mockImplementation(() => {
+        order.push('save');
+        return Promise.resolve();
+      });
+      mockPlugin.refreshSettingsTab.mockImplementation(() => {
+        order.push('refresh');
+      });
+
+      await registrar.executeToggleAutomaticRenaming();
+
+      expect(order).toEqual(['save', 'refresh']);
+    });
+
+    it('should run the toggle command through executeToggleAutomaticRenaming', async () => {
+      const { CommandRegistrar } =
+        await import('../../src/core/command-registrar');
+      const registrar = new CommandRegistrar(mockPlugin);
+      const executeSpy = vi.spyOn(registrar, 'executeToggleAutomaticRenaming');
+      mockPlugin.settings.core.renameAutomatically = true;
+
+      registrar.registerCommands();
+      const command = mockPlugin.addCommand.mock.calls.find(
+        (call: any[]) => call[0].id === 'toggle-automatic-renaming'
+      );
+      await command[0].callback();
+
+      expect(executeSpy).toHaveBeenCalledTimes(1);
+      expect(mockPlugin.settings.core.renameAutomatically).toBe(false);
+      expect(mockPlugin.saveSettings).toHaveBeenCalled();
+      expect(mockPlugin.refreshSettingsTab).toHaveBeenCalled();
     });
   });
 

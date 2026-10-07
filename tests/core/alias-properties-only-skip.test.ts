@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { getFrontMatterInfo } from 'obsidian';
 import { EventHandlerManager } from '../../src/core/event-handler-manager';
 import { FileStateManager } from '../../src/core/file-state-manager';
-import { TFile } from '../mockObsidian';
+import { MarkdownView, TFile } from '../mockObsidian';
 import { splitFrontMatter } from '../testUtils';
 
 const SIX_MINUTES_MS = 6 * 60 * 1000;
@@ -39,7 +39,7 @@ function createMockPlugin() {
         enableContextMenus: true,
         contentReadMethod: 'Editor',
       },
-      aliases: { enableAliases: true },
+      firstLineProperty: { propertyKey: 'aliases' },
       exclusions: {
         disableRenamingKey: 'no rename',
         disableRenamingValue: 'true',
@@ -62,6 +62,18 @@ function createMockPlugin() {
 }
 
 type MockPlugin = ReturnType<typeof createMockPlugin>;
+
+/** A Live Preview or Source view of the note whose editor holds `text` */
+function createSourceView(file: TFile, text: string, dirty: boolean) {
+  const view = Object.assign(new MarkdownView(), {
+    file,
+    dirty,
+    getMode: () => 'source',
+    requestSave: vi.fn(),
+  });
+  view.editor = { getValue: () => text } as any;
+  return view;
+}
 type Callback = (...args: unknown[]) => unknown;
 
 function registeredCallbacks(
@@ -167,6 +179,66 @@ describe('alias update on a properties-only save', () => {
 
       expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
     });
+
+    it('leaves the alias to the rename path while the editor holds unsaved typing', async () => {
+      const view = createSourceView(note, BODY_EDIT, true);
+      plugin.app.workspace.getLeavesOfType.mockReturnValue([{ view }]);
+      plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
+      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
+
+      await handler()(note);
+
+      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(plugin.fileStateManager.getLastSavedContent(note.path)).toBe(
+        BODY_EDIT
+      );
+    });
+
+    // A tab, card or preview saves 2 s after its first unsaved keystroke, while a linked note's rename can still be waiting.
+    it('leaves the alias to the rename path while a rename is scheduled', async () => {
+      const view = createSourceView(note, BODY_EDIT, false);
+      plugin.app.workspace.getLeavesOfType.mockReturnValue([{ view }]);
+      plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
+      plugin.fileStateManager.setThrottleTimer(note.path, 1);
+      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
+
+      await handler()(note);
+
+      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(plugin.fileStateManager.getLastSavedContent(note.path)).toBe(
+        BODY_EDIT
+      );
+    });
+
+    it('writes into the editor when it holds the text just read from the file', async () => {
+      const view = createSourceView(note, BODY_EDIT, false);
+      plugin.app.workspace.getLeavesOfType.mockReturnValue([{ view }]);
+      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
+
+      await handler()(note);
+
+      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledWith(
+        note,
+        BODY_EDIT,
+        undefined,
+        expect.objectContaining({ editor: view.editor })
+      );
+    });
+
+    it('writes the file when the editor has not loaded the file text yet', async () => {
+      const view = createSourceView(note, SAVED, false);
+      plugin.app.workspace.getLeavesOfType.mockReturnValue([{ view }]);
+      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
+
+      await handler()(note);
+
+      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledWith(
+        note,
+        BODY_EDIT,
+        undefined,
+        null
+      );
+    });
   });
 
   describe.each([
@@ -223,6 +295,28 @@ describe('alias update on a properties-only save', () => {
       expect(
         plugin.fileStateManager.getLastSavedContent(note.path)
       ).toBeUndefined();
+    });
+  });
+
+  // A card deselect or an autosave during a linked note's delay would otherwise rename it at once.
+  describe('modify handler in Cache read mode', () => {
+    beforeEach(() => {
+      plugin.settings.core.contentReadMethod = 'Cache';
+      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
+    });
+
+    it('leaves the rename to a scheduled timer', async () => {
+      plugin.fileStateManager.setThrottleTimer(note.path, 1);
+
+      await modify(note);
+
+      expect(plugin.renameEngine.processFile).not.toHaveBeenCalled();
+    });
+
+    it('renames on save when no timer is scheduled', async () => {
+      await modify(note);
+
+      expect(plugin.renameEngine.processFile).toHaveBeenCalledWith(note, true);
     });
   });
 

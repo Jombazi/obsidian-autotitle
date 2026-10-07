@@ -1,7 +1,6 @@
 import {
   Notice,
   PluginSettingTab,
-  Setting,
   SettingDefinitionAddItem,
   SettingDefinitionList,
   SettingDefinitionPage,
@@ -9,23 +8,20 @@ import {
   setIcon,
 } from 'obsidian';
 import {
-  updateDisabledRowsAccessibility,
-  addForbiddenCharProtection,
+  addDeleteButton,
   appendLines,
   FirstLineIsTitlePlugin,
-  mountLegacyHost,
   buildDescRow,
+  buildSummaryRow,
   appendEmphasis,
 } from './settings-base';
-import {
-  EXCLUSION_STRATEGY,
-  ExcludedProperty,
-  FileNameExclusion,
-} from '../types';
-import { FolderSuggest, TagSuggest } from '../suggests';
+import { EXCLUSION_STRATEGY, ExcludedProperty } from '../types';
+import { TagSuggest } from '../suggests';
 import { t, tp } from '../i18n';
 import { DEFAULT_SETTINGS } from '../constants';
 import { TIMING } from '../constants/timing';
+import { AddExcludedFileModal } from '../modals/add-excluded-file';
+import { hasExcludedFileEntry } from '../utils/file-exclusions';
 
 async function persistSettings(plugin: FirstLineIsTitlePlugin): Promise<void> {
   try {
@@ -43,9 +39,9 @@ function buildPageIntro(): DocumentFragment {
   });
 }
 
-function buildFoldersIntro(): DocumentFragment {
+function buildFilesIntro(): DocumentFragment {
   return createFragment((frag) => {
-    frag.appendText(t('settings.exclusions.folders.renamedWarning'));
+    frag.appendText(t('settings.exclusions.files.renamedWarning'));
   });
 }
 
@@ -147,6 +143,7 @@ type SuggestFactory = (
 
 interface StringExclusionListOptions {
   plugin: FirstLineIsTitlePlugin;
+  tab: PluginSettingTab;
   getItems: () => string[];
   placeholder: string;
   debugLabel: string;
@@ -154,7 +151,7 @@ interface StringExclusionListOptions {
 }
 
 /**
- * Builds one folder/tag row. Entries are plain strings with no stable
+ * Builds one tag row. Entries are plain strings with no stable
  * identity, so handlers address them by index — safe because these lists have
  * no reordering and every deletion triggers `tab.update()`.
  */
@@ -162,7 +159,8 @@ function buildStringExclusionRow(
   options: StringExclusionListOptions,
   index: number
 ): SettingDefinitionRender {
-  const { plugin, getItems, placeholder, debugLabel, createSuggest } = options;
+  const { plugin, tab, getItems, placeholder, debugLabel, createSuggest } =
+    options;
 
   const writeValue = async (value: string): Promise<void> => {
     const items = getItems();
@@ -199,6 +197,13 @@ function buildStringExclusionRow(
         } catch (error) {
           console.error('FLIT: Failed to create suggest:', error);
         }
+      });
+      addDeleteButton(setting, () => {
+        void (async () => {
+          getItems().splice(index, 1);
+          await persistSettings(plugin);
+          tab.update();
+        })();
       });
     },
   };
@@ -365,9 +370,10 @@ function buildKeyValueRow(
  */
 function buildPropertyRow(
   plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab,
   property: ExcludedProperty
 ): SettingDefinitionRender {
-  return buildKeyValueRow({
+  const row = buildKeyValueRow({
     plugin,
     name: property.key || t('settings.exclusions.properties.keyPlaceholder'),
     searchable: false,
@@ -381,6 +387,23 @@ function buildPropertyRow(
     },
     debugLabel: 'excludedProperties',
   });
+  // Added here rather than in `buildKeyValueRow`, which also draws the single disable-property row outside any list
+  return {
+    ...row,
+    render: (setting, group) => {
+      row.render(setting, group);
+      addDeleteButton(setting, () => {
+        void (async () => {
+          const properties = plugin.settings.exclusions.excludedProperties;
+          const index = properties.indexOf(property);
+          if (index === -1) return;
+          properties.splice(index, 1);
+          await persistSettings(plugin);
+          tab.update();
+        })();
+      });
+    },
+  };
 }
 
 /**
@@ -418,133 +441,9 @@ function buildDisablePropertyRow(
 }
 
 /**
- * Builds one file-name exclusion row. Handlers close over the exclusion object
- * rather than its index so drag-reordering (which mutates the array without
- * re-rendering) cannot make them write to the wrong entry.
- */
-function buildFileNameExclusionRow(
-  plugin: FirstLineIsTitlePlugin,
-  tab: PluginSettingTab,
-  exclusion: FileNameExclusion
-): SettingDefinitionRender {
-  const exclusionIndex = () =>
-    plugin.settings.exclusions.excludedFileNames.indexOf(exclusion);
-
-  return {
-    name:
-      exclusion.text || t('settings.characterReplacements.emptyPlaceholder'),
-    searchable: false,
-    render: (setting) => {
-      const host = mountLegacyHost(setting.settingEl);
-
-      const enableSetting = new Setting(host).setName(
-        t('settings.exclusions.fileNames.headers.enable')
-      );
-      const textSetting = new Setting(host).setName(
-        t('settings.exclusions.fileNames.headers.text')
-      );
-      const onlyAtStartSetting = new Setting(host).setName(
-        t('settings.exclusions.fileNames.headers.onlyMatchStart')
-      );
-      const onlyWholeLineSetting = new Setting(host).setName(
-        t('settings.exclusions.fileNames.headers.onlyMatchWhole')
-      );
-      const caseSensitiveSetting = new Setting(host).setName(
-        t('settings.exclusions.fileNames.headers.caseSensitive')
-      );
-
-      /** The per-entry enable toggle gates the entry's own fields, not itself. */
-      const applyRowEnabledState = () => {
-        [
-          textSetting,
-          onlyAtStartSetting,
-          onlyWholeLineSetting,
-          caseSensitiveSetting,
-        ].forEach((dependent) => {
-          dependent.setDisabled(!exclusion.enabled);
-          dependent.settingEl.classList.toggle(
-            'flit-row-disabled',
-            !exclusion.enabled
-          );
-        });
-        updateDisabledRowsAccessibility(host);
-      };
-
-      enableSetting.addToggle((toggle) => {
-        toggle.setValue(exclusion.enabled).onChange(async (value) => {
-          exclusion.enabled = value;
-          plugin.debugLog(
-            `excludedFileNames[${exclusionIndex()}].enabled`,
-            value
-          );
-          await persistSettings(plugin);
-          applyRowEnabledState();
-        });
-      });
-
-      textSetting.addText((text) => {
-        text
-          .setPlaceholder(t('settings.characterReplacements.emptyPlaceholder'))
-          .setValue(exclusion.text)
-          .onChange(async (value) => {
-            exclusion.text = value;
-            plugin.debugLog(
-              `excludedFileNames[${exclusionIndex()}].text`,
-              value
-            );
-            await persistSettings(plugin);
-          });
-        addForbiddenCharProtection(text.inputEl);
-      });
-
-      onlyAtStartSetting.addToggle((toggle) => {
-        toggle.setValue(exclusion.onlyAtStart).onChange(async (value) => {
-          exclusion.onlyAtStart = value;
-          plugin.debugLog(
-            `excludedFileNames[${exclusionIndex()}].onlyAtStart`,
-            value
-          );
-          // The two match modes are mutually exclusive.
-          if (value) exclusion.onlyWholeLine = false;
-          await persistSettings(plugin);
-          tab.update();
-        });
-      });
-
-      onlyWholeLineSetting.addToggle((toggle) => {
-        toggle.setValue(exclusion.onlyWholeLine).onChange(async (value) => {
-          exclusion.onlyWholeLine = value;
-          plugin.debugLog(
-            `excludedFileNames[${exclusionIndex()}].onlyWholeLine`,
-            value
-          );
-          // The two match modes are mutually exclusive.
-          if (value) exclusion.onlyAtStart = false;
-          await persistSettings(plugin);
-          tab.update();
-        });
-      });
-
-      caseSensitiveSetting.addToggle((toggle) => {
-        toggle.setValue(exclusion.caseSensitive).onChange(async (value) => {
-          exclusion.caseSensitive = value;
-          plugin.debugLog(
-            `excludedFileNames[${exclusionIndex()}].caseSensitive`,
-            value
-          );
-          await persistSettings(plugin);
-        });
-      });
-
-      applyRowEnabledState();
-    },
-  };
-}
-
-/**
- * Focuses the last input matching `inputSelector` inside `listGroup`. All four
- * lists share the page and the folder and tag rows share a selector, so the
- * query is scoped to one list's group rather than the whole document.
+ * Focuses the last input matching `inputSelector` inside `listGroup`. Every
+ * list shares the page, so the query is scoped to one list's group rather than
+ * the whole document.
  */
 function focusLastListInput(
   listGroup: Element | null,
@@ -601,14 +500,13 @@ function buildAddItem(
   };
 }
 
-/** Folder and tag lists share every affordance except their suggester. */
+/** A list of plain strings edited in place, each row with its own suggester. */
 function buildStringExclusionList(
   options: StringExclusionListOptions,
-  tab: PluginSettingTab,
   addButtonText: string,
   emptyState: string
 ): SettingDefinitionList {
-  const { plugin, getItems } = options;
+  const { plugin, tab, getItems } = options;
 
   return {
     type: 'list',
@@ -616,13 +514,6 @@ function buildStringExclusionList(
     items: getItems().map((_, index) =>
       buildStringExclusionRow(options, index)
     ),
-    onDelete: (index) => {
-      void (async () => {
-        getItems().splice(index, 1);
-        await persistSettings(plugin);
-        tab.update();
-      })();
-    },
     addItem: buildAddItem(
       addButtonText,
       () => {
@@ -639,13 +530,86 @@ function buildStringExclusionList(
   };
 }
 
+/** One Excluded files row with Edit and Delete; Edit departs from Obsidian's own list, which offers Delete only, because a regex entry is tedious to retype. Handlers look the entry up when clicked rather than capturing its index, because a file-menu action can drop entries while this page is open. */
+function buildExcludedFileRow(
+  plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab,
+  entry: string
+): SettingDefinitionRender {
+  const getEntries = () => plugin.settings.exclusions.excludedFiles;
+
+  return buildSummaryRow({
+    name: entry,
+    // User data, so it stays out of the settings search index
+    searchable: false,
+    editEntry: () => {
+      new AddExcludedFileModal(plugin.app, {
+        entryToEdit: entry,
+        submitEntry: async (editedEntry) => {
+          const entries = getEntries();
+          const index = entries.indexOf(entry);
+          if (index === -1) return;
+          // Checked against the others only, so a case-only change or an unchanged Done is not mistaken for a duplicate of itself
+          const otherEntries = entries.filter((_, i) => i !== index);
+          if (hasExcludedFileEntry(otherEntries, editedEntry)) return;
+          entries[index] = editedEntry;
+          plugin.debugLog('excludedFiles', entries);
+          await persistSettings(plugin);
+        },
+        onSubmitted: () => tab.update(),
+      }).open();
+    },
+    deleteEntry: () => {
+      void (async () => {
+        const entries = getEntries();
+        const index = entries.indexOf(entry);
+        if (index === -1) return;
+        entries.splice(index, 1);
+        plugin.debugLog('excludedFiles', entries);
+        await persistSettings(plugin);
+        tab.update();
+      })();
+    },
+  });
+}
+
+/** The Excluded files list, shaped like Obsidian's own list of the same syntax: no reorder, and entries are added through a dialog rather than typed into a blank row. */
+function buildExcludedFilesList(
+  plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab
+): SettingDefinitionList {
+  const getEntries = () => plugin.settings.exclusions.excludedFiles;
+
+  return {
+    type: 'list',
+    emptyState: t('settings.exclusions.files.emptyState'),
+    items: getEntries().map((entry) =>
+      buildExcludedFileRow(plugin, tab, entry)
+    ),
+    addItem: {
+      name: t('settings.exclusions.files.addButton'),
+      action: () => {
+        new AddExcludedFileModal(plugin.app, {
+          submitEntry: async (entry) => {
+            const entries = getEntries();
+            if (hasExcludedFileEntry(entries, entry)) return;
+            entries.push(entry);
+            plugin.debugLog('excludedFiles', entries);
+            await persistSettings(plugin);
+          },
+          onSubmitted: () => tab.update(),
+        }).open();
+      },
+    },
+  };
+}
+
 /**
  * Exclusions sub-page.
  *
- * Four collections use the native list type, so add / delete / reorder
- * affordances come from the framework. List `items` are captured when the
- * definitions are built, so every mutation that changes the row set calls
- * `tab.update()`.
+ * Three collections use the native list type for its add affordance; each row
+ * draws its own Delete. List `items` are captured when the definitions are
+ * built, so every mutation that changes the row set calls `tab.update()`.
  */
 export function buildExclusionsPage(
   plugin: FirstLineIsTitlePlugin,
@@ -654,10 +618,10 @@ export function buildExclusionsPage(
   const exclusions = () => plugin.settings.exclusions;
   const exclusionModeOptions = {
     [EXCLUSION_STRATEGY.ONLY_EXCLUDE]: t(
-      'settings.exclusions.folders.exclusionMode.onlyExclude'
+      'settings.exclusions.files.exclusionMode.onlyExclude'
     ),
     [EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT]: t(
-      'settings.exclusions.folders.exclusionMode.excludeAllExcept'
+      'settings.exclusions.files.exclusionMode.excludeAllExcept'
     ),
   };
 
@@ -665,17 +629,15 @@ export function buildExclusionsPage(
     type: 'page',
     name: t('settings.sections.exclusions'),
     desc: t('settings.exclusions.desc'),
-    // Summed across all four lists, skipping blank rows — those are half-typed
+    // Summed across all three lists, skipping blank rows — those are half-typed
     // entries that cannot match anything. Shows nothing at zero rather than
     // "0 rules", matching the Custom replacements row.
     displayValue: () => {
       const { exclusions } = plugin.settings;
       const count =
-        exclusions.excludedFolders.filter((folder) => folder.trim()).length +
+        exclusions.excludedFiles.filter((entry) => entry.trim()).length +
         exclusions.excludedTags.filter((tag) => tag.trim()).length +
         exclusions.excludedProperties.filter((property) => property.key.trim())
-          .length +
-        exclusions.excludedFileNames.filter((match) => match.text.trim())
           .length;
       return count ? tp('settings.ruleCount', count) : '';
     },
@@ -684,42 +646,21 @@ export function buildExclusionsPage(
 
       {
         type: 'group',
-        heading: t('settings.exclusions.folders.title'),
+        heading: t('settings.exclusions.files.title'),
         items: [
-          buildDescRow(buildFoldersIntro()),
+          buildDescRow(buildFilesIntro()),
           {
-            name: t('settings.exclusions.folders.matchSubfolders.name'),
-            desc: t('settings.exclusions.folders.matchSubfolders.desc'),
-            control: {
-              type: 'toggle',
-              key: 'exclusions.matchSubfolders',
-            },
-          },
-          {
-            name: t('settings.exclusions.folders.exclusionMode.name'),
-            desc: t('settings.exclusions.folders.exclusionMode.desc'),
+            name: t('settings.exclusions.files.exclusionMode.name'),
+            desc: t('settings.exclusions.files.exclusionMode.desc'),
             control: {
               type: 'dropdown',
-              key: 'exclusions.folderScopeStrategy',
+              key: 'exclusions.fileScopeStrategy',
               options: exclusionModeOptions,
             },
           },
         ],
       },
-      buildStringExclusionList(
-        {
-          plugin,
-          getItems: () => exclusions().excludedFolders,
-          placeholder: t('settings.exclusions.folders.placeholder'),
-          debugLabel: 'excludedFolders',
-          createSuggest: (input, onSelect, otherItems) => {
-            new FolderSuggest(plugin.app, input, onSelect, otherItems);
-          },
-        },
-        tab,
-        t('settings.exclusions.folders.addButton'),
-        t('settings.exclusions.folders.emptyState')
-      ),
+      buildExcludedFilesList(plugin, tab),
 
       {
         type: 'group',
@@ -767,6 +708,7 @@ export function buildExclusionsPage(
       buildStringExclusionList(
         {
           plugin,
+          tab,
           getItems: () => exclusions().excludedTags,
           placeholder: t('settings.exclusions.tags.placeholder'),
           debugLabel: 'excludedTags',
@@ -774,7 +716,6 @@ export function buildExclusionsPage(
             new TagSuggest(plugin.app, input, onSelect, otherItems);
           },
         },
-        tab,
         t('settings.exclusions.tags.addButton'),
         t('settings.exclusions.tags.emptyState')
       ),
@@ -799,15 +740,8 @@ export function buildExclusionsPage(
         type: 'list',
         emptyState: t('settings.exclusions.properties.emptyState'),
         items: exclusions().excludedProperties.map((property) =>
-          buildPropertyRow(plugin, property)
+          buildPropertyRow(plugin, tab, property)
         ),
-        onDelete: (index) => {
-          void (async () => {
-            exclusions().excludedProperties.splice(index, 1);
-            await persistSettings(plugin);
-            tab.update();
-          })();
-        },
         addItem: buildAddItem(
           t('settings.exclusions.properties.addButton'),
           () => {
@@ -819,63 +753,6 @@ export function buildExclusionsPage(
           '.flit-property-key-input',
           async () => {
             exclusions().excludedProperties.push({ key: '', value: '' });
-            await persistSettings(plugin);
-            tab.update();
-          }
-        ),
-      },
-
-      {
-        type: 'group',
-        heading: t('settings.exclusions.fileNames.title'),
-        items: [
-          {
-            name: t('settings.exclusions.fileNames.exclusionMode.name'),
-            desc: t('settings.exclusions.fileNames.exclusionMode.desc'),
-            control: {
-              type: 'dropdown',
-              key: 'exclusions.fileNameScopeStrategy',
-              options: exclusionModeOptions,
-            },
-          },
-        ],
-      },
-      {
-        type: 'list',
-        emptyState: t('settings.exclusions.fileNames.emptyState'),
-        items: exclusions().excludedFileNames.map((exclusion) =>
-          buildFileNameExclusionRow(plugin, tab, exclusion)
-        ),
-        onDelete: (index) => {
-          void (async () => {
-            exclusions().excludedFileNames.splice(index, 1);
-            await persistSettings(plugin);
-            tab.update();
-          })();
-        },
-        onReorder: (oldIndex, newIndex) => {
-          void (async () => {
-            const [moved] = exclusions().excludedFileNames.splice(oldIndex, 1);
-            exclusions().excludedFileNames.splice(newIndex, 0, moved);
-            await persistSettings(plugin);
-          })();
-        },
-        addItem: buildAddItem(
-          t('settings.exclusions.fileNames.addButton'),
-          () => {
-            const list = exclusions().excludedFileNames;
-            return list.length > 0 && list[list.length - 1].text.trim() === '';
-          },
-          // Rows are multi-field cards with no single obvious text field to focus.
-          null,
-          async () => {
-            exclusions().excludedFileNames.push({
-              text: '',
-              onlyAtStart: false,
-              onlyWholeLine: false,
-              enabled: true,
-              caseSensitive: false,
-            });
             await persistSettings(plugin);
             tab.update();
           }

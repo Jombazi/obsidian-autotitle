@@ -8,9 +8,9 @@ import {
   hasDisablePropertyInFile,
   frontmatterHasDisableProperty,
   disablePropertyIsOff,
-  isExcludedByFileName,
   extractTitle,
   normalizeExclusionLists,
+  processForbiddenChars,
   reverseCharacterReplacements,
 } from '../src/utils';
 import {
@@ -19,7 +19,7 @@ import {
   createMockApp,
   splitFrontMatter,
 } from './testUtils';
-import { PluginSettings, FileNameExclusion } from '../src/types';
+import { PluginSettings } from '../src/types';
 import { CharKey, CharReplacementConfig } from '../src/types/char-replacement';
 import { TFile, App, Platform } from './mockObsidian';
 
@@ -558,8 +558,8 @@ describe('utils', () => {
 
       beforeEach(() => {
         yamlFixtures = new Map<string, unknown>([
-          ['no rename: true', { 'no rename': true }],
-          ['no rename: false', { 'no rename': false }],
+          ['no rename: true\n', { 'no rename': true }],
+          ['no rename: false\n', { 'no rename': false }],
         ]);
         vi.mocked(getFrontMatterInfo).mockImplementation(
           splitFrontMatter as unknown as typeof getFrontMatterInfo
@@ -623,125 +623,6 @@ describe('utils', () => {
     });
   });
 
-  describe('isExcludedByFileName', () => {
-    beforeEach(() => {
-      settings.exclusions.excludedFileNames = [
-        {
-          text: 'draft',
-          onlyAtStart: false,
-          onlyWholeLine: false,
-          enabled: true,
-          caseSensitive: false,
-        },
-      ];
-    });
-
-    it('should return false when the individual exclusion is disabled', () => {
-      settings.exclusions.excludedFileNames[0].enabled = false;
-
-      expect(isExcludedByFileName('draft note.md', settings)).toBe(false);
-    });
-
-    it('should detect excluded file name in filename', () => {
-      expect(isExcludedByFileName('draft note.md', settings)).toBe(true);
-    });
-
-    it('should detect excluded file name without extension', () => {
-      expect(isExcludedByFileName('My draft', settings)).toBe(true);
-    });
-
-    it('should be case-insensitive by default', () => {
-      expect(isExcludedByFileName('DRAFT note.md', settings)).toBe(true);
-      expect(isExcludedByFileName('Draft Note.md', settings)).toBe(true);
-    });
-
-    it('should respect case sensitivity when enabled', () => {
-      settings.exclusions.excludedFileNames[0].caseSensitive = true;
-
-      expect(isExcludedByFileName('draft note.md', settings)).toBe(true);
-      expect(isExcludedByFileName('DRAFT note.md', settings)).toBe(false);
-    });
-
-    it('should match only at start when onlyAtStart is true', () => {
-      settings.exclusions.excludedFileNames[0].onlyAtStart = true;
-
-      expect(isExcludedByFileName('draft note.md', settings)).toBe(true);
-      expect(isExcludedByFileName('my draft.md', settings)).toBe(false);
-    });
-
-    it('should match whole line when onlyWholeLine is true', () => {
-      settings.exclusions.excludedFileNames[0].onlyWholeLine = true;
-
-      expect(isExcludedByFileName('draft.md', settings)).toBe(true);
-      expect(isExcludedByFileName('draft', settings)).toBe(true);
-      expect(isExcludedByFileName('draft note.md', settings)).toBe(false);
-    });
-
-    it('should skip disabled file name exclusions', () => {
-      settings.exclusions.excludedFileNames[0].enabled = false;
-
-      expect(isExcludedByFileName('draft note.md', settings)).toBe(false);
-    });
-
-    it('should skip empty file name exclusions', () => {
-      settings.exclusions.excludedFileNames = [
-        {
-          text: '',
-          onlyAtStart: false,
-          onlyWholeLine: false,
-          enabled: true,
-          caseSensitive: false,
-        },
-      ];
-
-      expect(isExcludedByFileName('any file.md', settings)).toBe(false);
-    });
-
-    it('should check multiple file name exclusions', () => {
-      settings.exclusions.excludedFileNames = [
-        {
-          text: 'draft',
-          onlyAtStart: false,
-          onlyWholeLine: false,
-          enabled: true,
-          caseSensitive: false,
-        },
-        {
-          text: 'todo',
-          onlyAtStart: false,
-          onlyWholeLine: false,
-          enabled: true,
-          caseSensitive: false,
-        },
-      ];
-
-      expect(isExcludedByFileName('draft note.md', settings)).toBe(true);
-      expect(isExcludedByFileName('todo list.md', settings)).toBe(true);
-      expect(isExcludedByFileName('final version.md', settings)).toBe(false);
-    });
-
-    it('should handle file name exclusions with special characters', () => {
-      settings.exclusions.excludedFileNames = [
-        {
-          text: '[draft]',
-          onlyAtStart: false,
-          onlyWholeLine: false,
-          enabled: true,
-          caseSensitive: false,
-        },
-      ];
-
-      expect(isExcludedByFileName('[draft] note.md', settings)).toBe(true);
-    });
-
-    it('should trim filenames and file name exclusions for whole line comparison', () => {
-      settings.exclusions.excludedFileNames[0].onlyWholeLine = true;
-      settings.exclusions.excludedFileNames[0].text = '  draft  ';
-
-      expect(isExcludedByFileName('  draft  .md', settings)).toBe(true);
-    });
-  });
-
   describe('extractTitle', () => {
     beforeEach(() => {
       // Enable all markup stripping by default for tests
@@ -777,12 +658,13 @@ describe('utils', () => {
         expect(extractTitle('> [!note]+ My Title', settings)).toBe('My Title');
       });
 
-      it('should preserve dash in callout title content', () => {
-        expect(extractTitle('> [!note] - hello', settings)).toBe('- hello');
+      // Reading view parses a callout title as blocks, so a leading `- ` or `+ ` makes it a list item.
+      it('should strip a dash list marker from callout title content', () => {
+        expect(extractTitle('> [!note] - hello', settings)).toBe('hello');
       });
 
-      it('should preserve plus in callout title content', () => {
-        expect(extractTitle('> [!note] + hello', settings)).toBe('+ hello');
+      it('should strip a plus list marker from callout title content', () => {
+        expect(extractTitle('> [!note] + hello', settings)).toBe('hello');
       });
 
       it('should handle callout with no fold indicator and no title', () => {
@@ -815,6 +697,11 @@ describe('utils', () => {
         expect(extractTitle('1. [x] My Task', settings)).toBe('My Task');
       });
 
+      it('should keep a star task marker literal when task list stripping is off', () => {
+        settings.markupStripping.stripMarkupSettings.taskLists = false;
+        expect(extractTitle('* [ ] *a*', settings)).toBe('* [ ] a');
+      });
+
       it('should handle empty task list marker', () => {
         expect(extractTitle('- [ ] ', settings)).toBe('Untitled');
       });
@@ -827,6 +714,11 @@ describe('utils', () => {
     describe('unordered list context awareness', () => {
       it('should strip unordered list marker', () => {
         expect(extractTitle('- My Item', settings)).toBe('My Item');
+      });
+
+      it('should keep a star bullet literal when unordered list stripping is off', () => {
+        settings.markupStripping.stripMarkupSettings.unorderedLists = false;
+        expect(extractTitle('* a *b*', settings)).toBe('* a b');
       });
 
       it('should handle indented empty unordered list marker (0-3 spaces)', () => {
@@ -842,18 +734,20 @@ describe('utils', () => {
         expect(extractTitle('    - item', settings)).toBe('- item');
       });
 
-      it('should NOT strip list-like content after callout stripping', () => {
-        // Original line is callout, not list - should preserve dash in title
+      it('should strip a list nested in a callout title', () => {
         expect(extractTitle('> [!info] - hello there', settings)).toBe(
-          '- hello there'
+          'hello there'
         );
       });
 
-      it('should NOT strip list-like content after quote stripping', () => {
-        // After quote stripped, "- hello" remains but shouldn't be stripped as list
-        // because original line was a quote, not a list
+      it('should strip a list nested in a quote', () => {
         settings.markupStripping.stripMarkupSettings.callouts = false;
-        expect(extractTitle('> - hello there', settings)).toBe('- hello there');
+        expect(extractTitle('> - hello there', settings)).toBe('hello there');
+      });
+
+      it('should keep a list marker nested in a quote when unordered list stripping is off', () => {
+        settings.markupStripping.stripMarkupSettings.unorderedLists = false;
+        expect(extractTitle('> * a *b*', settings)).toBe('* a b');
       });
     });
 
@@ -870,8 +764,8 @@ describe('utils', () => {
         expect(extractTitle('    1. item', settings)).toBe('1. item');
       });
 
-      it('should NOT strip ordered list-like content after callout stripping', () => {
-        expect(extractTitle('> [!info] 1. hello', settings)).toBe('1. hello');
+      it('should strip an ordered list nested in a callout title', () => {
+        expect(extractTitle('> [!info] 1. hello', settings)).toBe('hello');
       });
     });
 
@@ -988,6 +882,13 @@ describe('utils', () => {
         );
       });
 
+      it('should drop an empty %%…%% comment when the markers-only toggle is on', () => {
+        settings.markupStripping.stripCommentsEntirely = false;
+        settings.markupStripping.stripMarkupSettings.comments = true;
+
+        expect(extractTitle('%%%%', settings)).toBe('Untitled');
+      });
+
       it('should still keep %%…%% content when the markers-only toggle is on', () => {
         settings.markupStripping.stripCommentsEntirely = false;
         settings.markupStripping.stripMarkupSettings.comments = true;
@@ -1062,8 +963,8 @@ describe('utils', () => {
         expect(extractTitle('\\==🔴Title==', settings)).toBe('==🔴Title==');
       });
 
-      it('should keep the color marker when an escape inside the highlight blocks stripping', () => {
-        expect(extractTitle('==🔴Ti\\*tle==', settings)).toBe('==🔴Ti*tle==');
+      it('should strip a color-marked highlight that contains an escape', () => {
+        expect(extractTitle('==🔴Ti\\*tle==', settings)).toBe('Ti*tle');
       });
 
       it('should leave a highlight opened by a space as literal text', () => {
@@ -1074,12 +975,12 @@ describe('utils', () => {
         expect(extractTitle('====', settings)).toBe('====');
       });
 
-      it('should strip a highlight whose closing marker follows a space', () => {
-        expect(extractTitle('==x ==', settings)).toBe('x');
+      it('should leave a highlight whose closing marker follows a space as literal text', () => {
+        expect(extractTitle('==x ==', settings)).toBe('==x ==');
       });
 
-      it('should strip a color-marked highlight whose closing marker follows a space', () => {
-        expect(extractTitle('==🔴x ==', settings)).toBe('x');
+      it('should leave a color-marked highlight whose closing marker follows a space as literal text', () => {
+        expect(extractTitle('==🔴x ==', settings)).toBe('==🔴x ==');
       });
 
       it('should keep a color marker that only bold stripping exposes', () => {
@@ -1096,40 +997,432 @@ describe('utils', () => {
         expect(extractTitle('**==🔴Title==**', settings)).toBe('Title');
       });
     });
+
+    describe('backslashes as Reading view shows them', () => {
+      // Expected values are the text Obsidian 1.14's Reading view renders for each line, with every markup-stripping toggle on.
+      it.each([
+        { line: 'a\\b', expected: 'a\\b' },
+        { line: 'a\\*b*', expected: 'a*b*' },
+        { line: 'a\\\\b', expected: 'a\\b' },
+        { line: 'a\\ b', expected: 'a\\ b' },
+        { line: 'trail\\', expected: 'trail\\' },
+        { line: '\\# x', expected: '# x' },
+        { line: '# Head \\', expected: 'Head \\' },
+        { line: 'a\\é', expected: 'a\\é' },
+        { line: 'a\\“b”', expected: 'a\\“b”' },
+        { line: 'a\\\\\\*b', expected: 'a\\*b' },
+        { line: '`a\\*b`', expected: 'a\\*b' },
+        { line: 'x \\`a\\` y', expected: 'x `a` y' },
+        { line: 'a\\😀b', expected: 'a\\😀b' },
+        { line: 'a\\\\', expected: 'a\\' },
+      ])('$line gives $expected', ({ line, expected }) => {
+        expect(extractTitle(line, settings)).toBe(expected);
+      });
+
+      it('reads escapes the same whatever the backslash toggle says', () => {
+        settings.characterReplacements.enableForbiddenCharReplacements = true;
+        for (const enabled of [true, false]) {
+          settings.characterReplacements.charReplacements.backslash.enabled =
+            enabled;
+          expect(extractTitle('a\\*b* c\\d', settings)).toBe('a*b* c\\d');
+        }
+      });
+
+      // Code stripping off, so the code span keeps its backticks and only escape handling decides what happens to each backslash.
+      it('keeps backslashes literal inside a code span closed by a run of the same length', () => {
+        settings.markupStripping.stripMarkupSettings.code = false;
+        expect(extractTitle('`` a`b\\* `` \\*', settings)).toBe(
+          '`` a`b\\* `` *'
+        );
+      });
+
+      it('keeps backslashes literal inside a wikilink when wikilink stripping is off', () => {
+        settings.markupStripping.stripMarkupSettings.wikilinks = false;
+        expect(extractTitle('[[a\\*b]] \\*', settings)).toBe('[[a\\*b]] *');
+      });
+
+      it('lets an unclosed backtick run open no code span', () => {
+        settings.markupStripping.stripMarkupSettings.code = false;
+        expect(extractTitle('``a` \\*', settings)).toBe('``a` *');
+      });
+
+      describe('through processForbiddenChars', () => {
+        const toFileName = (line: string): string =>
+          processForbiddenChars(extractTitle(line, settings), settings);
+
+        beforeEach(() => {
+          settings.characterReplacements.enableForbiddenCharReplacements = true;
+        });
+
+        it('replaces a visible backslash when backslash replacement is on', () => {
+          settings.characterReplacements.charReplacements.backslash.enabled = true;
+          expect(toFileName('a\\b')).toBe('a⧵b');
+        });
+
+        it('drops a visible backslash when backslash replacement is off', () => {
+          settings.characterReplacements.charReplacements.backslash.enabled = false;
+          expect(toFileName('a\\b')).toBe('ab');
+        });
+
+        it('replaces an escaped asterisk when asterisk replacement is on', () => {
+          settings.characterReplacements.charReplacements.asterisk.enabled = true;
+          expect(toFileName('a\\*b')).toBe('a∗b');
+        });
+
+        it('drops an escaped asterisk when asterisk replacement is off', () => {
+          settings.characterReplacements.charReplacements.asterisk.enabled = false;
+          expect(toFileName('a\\*b')).toBe('ab');
+        });
+      });
+    });
+
+    describe('math, from the tokenizer', () => {
+      // MathJax replaces the rendered math, so these follow the math tokenizer in Obsidian 1.14.4's app.js instead of a Reading view measurement: content stays raw, escapes included.
+      it.each([
+        { line: '$a\\*b$', expected: 'a\\*b' },
+        { line: '$a\\$b$', expected: 'a\\$b' },
+        { line: '$$a$$', expected: 'a' },
+        { line: 'x $$a\\*b$$ y', expected: 'x a\\*b y' },
+        { line: '$*a*$ *b*', expected: '*a* b' },
+      ])('$line gives $expected', ({ line, expected }) => {
+        expect(extractTitle(line, settings)).toBe(expected);
+      });
+
+      it('keeps the delimiters and raw content when inline math stripping is off', () => {
+        settings.markupStripping.stripInlineMathMarkup = false;
+        expect(extractTitle('$a\\*b$ *c*', settings)).toBe('$a\\*b$ c');
+      });
+    });
+
+    describe('Reading view parity', () => {
+      // Each readingView is the textContent Obsidian 1.14.4's Reading view renders for the line as its own block; an empty rendering falls back to Untitled.
+      const defaults = createTestSettings();
+      const expectReadingView = ({
+        line,
+        readingView,
+      }: {
+        line: string;
+        readingView: string;
+      }): void => {
+        expect(extractTitle(line, defaults).trim()).toBe(
+          readingView.trim() || 'Untitled'
+        );
+      };
+
+      it.each([
+        { line: '``a`b``', readingView: 'a`b' },
+        { line: '`` `a` ``', readingView: '`a`' },
+        { line: '` a `', readingView: 'a' },
+        { line: '`  a  `', readingView: ' a ' },
+        { line: '```x```', readingView: 'x' },
+        { line: '`a``b`', readingView: 'a``b' },
+        { line: '``a`', readingView: '`a' },
+        { line: 'x `a', readingView: 'x `a' },
+        { line: '`a`b`', readingView: 'ab`' },
+        { line: '`a\\`b`', readingView: 'a\\b`' },
+        { line: '`` a ``b', readingView: 'ab' },
+        { line: 'x ``a`` y `b`', readingView: 'x a y b' },
+      ])('code spans: $line renders $readingView', expectReadingView);
+
+      it.each([
+        { line: '==a\\==b==', readingView: 'a\\b==' },
+        { line: '==a\\*b==', readingView: 'a*b' },
+        { line: '==a\\=b==', readingView: 'a=b' },
+        { line: '\\==a==', readingView: '==a==' },
+        { line: '==a==\\=', readingView: 'a=' },
+        { line: '==a=b==', readingView: 'a=b' },
+        { line: 'a\\===b==', readingView: 'a=b' },
+        { line: '==a\\\\==', readingView: 'a\\' },
+        { line: '==\\=a==', readingView: '=a' },
+        { line: '==a \\== b==', readingView: 'a \\ b==' },
+        { line: '~~a\\~b~~', readingView: 'a~b' },
+        { line: '~~a\\*b~~', readingView: 'a*b' },
+        { line: '~~a\\~~b~~', readingView: 'a\\b~~' },
+        { line: '==**a\\*b**==', readingView: 'a*b' },
+      ])(
+        'highlights and strikethrough: $line renders $readingView',
+        expectReadingView
+      );
+
+      it.each([
+        { line: '**a\\*b**', readingView: 'a*b' },
+        { line: '*a\\*b*', readingView: 'a*b' },
+        { line: '_a\\_b_', readingView: 'a_b' },
+        { line: '__a\\_b__', readingView: 'a_b' },
+        { line: '**a\\\\**', readingView: 'a\\' },
+        { line: '*a\\\\*', readingView: 'a\\' },
+        { line: '**a\\**b**', readingView: 'a**b' },
+        { line: '\\**a**', readingView: '**a**' },
+        { line: '**a**\\*', readingView: 'a*' },
+        { line: '*a\\**', readingView: '*a**' },
+        { line: '***a\\*b***', readingView: 'a*b' },
+        { line: '**a\\`b**', readingView: 'a`b' },
+      ])('bold and italic: $line renders $readingView', expectReadingView);
+
+      it.each([
+        { line: '[[x\\|y]]', readingView: 'y' },
+        { line: '[[x\\|y\\|z]]', readingView: 'y\\|z' },
+        { line: '[[x|y\\|z]]', readingView: 'y\\|z' },
+        { line: '[[x\\\\|y]]', readingView: 'y' },
+        { line: '[[x\\#h|y]]', readingView: 'y' },
+        { line: '[[x\\|]]', readingView: '' },
+        { line: 'p [[x\\|y]] q', readingView: 'p y q' },
+        { line: '[[x\\]]', readingView: 'x\\' },
+        { line: '[[x|a\\*b]]', readingView: 'a\\*b' },
+        { line: '[a\\|b](c)', readingView: 'a|b' },
+        { line: '[a\\*b](c)', readingView: 'a*b' },
+        { line: '%%a\\*b%%', readingView: '' },
+        { line: '<b>a\\*b</b>', readingView: 'a*b' },
+        { line: '# a\\*b', readingView: 'a*b' },
+        { line: '#tag\\*x', readingView: '#tag*x' },
+      ])('links and other: $line renders $readingView', expectReadingView);
+
+      it.each([
+        { line: 'snake_case_name', readingView: 'snake_case_name' },
+        { line: '`[[x]]`', readingView: '[[x]]' },
+        { line: '`<b>x</b>`', readingView: '<b>x</b>' },
+        { line: '`$x$`', readingView: '$x$' },
+        { line: '~~ a~~', readingView: '~~ a~~' },
+        { line: '~~a ~~', readingView: '~~a ~~' },
+        { line: '%%%%', readingView: '' },
+        { line: '[[x|]] y', readingView: ' y' },
+      ])(
+        'delimiters and code span content: $line renders $readingView',
+        expectReadingView
+      );
+
+      it.each([
+        { line: '[[x#h]]', readingView: 'x > h' },
+        { line: '[[x#h#k]]', readingView: 'x > h > k' },
+        { line: '[[#h]]', readingView: 'h' },
+        { line: '[[x#^block]]', readingView: 'x > ^block' },
+        { line: '[[x#h|y]]', readingView: 'y' },
+        { line: '[[x#]]', readingView: 'x' },
+        { line: '[[#]]', readingView: '' },
+        { line: '[[x #h]]', readingView: 'x  > h' },
+        { line: '[[x# h]]', readingView: 'x >  h' },
+        { line: '[[x##h]]', readingView: 'x > h' },
+        { line: '[[|y]]', readingView: '|y' },
+        { line: '[[a &amp; b]]', readingView: 'a &amp; b' },
+        { line: 'p [[x#h]] q', readingView: 'p x > h q' },
+        { line: '[[x\\#h]]', readingView: 'x\\ > h' },
+        { line: '# [[x#h]]', readingView: 'x > h' },
+      ])('heading links: $line renders $readingView', expectReadingView);
+
+      it.each([
+        {
+          line: 'https://x.com/__init__',
+          readingView: 'https://x.com/__init__',
+        },
+        { line: 'https://x.com/*a*', readingView: 'https://x.com/*a*' },
+        { line: 'https://x.com/~~a~~', readingView: 'https://x.com/~~a~~' },
+        { line: 'see https://x.com/a.', readingView: 'see https://x.com/a.' },
+        { line: '(https://x.com/a)', readingView: '(https://x.com/a)' },
+        { line: 'www.x.com/_a_', readingView: 'www.x.com/_a_' },
+        { line: 'http://x.com/**a** b', readingView: 'http://x.com/**a** b' },
+        { line: 'https://x.com/a_ b_', readingView: 'https://x.com/a b' },
+        { line: 'HTTPS://x.com/__a__', readingView: 'HTTPS://x.com/__a__' },
+        { line: 'x HTTPS://x.com/__a__', readingView: 'x HTTPS://x.com/a' },
+        { line: 'https://x_y.com/__a__', readingView: 'https://x_y.com/a' },
+        { line: 'https://x.com/a.)', readingView: 'https://x.com/a.)' },
+        {
+          line: 'https://x.com/?a=1&amp;b=2',
+          readingView: 'https://x.com/?a=1&b=2',
+        },
+        { line: 'https://x.com/a&amp;', readingView: 'https://x.com/a&' },
+        { line: 'https://x.com/[[a]]', readingView: 'https://x.com/[[a]]' },
+        { line: 'https://x.com/a$b$', readingView: 'https://x.com/a$b$' },
+        { line: '**https://x.com/a**', readingView: 'https://x.com/a' },
+        { line: 'https://x.com/a*b*', readingView: 'https://x.com/a*b*' },
+        { line: '*https://x.com/a_b_*', readingView: 'https://x.com/a_b_' },
+        { line: 'www.x.com', readingView: 'www.x.com' },
+        { line: 'https://x.com/a_b_c_', readingView: 'https://x.com/a_b_c_' },
+        { line: 'https://x.com/a(b)_c_', readingView: 'https://x.com/a(b)_c_' },
+        { line: 'https://x.com/a;b_c_', readingView: 'https://x.com/a;b_c_' },
+        { line: 'www.x..com/_a_', readingView: 'www.x..com/a' },
+        { line: 'https://.x.com/_a_', readingView: 'https://.x.com/a' },
+        { line: 'x.com/_a_', readingView: 'x.com/a' },
+        { line: 'a\\_b_ https://x.com/_', readingView: 'a_b https://x.com/' },
+        { line: 'a_b@x.com', readingView: 'a_b@x.com' },
+        { line: '_a_b@x.com', readingView: '_a_b@x.com' },
+        { line: 'mail a_b_@x.co_m', readingView: 'mail a_b_@x.co_m' },
+        { line: 'x@y', readingView: 'x@y' },
+        { line: 'a.b@x.y.', readingView: 'a.b@x.y.' },
+        { line: 'a@x-.com', readingView: 'a@x-.com' },
+      ])('bare URLs and emails: $line renders $readingView', expectReadingView);
+
+      it.each([
+        { line: '[https://x.com/__a__](u)', readingView: 'https://x.com/a' },
+        { line: '[https://x.com/__a__]', readingView: '[https://x.com/a]' },
+        { line: '[a](https://x.com/__a__)', readingView: 'a' },
+        { line: '[](https://x.com/__a__)', readingView: '' },
+        {
+          line: '[x](y) https://x.com/_a_',
+          readingView: 'x https://x.com/_a_',
+        },
+        { line: '[x *a*]', readingView: '[x a]' },
+        { line: '[a *b] c*', readingView: '[a *b] c*' },
+        { line: '[a [b] *c*]', readingView: '[a [b] c]' },
+        { line: '<https://x.com/__a__>', readingView: 'https://x.com/__a__' },
+        { line: '<https://x.com/&amp;>', readingView: 'https://x.com/&' },
+        { line: '<a_b_@x.co>', readingView: 'a_b_@x.co' },
+        { line: '<mailto:a@b.c>', readingView: 'a@b.c' },
+        { line: '<https://>', readingView: 'https://' },
+        { line: '<a:/b>', readingView: '<a:/b>' },
+        {
+          line: '[<https://x.com/__a__>](u)',
+          readingView: '<https://x.com/a>',
+        },
+        { line: '*a <https://x*y> b*', readingView: 'a <https://xy> b*' },
+      ])(
+        'link text and autolinks: $line renders $readingView',
+        expectReadingView
+      );
+
+      it.each([
+        { line: '* a *b*', readingView: 'a b' },
+        { line: '- a *b*', readingView: 'a b' },
+        { line: '+ _a_', readingView: 'a' },
+        { line: '* *a*', readingView: 'a' },
+        { line: '1. *a*', readingView: 'a' },
+        { line: '1) *a*', readingView: 'a' },
+        { line: '- [ ] *a*', readingView: 'a' },
+        { line: '* [ ] *a*', readingView: 'a' },
+        { line: '- [x] *a* b*', readingView: 'a b*' },
+        { line: '- [ ] ', readingView: '' },
+        { line: '> *a*', readingView: 'a' },
+        { line: '> a &amp; b', readingView: 'a & b' },
+        { line: '> [!note] *a*', readingView: 'a' },
+        { line: '> [!note] *a* #', readingView: 'a #' },
+        { line: '- https://x.com/__a__', readingView: 'https://x.com/__a__' },
+        { line: '> - a', readingView: 'a' },
+        { line: '> - hello there', readingView: 'hello there' },
+        { line: '> 1. a', readingView: 'a' },
+        { line: '> - [ ] a', readingView: 'a' },
+        { line: '> > a', readingView: 'a' },
+        { line: '> # a', readingView: 'a' },
+        { line: '- # a', readingView: 'a' },
+        { line: '- > a', readingView: 'a' },
+        { line: '- - a', readingView: 'a' },
+        { line: '1. - a', readingView: 'a' },
+        { line: '- [ ] - a', readingView: 'a' },
+        { line: '> [!info] - hello there', readingView: 'hello there' },
+        { line: '> [!info] 1. hello', readingView: 'hello' },
+        { line: '> [!note] + hello', readingView: 'hello' },
+        { line: '> [!note] # a #', readingView: 'a' },
+      ])('block prefixes: $line renders $readingView', expectReadingView);
+
+      it.each([
+        { line: '# *a*', readingView: 'a' },
+        { line: '# a #', readingView: 'a' },
+        { line: '## *a* ##', readingView: 'a' },
+        { line: '# a#', readingView: 'a#' },
+        { line: '# a \\#', readingView: 'a #' },
+        { line: '# #a', readingView: '#a' },
+        { line: '# a # b', readingView: 'a # b' },
+        { line: '# a ##  ', readingView: 'a' },
+        { line: '#\ta #', readingView: 'a' },
+        { line: '# https://x.com/__a__', readingView: 'https://x.com/__a__' },
+      ])('headings: $line renders $readingView', expectReadingView);
+
+      it.each([
+        { line: 'a &amp; b', readingView: 'a & b' },
+        { line: '&lt;x&gt;', readingView: '<x>' },
+        { line: '&#35;tag', readingView: '#tag' },
+        { line: '&copy;', readingView: '©' },
+        { line: 'a&nbsp;b', readingView: 'a\u00A0b' },
+        { line: '&nbsp;', readingView: '\u00A0' },
+        { line: '&foo;', readingView: '&foo;' },
+        { line: '`&amp;`', readingView: '&amp;' },
+        { line: '&amp', readingView: '&' },
+        { line: '&copyx', readingView: '©x' },
+        { line: '&notit;', readingView: '¬it;' },
+        { line: '&hearts;', readingView: '♥' },
+        { line: '&#x1F534;', readingView: '🔴' },
+        { line: '&#0;', readingView: '\uFFFD' },
+        { line: '&#128;', readingView: '€' },
+        { line: 'a&#32;b', readingView: 'a b' },
+        { line: '\\&amp;', readingView: '&amp;' },
+        { line: '*&amp;*', readingView: '&' },
+        { line: '~~&amp;~~', readingView: '&' },
+        { line: '==&#x1F534;x==', readingView: '🔴x' },
+        { line: '%%&amp;%%x', readingView: 'x' },
+        { line: '&lt;b&gt;x&lt;/b&gt;', readingView: '<b>x</b>' },
+      ])('character references: $line renders $readingView', expectReadingView);
+
+      it.each([
+        { line: '$5 and $6', readingView: '$5 and $6' },
+        { line: '\\$a$', readingView: '$a$' },
+        { line: 'a $ b$', readingView: 'a $ b$' },
+        { line: '$a$1', readingView: '$a$1' },
+        { line: '`$a$` $b', readingView: '$a$ $b' },
+      ])(
+        'dollar signs that open no math: $line renders $readingView',
+        expectReadingView
+      );
+
+      it.each([
+        { line: '<a href="https://x.com/__a__">t</a>', readingView: 't' },
+        {
+          line: '<a href="x">https://x.com/__a__</a>',
+          readingView: 'https://x.com/a',
+        },
+        {
+          line: '<A HREF="x">https://x.com/__a__</A>',
+          readingView: 'https://x.com/a',
+        },
+        {
+          line: '<a href="x">t</a> https://x.com/__a__',
+          readingView: 't https://x.com/__a__',
+        },
+        {
+          line: '<b>https://x.com/__a__</b>',
+          readingView: 'https://x.com/__a__',
+        },
+        { line: '<span title="*a*">b</span>', readingView: 'b' },
+        { line: '<!-- *a* --> b', readingView: 'b' },
+        { line: '<b>*a*</b>', readingView: 'a' },
+        { line: 'x <b>a &amp; b</b>', readingView: 'x a & b' },
+      ])('inline HTML: $line renders $readingView', expectReadingView);
+
+      // Open divergences: link destinations are not ported and unpaired HTML tags are not unwrapped, so these still render differently; a passing row here means the port caught up.
+      it.fails.each([
+        { line: '[a](x*y) *z*', readingView: 'a z' },
+        { line: '<foo bar>', readingView: '' },
+      ])('not yet: $line renders $readingView', expectReadingView);
+    });
   });
 
   describe('normalizeExclusionLists', () => {
-    const makeFileNameExclusion = (
-      overrides: Partial<FileNameExclusion> = {}
-    ): FileNameExclusion => ({
-      text: 'draft',
-      onlyAtStart: false,
-      onlyWholeLine: false,
-      enabled: true,
-      caseSensitive: false,
-      ...overrides,
-    });
-
     beforeEach(() => {
-      settings.exclusions.excludedFolders = [];
+      settings.exclusions.excludedFiles = [];
       settings.exclusions.excludedTags = [];
       settings.exclusions.excludedProperties = [];
-      settings.exclusions.excludedFileNames = [];
     });
 
     describe('blank entry removal', () => {
-      it('should remove blank folder entries', () => {
-        settings.exclusions.excludedFolders = ['', 'Notes', ''];
+      it('should remove blank excluded-file entries', () => {
+        settings.exclusions.excludedFiles = ['', 'Notes/', ''];
 
         expect(normalizeExclusionLists(settings)).toBe(true);
-        expect(settings.exclusions.excludedFolders).toEqual(['Notes']);
+        expect(settings.exclusions.excludedFiles).toEqual(['Notes/']);
       });
 
-      it('should remove whitespace-only folder entries', () => {
-        settings.exclusions.excludedFolders = ['Notes', '   '];
+      it('should remove whitespace-only excluded-file entries', () => {
+        settings.exclusions.excludedFiles = ['Notes/', '   '];
 
         expect(normalizeExclusionLists(settings)).toBe(true);
-        expect(settings.exclusions.excludedFolders).toEqual(['Notes']);
+        expect(settings.exclusions.excludedFiles).toEqual(['Notes/']);
+      });
+
+      it('should trim excluded-file entries, preserving case', () => {
+        settings.exclusions.excludedFiles = ['  Notes/  ', ' /Draft-/ '];
+
+        expect(normalizeExclusionLists(settings)).toBe(true);
+        expect(settings.exclusions.excludedFiles).toEqual([
+          'Notes/',
+          '/Draft-/',
+        ]);
       });
 
       it('should remove blank tag entries', () => {
@@ -1174,61 +1467,44 @@ describe('utils', () => {
         ]);
       });
 
-      it('should remove file name exclusions with blank text', () => {
-        settings.exclusions.excludedFileNames = [
-          makeFileNameExclusion({ text: '' }),
-          makeFileNameExclusion({ text: 'draft' }),
-          makeFileNameExclusion({ text: '  ' }),
-        ];
-
-        expect(normalizeExclusionLists(settings)).toBe(true);
-        expect(settings.exclusions.excludedFileNames).toEqual([
-          makeFileNameExclusion({ text: 'draft' }),
-        ]);
-      });
-
-      it('should preserve the flags of surviving file name exclusions', () => {
-        const kept = makeFileNameExclusion({
-          text: 'draft',
-          onlyAtStart: true,
-          onlyWholeLine: true,
-          enabled: false,
-          caseSensitive: true,
-        });
-        settings.exclusions.excludedFileNames = [
-          makeFileNameExclusion({ text: '' }),
-          kept,
-        ];
-
-        normalizeExclusionLists(settings);
-
-        expect(settings.exclusions.excludedFileNames).toEqual([kept]);
-      });
-
       it('should collapse an all-blank list to an empty array', () => {
-        settings.exclusions.excludedFolders = ['', '  ', ''];
+        settings.exclusions.excludedFiles = ['', '  ', ''];
 
         expect(normalizeExclusionLists(settings)).toBe(true);
-        expect(settings.exclusions.excludedFolders).toEqual([]);
+        expect(settings.exclusions.excludedFiles).toEqual([]);
       });
     });
 
     describe('deduplication', () => {
-      it('should keep the last occurrence of a duplicate folder', () => {
-        settings.exclusions.excludedFolders = ['Notes', 'Archive', 'notes'];
+      it('should keep the last occurrence of a case-insensitive duplicate path entry', () => {
+        settings.exclusions.excludedFiles = ['Notes/', 'Archive/', 'notes/'];
 
         expect(normalizeExclusionLists(settings)).toBe(true);
-        expect(settings.exclusions.excludedFolders).toEqual([
-          'Archive',
-          'notes',
+        expect(settings.exclusions.excludedFiles).toEqual([
+          'Archive/',
+          'notes/',
         ]);
       });
 
-      it('should treat folder paths as equal regardless of surrounding slashes', () => {
-        settings.exclusions.excludedFolders = ['Notes', '/Notes/'];
+      it('should treat entries that differ only by surrounding whitespace as duplicates', () => {
+        settings.exclusions.excludedFiles = ['Notes/', ' Notes/ '];
 
         expect(normalizeExclusionLists(settings)).toBe(true);
-        expect(settings.exclusions.excludedFolders).toEqual(['Notes']);
+        expect(settings.exclusions.excludedFiles).toEqual(['Notes/']);
+      });
+
+      it('should keep entries that differ by a trailing slash, since they match different paths', () => {
+        settings.exclusions.excludedFiles = ['Notes', 'Notes/'];
+
+        expect(normalizeExclusionLists(settings)).toBe(false);
+        expect(settings.exclusions.excludedFiles).toEqual(['Notes', 'Notes/']);
+      });
+
+      it('should keep regular expressions that differ only by case, since case changes their meaning', () => {
+        settings.exclusions.excludedFiles = ['/\\d/', '/\\D/', '/\\d/'];
+
+        expect(normalizeExclusionLists(settings)).toBe(true);
+        expect(settings.exclusions.excludedFiles).toEqual(['/\\D/', '/\\d/']);
       });
 
       it('should keep the last occurrence of a duplicate tag', () => {
@@ -1251,26 +1527,15 @@ describe('utils', () => {
           { key: 'Status', value: 'Draft' },
         ]);
       });
-
-      it('should not deduplicate file name exclusions', () => {
-        settings.exclusions.excludedFileNames = [
-          makeFileNameExclusion({ text: 'draft' }),
-          makeFileNameExclusion({ text: 'draft', onlyAtStart: true }),
-        ];
-
-        expect(normalizeExclusionLists(settings)).toBe(false);
-        expect(settings.exclusions.excludedFileNames).toHaveLength(2);
-      });
     });
 
     describe('return value', () => {
       it('should return false when every list is already clean', () => {
-        settings.exclusions.excludedFolders = ['Notes'];
+        settings.exclusions.excludedFiles = ['Notes/', '/draft-/'];
         settings.exclusions.excludedTags = ['project'];
         settings.exclusions.excludedProperties = [
           { key: 'status', value: 'draft' },
         ];
-        settings.exclusions.excludedFileNames = [makeFileNameExclusion()];
 
         expect(normalizeExclusionLists(settings)).toBe(false);
       });

@@ -7,11 +7,15 @@ import {
 } from 'obsidian';
 import { PluginSettings, OSPreset } from './types';
 import { CHAR_TO_SETTING_KEY } from './types/char-replacement';
-import { isRootFolderPath } from './utils/string-processing';
-import { resolveCurrentFrontmatter } from './utils/file-exclusions';
+import {
+  excludedFileEntryKey,
+  resolveCurrentFrontmatter,
+} from './utils/file-exclusions';
 import { t } from './i18n';
 import { PropertyManager } from './core/property-manager';
-import { findPagePreviewEditors } from './utils/page-preview';
+import { findEmbeddedEditors } from './utils/embedded-editors';
+import { renderInlineMarkup, InlineMarkupOptions } from './utils/inline-markup';
+import { splitBlockPrefixes, BlockListKind } from './utils/block-prefixes';
 
 // Re-export from modular utilities
 export {
@@ -28,10 +32,8 @@ export {
   fileHasTargetTags,
 } from './utils/tag-utils';
 export {
-  isFileInConfiguredFolders,
   fileHasExcludedProperties,
   shouldProcessFile,
-  isExcludedByFileName,
 } from './utils/file-exclusions';
 
 // Re-export from PropertyManager (wrapped to avoid unbound-method warning)
@@ -93,7 +95,7 @@ export function detectOS(): OSPreset {
 }
 
 /**
- * Check if file is currently open in a Markdown leaf or being edited in a page preview
+ * Check if file is currently open in a Markdown leaf or being edited in a page preview or Canvas card
  * @param file - File to check
  * @param app - Obsidian App instance
  * @returns true if file is open in any editor
@@ -110,7 +112,7 @@ export function isFileOpenInAnyEditor(file: TFile, app: App): boolean {
     }
   }
 
-  return findPagePreviewEditors(app, file).length > 0;
+  return findEmbeddedEditors(app, file).length > 0;
 }
 
 /**
@@ -144,7 +146,7 @@ export function canModifyFile(
   // Manual commands bypass this check
   if (!isManualCommand) {
     // If hasActiveEditor provided (from editor-change event), trust it
-    // This includes both leaf editors and page preview editors
+    // This includes both leaf editors and page preview or Canvas card editors
     if (hasActiveEditor !== undefined) {
       if (!hasActiveEditor) {
         return { canModify: false, reason: 'file not open in editor' };
@@ -166,10 +168,8 @@ export function canModifyFile(
 // - normalizeTag → utils/tag-utils.ts
 // - parseTagsFromYAML, stripFrontmatter → utils/tag-utils.ts
 // - fileHasTargetTags → utils/tag-utils.ts
-// - isFileInConfiguredFolders → utils/file-exclusions.ts
 // - fileHasExcludedProperties → utils/file-exclusions.ts
 // - shouldProcessFile → utils/file-exclusions.ts
-// - isExcludedByFileName → utils/file-exclusions.ts
 // - deepMerge → utils/deep-merge.ts
 
 export function hasDisablePropertyInFile(
@@ -233,23 +233,7 @@ export function disablePropertyIsOff(
   );
 }
 
-// Obsidian 1.14's highlight color markers in circle and square form, as its own lookup table accepts both; self-grouped so the alternation stays inside the surrounding `==…==` pattern.
-const HIGHLIGHT_COLOR_MARKERS =
-  '(?:\u{1F534}|\u{1F7E5}|\u{1F7E0}|\u{1F7E7}|\u{1F7E1}|\u{1F7E8}|\u{1F7E2}|\u{1F7E9}|\u{1F535}|\u{1F7E6}|\u{1F7E3}|\u{1F7EA})';
-
-const HIGHLIGHT_CONTENT_SOLID_CHAR = String.raw`(?:(?!==)\S)`;
-const HIGHLIGHT_CONTENT_ANY_CHAR = String.raw`(?:(?!==).)`;
-
-// `u` so `.` and `\S` step over an emoji as one character.
-const MARKED_HIGHLIGHT = new RegExp(
-  String.raw`==${HIGHLIGHT_COLOR_MARKERS}(${HIGHLIGHT_CONTENT_ANY_CHAR}*)==`,
-  'gu'
-);
-const UNMARKED_HIGHLIGHT = new RegExp(
-  String.raw`==(${HIGHLIGHT_CONTENT_SOLID_CHAR}${HIGHLIGHT_CONTENT_ANY_CHAR}*)==`,
-  'gu'
-);
-
+// Reading view's rendering of the line is the reference: every transform here aims to yield the text Reading view shows, and a divergence from it is a bug.
 export function extractTitle(
   line: string,
   settings: PluginSettings,
@@ -264,18 +248,18 @@ export function extractTitle(
   const indentStr = line.match(/^(\s*)/)?.[1] ?? '';
   const isCodeBlockIndent = indentStr.includes('\t') || indentStr.length >= 4;
   const isOriginallyTaskList =
-    /^\s*(?:[-+*]|\d+\.) \[.\] /.test(line) && !isCodeBlockIndent;
+    /^\s*(?:[-+*]|\d+[.)]) \[.\] /.test(line) && !isCodeBlockIndent;
   const isOriginallyUnorderedList =
     !isOriginallyTaskList && /^\s*[-+*] /.test(line) && !isCodeBlockIndent;
   const isOriginallyOrderedList =
-    !isOriginallyTaskList && /^\s*\d+\. /.test(line) && !isCodeBlockIndent;
+    !isOriginallyTaskList && /^\s*\d+[.)] /.test(line) && !isCodeBlockIndent;
 
   // Check if line is only a list marker (before trim removes trailing space)
   // Uses space character class (not \s) to exclude tabs, which are code blocks per CommonMark
   if (!skipMarkupStripping) {
     if (
       settings.markupStripping.stripMarkupSettings.taskLists &&
-      /^ {0,3}(?:[-+*]|\d+\.) \[.\] $/.test(line)
+      /^ {0,3}(?:[-+*]|\d+[.)]) \[.\] $/.test(line)
     ) {
       return t('untitled');
     }
@@ -287,7 +271,7 @@ export function extractTitle(
     }
     if (
       settings.markupStripping.stripMarkupSettings.orderedLists &&
-      /^ {0,3}\d+\. $/.test(line)
+      /^ {0,3}\d+[.)] $/.test(line)
     ) {
       return t('untitled');
     }
@@ -313,212 +297,96 @@ export function extractTitle(
     return t('untitled');
   }
 
-  // Handle escaped characters based on backslash replacement setting
-  const escapeMap = new Map<string, string>();
-  let escapeCounter = 0;
-
-  const backslashReplacementEnabled =
-    settings.characterReplacements.enableForbiddenCharReplacements &&
-    settings.characterReplacements.charReplacements.backslash.enabled;
+  // Escapes, decoded character references, code spans, math, bare URLs and wikilinks are hidden behind placeholders so the passes below leave their text as Reading view shows it; every other backslash stays in the line for `processForbiddenChars` to replace or drop.
+  const protectedTexts = new Map<string, string>();
+  let placeholderCounter = 0;
 
   // Check for placeholder collision (extremely rare - user would need to type exact Unicode chars)
   const hasPlaceholderCollision = line.includes('⸢FLITESC');
+  const protect = (text: string): string => {
+    if (hasPlaceholderCollision || text === '') return text;
+    const placeholder = `⸢FLITESC${placeholderCounter++}⸥`;
+    protectedTexts.set(placeholder, text);
+    return placeholder;
+  };
 
-  if (!backslashReplacementEnabled && !hasPlaceholderCollision) {
-    // Backslash disabled: use as escape character, omit from output
-    line = line.replace(/\\(.)/g, (_match: string, char: string) => {
-      const placeholder = `⸢FLITESC${escapeCounter++}⸥`;
-      escapeMap.set(placeholder, char);
-      return placeholder;
-    });
-    // Handle trailing backslash (no character after it to escape)
-    if (line.endsWith('\\')) {
-      line = line.slice(0, -1);
+  // Runs before inline parsing, which would otherwise read a multi-line fence as one code span.
+  if (
+    !skipMarkupStripping &&
+    settings.markupStripping.stripMarkupSettings.codeBlocks
+  ) {
+    // Check if only ``` (empty code block) - return Untitled
+    // Don't use multiline flag - we want to match entire string, not just first line
+    if (/^\s*```\s*$/.test(line)) {
+      return t('untitled');
+    }
+
+    // Match lines with optional leading whitespace followed by ```
+    // Capture everything after ``` opener line
+    const codeBlockMatch = /^\s*```(?!`)[^\n]*\n([\s\S]+)/m.exec(line);
+    if (codeBlockMatch) {
+      const content = codeBlockMatch[1];
+      // Extract first non-empty line from code block content
+      const contentLines = content.split('\n');
+      let foundLine = false;
+      for (const contentLine of contentLines) {
+        const trimmed = contentLine.trim();
+        if (trimmed !== '' && !trimmed.startsWith('```')) {
+          line = contentLine;
+          foundLine = true;
+          break;
+        }
+      }
+      // If only found ``` inside (both first and second line are ```), return Untitled
+      if (!foundLine) {
+        return t('untitled');
+      }
     }
   }
 
+  const stripMarkupSettings = settings.markupStripping.stripMarkupSettings;
+  const stripBlock = (enabled: boolean): boolean =>
+    !skipMarkupStripping && enabled;
+
+  // The original line's indentation decides whether its own list marker or heading counts; prefixes nested after it need no such check.
+  let firstListKind: BlockListKind | undefined;
+  if (isOriginallyTaskList) firstListKind = 'task';
+  else if (isOriginallyUnorderedList) firstListKind = 'unordered';
+  else if (isOriginallyOrderedList) firstListKind = 'ordered';
+  const blockPrefixes = splitBlockPrefixes(line, firstListKind, isHeading, {
+    callouts: stripBlock(stripMarkupSettings.callouts),
+    quote: stripBlock(stripMarkupSettings.quote),
+    task: stripBlock(stripMarkupSettings.taskLists),
+    unordered: stripBlock(stripMarkupSettings.unorderedLists),
+    ordered: stripBlock(stripMarkupSettings.orderedLists),
+    headings: stripBlock(stripMarkupSettings.headings),
+  });
+  line = blockPrefixes.content;
+
+  // Inline markup is parsed even when stripping is skipped, so escapes resolve the same way and every construct keeps its delimiters.
+  const stripInline = !skipMarkupStripping;
+  // Comment toggles cover Obsidian's %%…%% only — HTML comments are stripped by the htmlTags toggle instead.
+  let commentHandling: InlineMarkupOptions['comments'] = 'keep';
+  if (stripInline && settings.markupStripping.stripCommentsEntirely) {
+    commentHandling = 'remove';
+  } else if (stripInline && stripMarkupSettings.comments) {
+    commentHandling = 'unwrap';
+  }
+  line =
+    blockPrefixes.keptPrefix +
+    renderInlineMarkup(line, {
+      bold: stripInline && stripMarkupSettings.bold,
+      italic: stripInline && stripMarkupSettings.italic,
+      strikethrough: stripInline && stripMarkupSettings.strikethrough,
+      highlight: stripInline && stripMarkupSettings.highlight,
+      code: stripInline && stripMarkupSettings.code,
+      wikilinks: stripInline && stripMarkupSettings.wikilinks,
+      math: stripInline && settings.markupStripping.stripInlineMathMarkup,
+      comments: commentHandling,
+      protect,
+    });
+
   if (!skipMarkupStripping) {
-    // Helper function to check if any placeholder overlaps with match range
-    const checkEscaped = (match: string, offset: number): boolean => {
-      if (backslashReplacementEnabled) return false;
-      const matchEnd = offset + match.length;
-      for (const placeholder of escapeMap.keys()) {
-        const pos = line.indexOf(placeholder);
-        // Check if placeholder overlaps with match range [offset, matchEnd)
-        if (pos !== -1 && pos < matchEnd && pos + placeholder.length > offset) {
-          return true;
-        }
-      }
-      return false;
-    };
-
-    // Obsidian reads a highlight's color from the raw first code point, so marked highlights unwrap before comment, bold, italic and strikethrough stripping can expose a marker.
-    if (settings.markupStripping.stripMarkupSettings.highlight) {
-      line = line.replace(
-        MARKED_HIGHLIGHT,
-        (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
-        }
-      );
-    }
-
-    // Comment toggles cover Obsidian's %%…%% only — HTML comments are stripped by the htmlTags toggle instead.
-    if (settings.markupStripping.stripCommentsEntirely) {
-      // Strip comments entirely: remove everything
-      line = line.replace(/%%.*?%%/g, '');
-    } else if (settings.markupStripping.stripMarkupSettings.comments) {
-      // Strip markup but keep content: remove markers only
-      line = line.replace(
-        /%%(.+?)%%/g,
-        (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
-        }
-      );
-    }
-
-    // Strip bold markup
-    if (settings.markupStripping.stripMarkupSettings.bold) {
-      line = line.replace(
-        /\*\*(.*?)\*\*/g,
-        (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
-        }
-      );
-      line = line.replace(
-        /__(.*?)__/g,
-        (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
-        }
-      );
-    }
-
-    // Strip italic markup
-    if (settings.markupStripping.stripMarkupSettings.italic) {
-      line = line.replace(
-        /\*([^*]*?)\*/g,
-        (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
-        }
-      );
-      line = line.replace(
-        /_([^_]*?)_/g,
-        (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
-        }
-      );
-    }
-
-    // Strip strikethrough markup
-    if (settings.markupStripping.stripMarkupSettings.strikethrough) {
-      line = line.replace(
-        /~~(.*?)~~/g,
-        (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
-        }
-      );
-    }
-
-    // Strip highlight markup
-    if (settings.markupStripping.stripMarkupSettings.highlight) {
-      // Both renderers show `====` and `== x==` as literal text; Live Preview still highlights `==x ==`, so the closing marker stays lax.
-      line = line.replace(
-        UNMARKED_HIGHLIGHT,
-        (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
-        }
-      );
-    }
-
-    // Strip code block markup (must run before code markup stripping)
-    if (settings.markupStripping.stripMarkupSettings.codeBlocks) {
-      // Check if only ``` (empty code block) - return Untitled
-      // Don't use multiline flag - we want to match entire string, not just first line
-      if (/^\s*```\s*$/.test(line)) {
-        return t('untitled');
-      }
-
-      // Match lines with optional leading whitespace followed by ```
-      // Capture everything after ``` opener line
-      const codeBlockMatch = /^\s*```(?!`)[^\n]*\n([\s\S]+)/m.exec(line);
-      if (codeBlockMatch) {
-        const content = codeBlockMatch[1];
-        // Extract first non-empty line from code block content
-        const contentLines = content.split('\n');
-        let foundLine = false;
-        for (const contentLine of contentLines) {
-          const trimmed = contentLine.trim();
-          if (trimmed !== '' && !trimmed.startsWith('```')) {
-            line = contentLine;
-            foundLine = true;
-            break;
-          }
-        }
-        // If only found ``` inside (both first and second line are ```), return Untitled
-        if (!foundLine) {
-          return t('untitled');
-        }
-      }
-    }
-
-    // Strip code markup
-    if (settings.markupStripping.stripMarkupSettings.code) {
-      line = line.replace(
-        /`(.*?)`/g,
-        (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
-        }
-      );
-    }
-
-    // Strip inline math markup
-    if (settings.markupStripping.stripInlineMathMarkup) {
-      // Only match if no whitespace after opening $ and before closing $
-      line = line.replace(
-        /\$((?:\S(?:.*?\S)?)?)\$/g,
-        (match: string, content: string, offset: number) => {
-          return checkEscaped(match, offset) ? match : content;
-        }
-      );
-    }
-
-    // Strip callout markup (check before quote to avoid conflicts)
-    // Uses callback to explicitly handle empty content case
-    if (settings.markupStripping.stripMarkupSettings.callouts) {
-      line = line.replace(
-        /^>\s*\[![^\]]+\][-+]?(?:\s+(.*))?$/,
-        (_: string, content: string) => content ?? ''
-      );
-    }
-
-    // Strip quote markup
-    if (settings.markupStripping.stripMarkupSettings.quote) {
-      line = line.replace(/^>\s*(.*)$/, '$1');
-    }
-
-    // Strip task list markup BEFORE list markup (only if original line was a valid task list)
-    if (
-      isOriginallyTaskList &&
-      settings.markupStripping.stripMarkupSettings.taskLists
-    ) {
-      line = line.replace(/^(?:[-+*]|\d+\.) \[.\] /, '');
-    }
-
-    // Strip unordered list markup (only if original line started as unordered list, not task list)
-    if (
-      isOriginallyUnorderedList &&
-      settings.markupStripping.stripMarkupSettings.unorderedLists
-    ) {
-      line = line.replace(/^[-+*] /, '');
-    }
-
-    // Strip ordered list markup (only if original line started as ordered list, not task list)
-    if (
-      isOriginallyOrderedList &&
-      settings.markupStripping.stripMarkupSettings.orderedLists
-    ) {
-      line = line.replace(/^\d+\. /, '');
-    }
-
     if (settings.markupStripping.stripMarkupSettings.htmlTags) {
       // Runs once, outside the capped pass loop below, so a pathological tag input can't cause the cap to skip it.
       line = line.replace(/<!--[\s\S]*?-->/g, '');
@@ -547,15 +415,6 @@ export function extractTitle(
     }
   }
 
-  // Handle embedded wikilink images (remove ! before [[]])
-  if (
-    !skipMarkupStripping &&
-    settings.markupStripping.stripMarkupSettings.wikilinks
-  ) {
-    const embedLinkRegex = /!\[\[(.*?)\]\]/g;
-    line = line.replace(embedLinkRegex, '[[$1]]');
-  }
-
   // Handle regular embedded image links
   if (
     !skipMarkupStripping &&
@@ -566,52 +425,6 @@ export function extractTitle(
       regularEmbedRegex,
       (_match: string, displayText: string) => displayText
     );
-  }
-
-  // Handle headers - only if the original line was a valid heading and strip heading markup is enabled
-  if (
-    isHeading &&
-    !skipMarkupStripping &&
-    settings.markupStripping.stripMarkupSettings.headings
-  ) {
-    const headerArr: string[] = [
-      '# ',
-      '## ',
-      '### ',
-      '#### ',
-      '##### ',
-      '###### ',
-    ];
-    for (let i = 0; i < headerArr.length; i++) {
-      if (line.startsWith(headerArr[i])) {
-        line = line.slice(headerArr[i].length).trim();
-        break;
-      }
-    }
-  }
-
-  // Handle wikilinks (only if strip wikilink markup is enabled)
-  if (
-    !skipMarkupStripping &&
-    settings.markupStripping.stripMarkupSettings.wikilinks
-  ) {
-    while (line.includes('[[') && line.includes(']]')) {
-      const openBracket = line.indexOf('[[');
-      const closeBracket = line.indexOf(']]', openBracket);
-
-      if (openBracket === -1 || closeBracket === -1) break;
-
-      const linkText = line.slice(openBracket + 2, closeBracket);
-      const beforeLink = line.slice(0, openBracket);
-      const afterLink = line.slice(closeBracket + 2);
-
-      // Handle aliased wikilinks
-      const pipeIndex = linkText.indexOf('|');
-      const resolvedText =
-        pipeIndex !== -1 ? linkText.slice(pipeIndex + 1) : linkText;
-
-      line = (beforeLink + resolvedText + afterLink).trim();
-    }
   }
 
   // Check for empty links that should result in "Untitled"
@@ -634,11 +447,14 @@ export function extractTitle(
     line = line.replace(/!?\[\]\([^)]*\)/g, '').trim();
   }
 
-  // Restore escaped characters (remove escape, keep character) - only if escaping was used
-  if (!backslashReplacementEnabled && escapeMap.size > 0) {
+  // Restore protected text - only if any was protected
+  if (protectedTexts.size > 0) {
     // Build regex for efficient single-pass restoration
-    const pattern = new RegExp(Array.from(escapeMap.keys()).join('|'), 'g');
-    line = line.replace(pattern, (match) => escapeMap.get(match) ?? match);
+    const pattern = new RegExp(
+      Array.from(protectedTexts.keys()).join('|'),
+      'g'
+    );
+    line = line.replace(pattern, (match) => protectedTexts.get(match) ?? match);
   }
 
   // Final check: if line is empty or only whitespace after all processing
@@ -934,37 +750,6 @@ export function reverseCharacterReplacements(
 }
 
 /**
- * Builds the equality key used to detect duplicate folder entries
- * - Trims whitespace
- * - Removes leading and trailing slashes (except preserves root "/")
- * - Converts to lowercase for case-insensitive comparison
- *
- * Case-folding is what separates this from `normalizeFolderPathForMatching` in
- * utils/file-exclusions.ts, which preserves case because it matches real paths.
- */
-function folderPathComparisonKey(path: string): string {
-  if (isRootFolderPath(path)) {
-    return '/';
-  }
-  return path
-    .trim()
-    .replace(/^\/+|\/+$/g, '')
-    .toLowerCase();
-}
-
-/**
- * Cleans a folder path for storage (preserves case)
- * - Trims whitespace
- * - Removes leading and trailing slashes (except preserves root "/")
- */
-function cleanFolderPath(path: string): string {
-  if (isRootFolderPath(path)) {
-    return '/';
-  }
-  return path.trim().replace(/^\/+|\/+$/g, '');
-}
-
-/**
  * Normalizes a tag for duplicate comparison
  * - Trims whitespace
  * - Converts to lowercase for case-insensitive comparison
@@ -1000,14 +785,12 @@ function cleanPropertyText(text: string): string {
 
 /**
  * Normalizes the exclusion lists in plugin settings: drops blank entries, cleans
- * entry text, and deduplicates folders, tags and properties
+ * entry text, and deduplicates excluded files, tags and properties
  * Keeps the last occurrence of each duplicate (removes earlier ones)
  * Normalization rules:
- * - Folders: case-insensitive, leading/trailing slashes removed
+ * - Excluded files: trimmed; paths case-insensitive, regular expressions exact
  * - Tags: case-insensitive
  * - Properties: both key and value must match (case-insensitive)
- * File name exclusions are only pruned of blanks, never deduplicated — their
- * per-entry flags make equality ambiguous.
  *
  * @param settings - Plugin settings object to normalize
  * @returns true if any entries were removed or cleaned, false otherwise
@@ -1015,38 +798,38 @@ function cleanPropertyText(text: string): string {
 export function normalizeExclusionLists(settings: PluginSettings): boolean {
   let hasChanges = false;
 
-  // Deduplicate folders
+  // Deduplicate excluded files
   // Each list is read through `?? []`: this also runs on settings imported from a file,
   // which can omit any list entirely despite what the types promise
-  const excludedFolders = settings.exclusions.excludedFolders ?? [];
-  const originalFolderCount = excludedFolders.length;
-  const folderMap = new Map<string, number>(); // normalized -> last index
+  const excludedFiles = settings.exclusions.excludedFiles ?? [];
+  const originalFileCount = excludedFiles.length;
+  const fileEntryMap = new Map<string, number>(); // duplicate key -> last index
 
-  excludedFolders.forEach((folder, index) => {
-    const normalized = folderPathComparisonKey(folder);
-    if (normalized !== '') {
-      folderMap.set(normalized, index);
+  excludedFiles.forEach((entry, index) => {
+    const key = excludedFileEntryKey(entry);
+    if (key !== '') {
+      fileEntryMap.set(key, index);
     }
   });
 
-  // Blank entries are never recorded in folderMap, so they drop out here
-  const keepFolderIndices = new Set(folderMap.values());
-  settings.exclusions.excludedFolders = excludedFolders.filter((_, index) =>
-    keepFolderIndices.has(index)
+  // Blank entries are never recorded in fileEntryMap, so they drop out here
+  const keepFileIndices = new Set(fileEntryMap.values());
+  settings.exclusions.excludedFiles = excludedFiles.filter((_, index) =>
+    keepFileIndices.has(index)
   );
 
-  if (settings.exclusions.excludedFolders.length !== originalFolderCount) {
+  if (settings.exclusions.excludedFiles.length !== originalFileCount) {
     hasChanges = true;
   }
 
-  // Clean folder paths (strip leading/trailing slashes, preserve case)
-  settings.exclusions.excludedFolders = settings.exclusions.excludedFolders.map(
-    (folder) => {
-      const cleaned = cleanFolderPath(folder);
-      if (cleaned !== folder) {
+  // Trim entries, preserving case
+  settings.exclusions.excludedFiles = settings.exclusions.excludedFiles.map(
+    (entry) => {
+      const trimmed = entry.trim();
+      if (trimmed !== entry) {
         hasChanges = true;
       }
-      return cleaned;
+      return trimmed;
     }
   );
 
@@ -1120,18 +903,6 @@ export function normalizeExclusionLists(settings: PluginSettings): boolean {
       }
       return { key: cleanedKey, value: cleanedValue };
     });
-
-  // Drop blank file name exclusions; they are not deduplicated because their
-  // per-entry flags make two same-text entries meaningfully different
-  const excludedFileNames = settings.exclusions.excludedFileNames ?? [];
-  const originalFileNameCount = excludedFileNames.length;
-  settings.exclusions.excludedFileNames = excludedFileNames.filter(
-    (exclusion) => exclusion.text.trim() !== ''
-  );
-
-  if (settings.exclusions.excludedFileNames.length !== originalFileNameCount) {
-    hasChanges = true;
-  }
 
   return hasChanges;
 }

@@ -60,12 +60,13 @@ describe('PluginInitializer', () => {
       plugin.settings.core.hasEnabledForbiddenChars = false;
     });
 
-    it('enables every forbidden char except backslash', async () => {
+    it('enables every forbidden char, backslash included', async () => {
       await initializer.initializeFirstEnableLogic();
 
       expect(enabledCharKeys(plugin.settings).sort()).toEqual(
         [
           'asterisk',
+          'backslash',
           'caret',
           'colon',
           'dot',
@@ -80,14 +81,6 @@ describe('PluginInitializer', () => {
           'slash',
         ].sort()
       );
-    });
-
-    it('leaves backslash off so it keeps acting as an escape character', async () => {
-      await initializer.initializeFirstEnableLogic();
-
-      expect(
-        plugin.settings.characterReplacements.charReplacements.backslash.enabled
-      ).toBe(false);
     });
 
     it('replaces rather than drops a Windows/Android-only character', async () => {
@@ -128,49 +121,8 @@ describe('PluginInitializer', () => {
     });
   });
 
-  describe('initializeFirstEnableLogic — custom replacements', () => {
-    beforeEach(() => {
-      plugin.settings.customReplacements.enableCustomReplacements = true;
-      plugin.settings.core.hasEnabledCustomReplacements = false;
-      plugin.settings.customReplacements.rules.forEach((rule) => {
-        rule.enabled = false;
-      });
-    });
-
-    it('bulk-enables every rule and sets the latch', async () => {
-      await initializer.initializeFirstEnableLogic();
-
-      expect(
-        plugin.settings.customReplacements.rules.every((r) => r.enabled)
-      ).toBe(true);
-      expect(plugin.settings.core.hasEnabledCustomReplacements).toBe(true);
-    });
-
-    it('does nothing once the latch is set', async () => {
-      plugin.settings.core.hasEnabledCustomReplacements = true;
-
-      await initializer.initializeFirstEnableLogic();
-
-      expect(
-        plugin.settings.customReplacements.rules.some((r) => r.enabled)
-      ).toBe(false);
-      expect(plugin.saveSettings).not.toHaveBeenCalled();
-    });
-  });
-
   describe('initializeFirstEnableLogic — persistence', () => {
-    it('saves once even when both cascades fire in the same run', async () => {
-      plugin.settings.characterReplacements.enableForbiddenCharReplacements = true;
-      plugin.settings.core.hasEnabledForbiddenChars = false;
-      plugin.settings.customReplacements.enableCustomReplacements = true;
-      plugin.settings.core.hasEnabledCustomReplacements = false;
-
-      await initializer.initializeFirstEnableLogic();
-
-      expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
-    });
-
-    it('does not save when neither cascade applies', async () => {
+    it('does not save when the cascade does not apply', async () => {
       await initializer.initializeFirstEnableLogic();
 
       expect(plugin.saveSettings).not.toHaveBeenCalled();
@@ -235,7 +187,47 @@ describe('PluginInitializer', () => {
 
       await initializer.checkFirstTimeExclusionsSetup();
 
-      expect(plugin.settings.exclusions.excludedFolders).toContain('Templates');
+      expect(plugin.settings.exclusions.excludedFiles).toEqual(['Templates/']);
+    });
+
+    // The form toggleFolderExclusion writes, whatever slashes the user typed into the folder setting
+    it.each(['Templates/', '/Templates', '/Templates/'])(
+      'writes the folder entry for a Templates folder typed as %s',
+      async (typedFolder) => {
+        mockConfigFiles({
+          '.obsidian/core-plugins.json': { templates: true },
+          '.obsidian/templates.json': { folder: typedFolder },
+        });
+
+        await initializer.checkFirstTimeExclusionsSetup();
+
+        expect(plugin.settings.exclusions.excludedFiles).toEqual([
+          'Templates/',
+        ]);
+      }
+    );
+
+    it('never adds an entry for a template folder set to the vault root', async () => {
+      mockConfigFiles({
+        '.obsidian/core-plugins.json': { templates: true },
+        '.obsidian/templates.json': { folder: '/' },
+      });
+
+      await initializer.checkFirstTimeExclusionsSetup();
+
+      expect(plugin.settings.exclusions.excludedFiles).toEqual([]);
+    });
+
+    it('does not add a folder already listed under different case', async () => {
+      plugin.settings.exclusions.excludedFiles = ['templates/'];
+      mockConfigFiles({
+        '.obsidian/core-plugins.json': { templates: true },
+        '.obsidian/templates.json': { folder: 'Templates' },
+      });
+
+      await initializer.checkFirstTimeExclusionsSetup();
+
+      expect(plugin.settings.exclusions.excludedFiles).toEqual(['templates/']);
     });
 
     it('ignores the Templates folder when the core plugin is disabled', async () => {
@@ -246,9 +238,7 @@ describe('PluginInitializer', () => {
 
       await initializer.checkFirstTimeExclusionsSetup();
 
-      expect(plugin.settings.exclusions.excludedFolders).not.toContain(
-        'Templates'
-      );
+      expect(plugin.settings.exclusions.excludedFiles).toEqual([]);
     });
 
     it('excludes the Templater folder when Templater is loaded', async () => {
@@ -261,8 +251,8 @@ describe('PluginInitializer', () => {
 
       await initializer.checkFirstTimeExclusionsSetup();
 
-      expect(plugin.settings.exclusions.excludedFolders).toContain(
-        'Meta/Templater'
+      expect(plugin.settings.exclusions.excludedFiles).toContain(
+        'Meta/Templater/'
       );
     });
 
@@ -307,11 +297,7 @@ describe('PluginInitializer', () => {
 
       await initializer.checkFirstTimeExclusionsSetup();
 
-      expect(
-        plugin.settings.exclusions.excludedFolders.filter(
-          (folder) => folder === 'Templates'
-        )
-      ).toHaveLength(1);
+      expect(plugin.settings.exclusions.excludedFiles).toEqual(['Templates/']);
     });
   });
 });

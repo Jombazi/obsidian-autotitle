@@ -1,12 +1,41 @@
 import {
   TFile,
   MarkdownView,
+  MarkdownFileInfo,
   ViewWithFileEditor,
   Editor,
   getFrontMatterInfo,
 } from 'obsidian';
 import { verboseLog, findTitleSourceLine } from '../utils';
+import { isLinkedFromAnyFile } from '../utils/inbound-links';
+import { TIMING } from '../constants/timing';
 import FirstLineIsTitle from '../../main';
+
+// A closed page preview keeps its 2 s save pending; this many re-arms at the save-complete delay outlast it before the timer processes anyway.
+const MAX_UNSAVED_PREVIEW_REARMS = 25;
+
+/** Where an `editor-change` came from, as the throttle needs it */
+interface EditorChangeOptions {
+  /** True when the editor belongs to a Canvas card */
+  inCanvasCard?: boolean;
+  /** The `editor-change` event's `info`: the tab's view, or the page preview's or Canvas card's embed */
+  owner?: MarkdownView | MarkdownFileInfo;
+}
+
+/**
+ * Check whether an embed's editor is gone while the embed still holds typing it has not saved.
+ * @param owner - The `editor-change` event's `info`
+ * @param editor - Editor the edit came from
+ * @returns true for a page preview closed before its save landed
+ */
+function isClosedWithUnsavedTyping(
+  owner: MarkdownView | MarkdownFileInfo | undefined,
+  editor: Editor
+): boolean {
+  // A tab saves when it closes or switches notes, and a Canvas card flushes its save on deselect.
+  if (!owner || owner instanceof MarkdownView) return false;
+  return owner.editor !== editor && 'dirty' in owner && owner.dirty === true;
+}
 
 /**
  * EditorLifecycleManager
@@ -55,6 +84,9 @@ export class EditorLifecycleManager {
 
   // Track previous count for logging only on changes
   private previousActiveFileCount: number = 0;
+
+  /** When each note was last treated as linked, keyed by `TFile` because the object survives renames */
+  private readonly lastSeenLinkedAt = new WeakMap<TFile, number>();
 
   constructor(plugin: FirstLineIsTitle) {
     this.plugin = plugin;
@@ -236,6 +268,11 @@ export class EditorLifecycleManager {
             continue; // File was renamed, not actually closed
           }
 
+          // Tracked from an editor-change with no leaf: a Canvas card or page preview, which no Markdown leaf ever lists, so its absence here is no close; its timer checks its own editor when it fires
+          if (!oldData.leafId) {
+            continue;
+          }
+
           // Check if the leaf that had this file is still active (tab switch vs tab close)
           if (activeLeafIds.has(oldData.leafId)) {
             verboseLog(
@@ -372,8 +409,13 @@ export class EditorLifecycleManager {
   /**
    * Handle editor change with throttle for checkInterval > 0
    * Only starts timer if first line actually changed from last known state
+   * A note another file links to, or one edited in a Canvas card, waits until typing pauses instead, since each of its renames raises Obsidian's link-update notices
    */
-  handleEditorChangeWithThrottle(editor: Editor, file: TFile): void {
+  handleEditorChangeWithThrottle(
+    editor: Editor,
+    file: TFile,
+    options?: EditorChangeOptions
+  ): void {
     const filePath = file.path;
 
     // Skip files in creation delay
@@ -432,20 +474,32 @@ export class EditorLifecycleManager {
         `First line unchanged for ${filePath}, skipping throttle`
       );
 
-      // Update lastEditorContent to ensure metadata-change handler has current content
-      // This prevents "YAML edits ignored" safeguard from being bypassed when
-      // properties are added/removed via Obsidian UI
-      const currentContent = editor.getValue();
-      this.plugin.fileStateManager.setLastEditorContent(
-        filePath,
-        currentContent
-      );
+      // Keeps the compared text current so a later check reads a properties-only edit as one; skipped while a timer waits, since a repeated editor-change with unchanged text (a Canvas card fires one per keystroke) or an edit on another line would otherwise erase the change that timer is waiting to process.
+      if (!this.plugin.fileStateManager.hasThrottleTimer(filePath)) {
+        this.plugin.fileStateManager.setLastEditorContent(
+          filePath,
+          editor.getValue()
+        );
+      }
 
       return;
     }
 
     // First line changed - update tracking
     tracked.lastFirstLine = currentFirstLine;
+
+    const owner = options?.owner;
+
+    // Each first-line edit of a linked note restarts its wait; the pending delayed timer already settled that the note counts as linked, so links are not scanned again.
+    if (this.plugin.fileStateManager.hasDelayedThrottleTimer(filePath)) {
+      this.lastSeenLinkedAt.set(file, Date.now());
+      verboseLog(
+        this.plugin,
+        `Restarting linked-note delay (${this.getLinkedNoteDelay()}ms) for: ${filePath}`
+      );
+      this.scheduleThrottleTimer(editor, file, owner, true);
+      return;
+    }
 
     // Check if timer already running for this file
     if (this.plugin.fileStateManager.hasThrottleTimer(filePath)) {
@@ -456,12 +510,105 @@ export class EditorLifecycleManager {
       return;
     }
 
-    // Start new throttle timer
+    const delayed = this.countsAsLinked(file, options?.inCanvasCard ?? false);
     verboseLog(
       this.plugin,
-      `Starting throttle timer (${this.settings.core.checkInterval}ms) for: ${filePath}`
+      delayed
+        ? `Starting linked-note delay (${this.getLinkedNoteDelay()}ms) for: ${filePath}`
+        : `Starting throttle timer (${this.settings.core.checkInterval}ms) for: ${filePath}`
     );
+    this.seedEditorContentBaseline(file);
+    this.scheduleThrottleTimer(editor, file, owner, delayed);
+  }
+
+  /**
+   * Seed the content a throttled change is compared against, from the file as it was before this edit.
+   * @param file - Note being edited
+   */
+  private seedEditorContentBaseline(file: TFile): void {
+    const { fileStateManager } = this.plugin;
+    if (fileStateManager.getLastEditorContent(file.path) !== undefined) return;
+    // Without a baseline the timer compares the editor with the file, but a tab or Canvas card saves 2 s after its first unsaved keystroke rather than its last, often before a linked note's timer fires: the two then match and the rename is skipped. An edit fires before its save, so the file still holds the text from before it.
+    void this.app.vault.cachedRead(file).then(
+      (content) => {
+        if (fileStateManager.getLastEditorContent(file.path) === undefined) {
+          fileStateManager.setLastEditorContent(file.path, content);
+        }
+      },
+      () => {}
+    );
+  }
+
+  /** How long a linked note waits after its last first-line edit */
+  private getLinkedNoteDelay(): number {
+    return Math.max(
+      TIMING.LINKED_NOTE_RENAME_DELAY_MS,
+      this.settings.core.checkInterval
+    );
+  }
+
+  /**
+   * Decide whether a note's rename waits for typing to pause, and remember the answer when it does.
+   * @param file - Note being edited
+   * @param inCanvasCard - True when the edit comes from a Canvas card
+   * @returns true when the note counts as linked
+   */
+  private countsAsLinked(file: TFile, inCanvasCard: boolean): boolean {
+    const seenLinkedAt = this.lastSeenLinkedAt.get(file);
+    // A card just added to a canvas is linked only once the canvas saves and is re-indexed, about 2 s later, and a note just renamed reads as unlinked until its links are re-resolved, about 530 ms for a canvas.
+    const linked =
+      inCanvasCard ||
+      (seenLinkedAt !== undefined &&
+        Date.now() - seenLinkedAt < TIMING.LINKED_NOTE_MEMORY_MS) ||
+      isLinkedFromAnyFile(this.app, file);
+    if (linked) {
+      this.lastSeenLinkedAt.set(file, Date.now());
+    }
+    return linked;
+  }
+
+  /**
+   * Start, or restart, the timer that processes a note's first-line edit.
+   * @param editor - Editor the edit came from
+   * @param file - Note being edited
+   * @param owner - The `editor-change` event's `info`, which tells whether the editor still shows the note
+   * @param delayed - True to wait out a linked note's typing pause rather than the Check interval
+   * @param delayMs - Wait before processing; defaults from `delayed`
+   * @param rearmsLeft - Re-arms still allowed while a closed page preview's save is pending
+   */
+  private scheduleThrottleTimer(
+    editor: Editor,
+    file: TFile,
+    owner: MarkdownView | MarkdownFileInfo | undefined,
+    delayed: boolean,
+    delayMs = delayed
+      ? this.getLinkedNoteDelay()
+      : this.settings.core.checkInterval,
+    rearmsLeft = MAX_UNSAVED_PREVIEW_REARMS
+  ): void {
     const timer = window.setTimeout(() => {
+      if (delayed) {
+        // Stamped when the timer fires so the memory window runs from the rename itself, whatever the burst length or Check interval.
+        this.lastSeenLinkedAt.set(file, Date.now());
+      }
+
+      // A closed page preview's file still holds the old text until its pending save lands, and that save's modify writes only the property.
+      if (rearmsLeft > 0 && isClosedWithUnsavedTyping(owner, editor)) {
+        verboseLog(
+          this.plugin,
+          `Page preview closed with unsaved typing, waiting for its save: ${file.path}`
+        );
+        this.scheduleThrottleTimer(
+          editor,
+          file,
+          owner,
+          delayed,
+          TIMING.SAVE_COMPLETE_DELAY_MS,
+          rearmsLeft - 1
+        );
+        return;
+      }
+
       verboseLog(
         this.plugin,
         `Throttle timer expired, processing: ${file.path}`
@@ -472,16 +619,16 @@ export class EditorLifecycleManager {
 
       // Process file
       this.renameEngine
-        .processEditorChangeOptimal(editor, file)
+        .processEditorChangeOptimal(editor, file, owner)
         .catch((error) => {
           console.error(
-            `Error processing throttled change for ${filePath}:`,
+            `Error processing throttled change for ${file.path}:`,
             error
           );
         });
-    }, this.settings.core.checkInterval);
+    }, delayMs);
 
-    this.plugin.fileStateManager.setThrottleTimer(filePath, timer);
+    this.plugin.fileStateManager.setThrottleTimer(file.path, timer, delayed);
   }
 
   /**

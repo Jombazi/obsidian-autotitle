@@ -3,14 +3,15 @@
  *
  * Tests cover:
  * - getAliasPropertyKeys: parsing, whitespace, blank key
- * - updateAliasIfNeeded: canvas detection, alias matching, YAML handling
+ * - updateAliasIfNeeded: alias matching, YAML handling
  * - addAliasToFile: ZWSP markers, truncation, custom replacements, multi-property
- * - removePluginAliasesFromFile: selective removal, keepEmptyAliasProperty
+ * - removePluginAliasesFromFile: selective removal, keepEmptyProperty
+ * - Write target: the editor showing the note, or the file
  * - Edge cases: ENOENT, concurrent calls, special characters
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { getFrontMatterInfo, parseYaml } from 'obsidian';
+import { getFrontMatterInfo, parseYaml, stringifyYaml } from 'obsidian';
 import { AliasManager } from '../../src/core/alias-manager';
 import { createMockFile, createMockApp, splitFrontMatter } from '../testUtils';
 import { TFile, MarkdownView } from '../mockObsidian';
@@ -18,52 +19,35 @@ import { DeepPartial, PluginSettings } from '../../src/types';
 import { DEFAULT_SETTINGS } from '../../src/constants';
 import { deepMerge } from '../../src/utils/deep-merge';
 
-const { keepPagePreviewCursors } = vi.hoisted(() => ({
-  keepPagePreviewCursors: vi.fn(),
-}));
-
-vi.mock('../../src/utils/page-preview', () => ({
-  keepPagePreviewCursors,
-  findPagePreviewEditors: vi.fn(() => []),
-}));
-
 // Create mock plugin for AliasManager
 function createMockPlugin(settingsOverrides: DeepPartial<PluginSettings> = {}) {
   const app = createMockApp();
   // deepMerge deep-clones its defaults, so untouched branches never alias DEFAULT_SETTINGS
   const settings = deepMerge(DEFAULT_SETTINGS, {
-    aliases: {
-      enableAliases: true,
-      truncateAlias: false,
-      addAliasOnlyIfTitleDiffers: false,
-      aliasPropertyKey: 'aliases',
-      hideAliasProperty: 'never',
-      hideAliasInSidebar: false,
-      keepEmptyAliasProperty: true,
+    firstLineProperty: {
+      truncate: false,
+      addOnlyIfTitleDiffers: false,
+      propertyKey: 'aliases',
+      hideProperty: 'never',
+      hideInSidebar: false,
+      keepEmptyProperty: true,
     },
     core: {
       charCount: 100,
     },
     markupStripping: {
-      stripMarkupInAlias: false,
-      applyCustomReplacementsInAlias: false,
+      stripMarkupInFirstLineProperty: false,
+      applyCustomReplacementsInFirstLineProperty: false,
     },
     customReplacements: {
-      enableCustomReplacements: false,
       rules: [],
     },
     ...settingsOverrides,
   });
 
-  // Add getMostRecentLeaf to workspace
-  (app.workspace as any).getMostRecentLeaf = vi.fn().mockReturnValue({
-    view: { getViewType: vi.fn().mockReturnValue('markdown') },
-  });
-
   return {
     app,
     settings,
-    trackUsage: vi.fn(),
     renameEngine: {
       stripFrontmatterFromContent: vi.fn((content: string) => {
         // Simple frontmatter stripping for tests
@@ -74,7 +58,21 @@ function createMockPlugin(settingsOverrides: DeepPartial<PluginSettings> = {}) {
       }),
     },
     pendingMetadataUpdates: new Set<TFile>(),
+    fileStateManager: {
+      markEditorSyncing: vi.fn(),
+      clearEditorSyncing: vi.fn(),
+    },
   } as any;
+}
+
+/** An editor showing `text`, with a CodeMirror view whose `dispatch` is recorded */
+function createEditorTarget(text: string) {
+  const editor = {
+    getValue: vi.fn(() => text),
+    replaceRange: vi.fn(),
+    cm: { dispatch: vi.fn() },
+  };
+  return { editor: editor as any, isDirty: () => false, requestSave: vi.fn() };
 }
 
 describe('AliasManager', () => {
@@ -115,37 +113,39 @@ describe('AliasManager', () => {
 
   describe('getAliasPropertyKeys', () => {
     it('should return no keys when the property name is blank', () => {
-      plugin.settings.aliases.aliasPropertyKey = '';
+      plugin.settings.firstLineProperty.propertyKey = '';
       const keys = aliasManager['getAliasPropertyKeys']();
       expect(keys).toEqual([]);
     });
 
     it('should return single property key', () => {
-      plugin.settings.aliases.aliasPropertyKey = 'aliases';
+      plugin.settings.firstLineProperty.propertyKey = 'aliases';
       const keys = aliasManager['getAliasPropertyKeys']();
       expect(keys).toEqual(['aliases']);
     });
 
     it('should return multiple comma-separated keys', () => {
-      plugin.settings.aliases.aliasPropertyKey = 'aliases, aka, also-known-as';
+      plugin.settings.firstLineProperty.propertyKey =
+        'aliases, aka, also-known-as';
       const keys = aliasManager['getAliasPropertyKeys']();
       expect(keys).toEqual(['aliases', 'aka', 'also-known-as']);
     });
 
     it('should trim whitespace from keys', () => {
-      plugin.settings.aliases.aliasPropertyKey = '  aliases  ,  aka  ,  test  ';
+      plugin.settings.firstLineProperty.propertyKey =
+        '  aliases  ,  aka  ,  test  ';
       const keys = aliasManager['getAliasPropertyKeys']();
       expect(keys).toEqual(['aliases', 'aka', 'test']);
     });
 
     it('should filter out empty keys', () => {
-      plugin.settings.aliases.aliasPropertyKey = 'aliases, , aka, ,';
+      plugin.settings.firstLineProperty.propertyKey = 'aliases, , aka, ,';
       const keys = aliasManager['getAliasPropertyKeys']();
       expect(keys).toEqual(['aliases', 'aka']);
     });
 
     it('should return no keys when the property name is only commas', () => {
-      plugin.settings.aliases.aliasPropertyKey = ', , ,';
+      plugin.settings.firstLineProperty.propertyKey = ', , ,';
       const keys = aliasManager['getAliasPropertyKeys']();
       expect(keys).toEqual([]);
     });
@@ -155,10 +155,10 @@ describe('AliasManager', () => {
     // source values, so a null in data.json can never displace the default.
     it('should never see a null key because deepMerge keeps the default', () => {
       const merged = deepMerge(DEFAULT_SETTINGS, {
-        aliases: { aliasPropertyKey: null as any },
+        firstLineProperty: { propertyKey: null as any },
       });
-      expect(merged.aliases.aliasPropertyKey).toBe(
-        DEFAULT_SETTINGS.aliases.aliasPropertyKey
+      expect(merged.firstLineProperty.propertyKey).toBe(
+        DEFAULT_SETTINGS.firstLineProperty.propertyKey
       );
     });
   });
@@ -169,7 +169,7 @@ describe('AliasManager', () => {
   // per-key loop inside it would iterate zero times.
   describe('blank alias property name', () => {
     beforeEach(() => {
-      plugin.settings.aliases.aliasPropertyKey = '';
+      plugin.settings.firstLineProperty.propertyKey = '';
       plugin.app.workspace.getActiveViewOfType = vi.fn().mockReturnValue(null);
     });
 
@@ -183,19 +183,8 @@ describe('AliasManager', () => {
       expect(plugin.app.fileManager.processFrontMatter).not.toHaveBeenCalled();
     });
 
-    it('should not count updateAliasIfNeeded as plugin usage', async () => {
-      await aliasManager.updateAliasIfNeeded(file, 'First Line\nBody');
-
-      expect(plugin.trackUsage).not.toHaveBeenCalled();
-    });
-
     it('should make addAliasToFile return without writing', async () => {
-      await aliasManager.addAliasToFile(
-        file,
-        'First Line',
-        'filename',
-        'First Line\nBody'
-      );
+      await aliasManager.addAliasToFile(file, 'First Line', 'filename');
 
       expect(plugin.app.fileManager.processFrontMatter).not.toHaveBeenCalled();
     });
@@ -217,26 +206,16 @@ describe('AliasManager', () => {
         .fn()
         .mockReturnValue(mockView);
 
-      await aliasManager.addAliasToFile(
-        file,
-        'First Line',
-        'filename',
-        'First Line\nBody'
-      );
+      await aliasManager.addAliasToFile(file, 'First Line', 'filename');
       await aliasManager.removePluginAliasesFromFile(file);
 
       expect(mockView.save).not.toHaveBeenCalled();
     });
 
     it('should still write once a property name is set', async () => {
-      plugin.settings.aliases.aliasPropertyKey = 'aliases';
+      plugin.settings.firstLineProperty.propertyKey = 'aliases';
 
-      await aliasManager.addAliasToFile(
-        file,
-        'First Line',
-        'filename',
-        'First Line\nBody'
-      );
+      await aliasManager.addAliasToFile(file, 'First Line', 'filename');
 
       expect(plugin.app.fileManager.processFrontMatter).toHaveBeenCalled();
     });
@@ -266,7 +245,7 @@ describe('AliasManager', () => {
     });
 
     it('should skip when the content blocks renaming before the cache does', async () => {
-      yamlFixtures.set('no rename: true', { 'no rename': true });
+      yamlFixtures.set('no rename: true\n', { 'no rename': true });
       plugin.app.metadataCache.getFileCache = vi.fn().mockReturnValue({
         frontmatter: { 'no rename': false },
       });
@@ -285,6 +264,27 @@ describe('AliasManager', () => {
     });
   });
 
+  describe('updateAliasIfNeeded with a canvas as the most recent leaf', () => {
+    it('should still update the property', async () => {
+      plugin.app.workspace.getMostRecentLeaf = vi.fn().mockReturnValue({
+        view: { getViewType: () => 'canvas' },
+      });
+      plugin.app.workspace.getActiveViewOfType = vi.fn().mockReturnValue(null);
+      const addAliasToFile = vi
+        .spyOn(aliasManager, 'addAliasToFile')
+        .mockResolvedValue(undefined);
+
+      await aliasManager.updateAliasIfNeeded(file, 'First Line\nBody');
+
+      expect(addAliasToFile).toHaveBeenCalledWith(
+        file,
+        'First Line',
+        file.basename,
+        null
+      );
+    });
+  });
+
   describe('addAliasToFile', () => {
     beforeEach(() => {
       plugin.app.workspace.getActiveViewOfType = vi.fn().mockReturnValue(null);
@@ -293,19 +293,13 @@ describe('AliasManager', () => {
     it('should skip when file no longer exists', async () => {
       plugin.app.vault.getAbstractFileByPath = vi.fn().mockReturnValue(null);
 
-      await aliasManager.addAliasToFile(
-        file,
-        'First Line',
-        'filename',
-        'content'
-      );
+      await aliasManager.addAliasToFile(file, 'First Line', 'filename');
 
       expect(plugin.app.fileManager.processFrontMatter).not.toHaveBeenCalled();
     });
 
     it('should add ZWSP marker to alias', async () => {
       const title = 'First Line';
-      const content = title + '\nBody';
 
       let capturedFrontmatter: any;
       plugin.app.fileManager.processFrontMatter = vi.fn(
@@ -316,35 +310,29 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(file, title, 'filename', content);
+      await aliasManager.addAliasToFile(file, title, 'filename');
 
       const zwsp = '\u200B';
       expect(capturedFrontmatter.aliases).toEqual([`${zwsp}${title}${zwsp}`]);
     });
 
-    it('should keep page preview cursors before writing the properties', async () => {
-      plugin.app.fileManager.processFrontMatter = vi.fn(async () => {});
+    // The `modify` event a file write fires can arrive before `processFrontMatter` resolves; the pending flag must already be set for the handler to skip it.
+    it('should mark the file pending before writing the properties', async () => {
+      let pendingDuringWrite = false;
+      plugin.app.fileManager.processFrontMatter = vi.fn(async () => {
+        pendingDuringWrite = plugin.pendingMetadataUpdates.has(file);
+      });
 
-      await aliasManager.addAliasToFile(
-        file,
-        'First Line',
-        'filename',
-        'First Line\nBody'
-      );
+      await aliasManager.addAliasToFile(file, 'First Line', 'filename');
 
-      expect(keepPagePreviewCursors).toHaveBeenCalledWith(plugin.app, file);
-      expect(keepPagePreviewCursors.mock.invocationCallOrder[0]).toBeLessThan(
-        vi.mocked(plugin.app.fileManager.processFrontMatter).mock
-          .invocationCallOrder[0]
-      );
+      expect(pendingDuringWrite).toBe(true);
     });
 
     it('should truncate alias when enabled and exceeds charCount', async () => {
-      plugin.settings.aliases.truncateAlias = true;
+      plugin.settings.firstLineProperty.truncate = true;
       plugin.settings.core.charCount = 10;
 
       const longTitle = 'This is a very long title that exceeds the limit';
-      const content = longTitle + '\nBody';
 
       let capturedFrontmatter: any;
       plugin.app.fileManager.processFrontMatter = vi.fn(
@@ -355,7 +343,7 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(file, longTitle, 'filename', content);
+      await aliasManager.addAliasToFile(file, longTitle, 'filename');
 
       const zwsp = '\u200B';
       const expectedTruncated = longTitle.slice(0, 9).trimEnd() + '…';
@@ -365,7 +353,7 @@ describe('AliasManager', () => {
     });
 
     it('should remove aliases when processed alias is only ellipsis', async () => {
-      plugin.settings.aliases.truncateAlias = true;
+      plugin.settings.firstLineProperty.truncate = true;
       plugin.settings.core.charCount = 1; // Extreme truncation
 
       const removeAliasesSpy = vi.spyOn(
@@ -373,9 +361,9 @@ describe('AliasManager', () => {
         'removePluginAliasesFromFile'
       );
 
-      await aliasManager.addAliasToFile(file, 'Title', 'filename', 'content');
+      await aliasManager.addAliasToFile(file, 'Title', 'filename');
 
-      expect(removeAliasesSpy).toHaveBeenCalledWith(file);
+      expect(removeAliasesSpy).toHaveBeenCalledWith(file, null);
     });
 
     it('should remove aliases when empty heading (# only)', async () => {
@@ -384,9 +372,9 @@ describe('AliasManager', () => {
         'removePluginAliasesFromFile'
       );
 
-      await aliasManager.addAliasToFile(file, '#', 'filename', '# \nContent');
+      await aliasManager.addAliasToFile(file, '#', 'filename');
 
-      expect(removeAliasesSpy).toHaveBeenCalledWith(file);
+      expect(removeAliasesSpy).toHaveBeenCalledWith(file, null);
     });
 
     it('should remove aliases when processed alias is empty', async () => {
@@ -395,26 +383,23 @@ describe('AliasManager', () => {
         'removePluginAliasesFromFile'
       );
 
-      await aliasManager.addAliasToFile(file, '   ', 'filename', 'content');
+      await aliasManager.addAliasToFile(file, '   ', 'filename');
 
-      expect(removeAliasesSpy).toHaveBeenCalledWith(file);
+      expect(removeAliasesSpy).toHaveBeenCalledWith(file, null);
     });
 
-    it('should apply custom replacement rules when enabled', async () => {
-      plugin.settings.customReplacements.enableCustomReplacements = true;
-      plugin.settings.markupStripping.applyCustomReplacementsInAlias = true;
+    it('should apply custom replacement rules when applying them in the property is on', async () => {
+      plugin.settings.markupStripping.applyCustomReplacementsInFirstLineProperty = true;
       plugin.settings.customReplacements.rules = [
         {
           searchText: 'TODO',
           replaceText: 'DONE',
           onlyAtStart: false,
           onlyWholeLine: false,
-          enabled: true,
         },
       ];
 
       const title = 'TODO: Fix this';
-      const content = title + '\nBody';
 
       let capturedFrontmatter: any;
       plugin.app.fileManager.processFrontMatter = vi.fn(
@@ -425,26 +410,48 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(file, title, 'filename', content);
+      await aliasManager.addAliasToFile(file, title, 'filename');
 
       expect(capturedFrontmatter.aliases[0]).toContain('DONE: Fix this');
     });
 
+    it('should leave the property untouched by rules when applying them in the property is off', async () => {
+      plugin.settings.markupStripping.applyCustomReplacementsInFirstLineProperty = false;
+      plugin.settings.customReplacements.rules = [
+        {
+          searchText: 'TODO',
+          replaceText: 'DONE',
+          onlyAtStart: false,
+          onlyWholeLine: false,
+        },
+      ];
+
+      let capturedFrontmatter: any;
+      plugin.app.fileManager.processFrontMatter = vi.fn(
+        async (_file: TFile, callback: (fm: any) => void) => {
+          const fm: Record<string, any> = {};
+          callback(fm);
+          capturedFrontmatter = fm;
+        }
+      );
+
+      await aliasManager.addAliasToFile(file, 'TODO: Fix this', 'filename');
+
+      expect(capturedFrontmatter.aliases[0]).toContain('TODO: Fix this');
+    });
+
     it('should apply custom replacement only at start when configured', async () => {
-      plugin.settings.customReplacements.enableCustomReplacements = true;
-      plugin.settings.markupStripping.applyCustomReplacementsInAlias = true;
+      plugin.settings.markupStripping.applyCustomReplacementsInFirstLineProperty = true;
       plugin.settings.customReplacements.rules = [
         {
           searchText: 'PREFIX ',
           replaceText: 'REPLACED ',
           onlyAtStart: true,
           onlyWholeLine: false,
-          enabled: true,
         },
       ];
 
       const title = 'PREFIX Task name';
-      const content = title + '\nBody';
 
       let capturedFrontmatter: any;
       plugin.app.fileManager.processFrontMatter = vi.fn(
@@ -455,15 +462,13 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(file, title, 'filename', content);
+      await aliasManager.addAliasToFile(file, title, 'filename');
 
       expect(capturedFrontmatter.aliases[0]).toContain('REPLACED Task name');
     });
 
     it('should remove existing plugin aliases before adding new one', async () => {
       const title = 'New Title';
-      // Content WITH frontmatter so it goes through the update path
-      const content = '---\naliases:\n  - Old\n---\n' + title + '\nBody';
       const zwsp = '\u200B';
 
       let capturedFrontmatter: any;
@@ -478,7 +483,7 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(file, title, 'filename', content);
+      await aliasManager.addAliasToFile(file, title, 'filename');
 
       expect(capturedFrontmatter.aliases).toHaveLength(2);
       expect(capturedFrontmatter.aliases).toContain('User Added Alias');
@@ -489,9 +494,8 @@ describe('AliasManager', () => {
     });
 
     it('should handle multiple alias property keys', async () => {
-      plugin.settings.aliases.aliasPropertyKey = 'aliases, aka';
+      plugin.settings.firstLineProperty.propertyKey = 'aliases, aka';
       const title = 'First Line';
-      const content = title + '\nBody';
 
       let capturedFrontmatter: any;
       plugin.app.fileManager.processFrontMatter = vi.fn(
@@ -502,7 +506,7 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(file, title, 'filename', content);
+      await aliasManager.addAliasToFile(file, title, 'filename');
 
       const zwsp = '\u200B';
       // 'aliases' is Obsidian's canonical list property, so it stays an array.
@@ -513,7 +517,6 @@ describe('AliasManager', () => {
 
     it("should allow 'Untitled' alias when first line is literally 'Untitled'", async () => {
       const title = 'Untitled';
-      const content = title + '\nBody';
 
       let capturedFrontmatter: any;
       plugin.app.fileManager.processFrontMatter = vi.fn(
@@ -524,7 +527,7 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(file, title, 'filename', content);
+      await aliasManager.addAliasToFile(file, title, 'filename');
 
       const zwsp = '\u200B';
       expect(capturedFrontmatter.aliases).toEqual([`${zwsp}${title}${zwsp}`]);
@@ -540,7 +543,7 @@ describe('AliasManager', () => {
 
       // Should not throw
       await expect(
-        aliasManager.addAliasToFile(file, 'Title', 'filename', 'Title\nBody')
+        aliasManager.addAliasToFile(file, 'Title', 'filename')
       ).resolves.not.toThrow();
     });
 
@@ -554,53 +557,107 @@ describe('AliasManager', () => {
         .fn()
         .mockRejectedValue(error);
 
-      await aliasManager.addAliasToFile(
-        file,
-        'Title',
-        'filename',
-        'Title\nBody'
-      );
+      await aliasManager.addAliasToFile(file, 'Title', 'filename');
 
       expect(consoleErrorSpy).toHaveBeenCalled();
     });
 
-    it('should save active view before modifying frontmatter', async () => {
+    describe('with an editor target', () => {
+      afterEach(() => {
+        vi.mocked(stringifyYaml).mockReset();
+      });
+
+      it('should write the alias into the editor instead of the file', async () => {
+        const mockView = new MarkdownView(plugin.app);
+        mockView.file = file;
+        mockView.save = vi.fn();
+        plugin.app.workspace.getActiveViewOfType = vi
+          .fn()
+          .mockReturnValue(mockView);
+        vi.mocked(stringifyYaml).mockReturnValue('aliases: Title\n');
+        const target = createEditorTarget('Title\nBody');
+
+        await aliasManager.addAliasToFile(file, 'Title', 'filename', target);
+
+        expect(target.editor.cm.dispatch).toHaveBeenCalledWith(
+          expect.objectContaining({
+            changes: { from: 0, to: 0, insert: '---\naliases: Title\n---\n' },
+          })
+        );
+        expect(target.requestSave).toHaveBeenCalled();
+        expect(mockView.save).not.toHaveBeenCalled();
+        expect(
+          plugin.app.fileManager.processFrontMatter
+        ).not.toHaveBeenCalled();
+        expect(plugin.pendingMetadataUpdates.has(file)).toBe(false);
+      });
+
+      it('should mark the editor change as the plugin own while it is made', async () => {
+        vi.mocked(stringifyYaml).mockReturnValue('aliases: Title\n');
+        const target = createEditorTarget('Title\nBody');
+        const { markEditorSyncing, clearEditorSyncing } =
+          plugin.fileStateManager;
+
+        await aliasManager.addAliasToFile(file, 'Title', 'filename', target);
+
+        const dispatchOrder =
+          target.editor.cm.dispatch.mock.invocationCallOrder[0];
+        expect(markEditorSyncing).toHaveBeenCalledWith(file.path);
+        expect(markEditorSyncing.mock.invocationCallOrder[0]).toBeLessThan(
+          dispatchOrder
+        );
+        expect(clearEditorSyncing.mock.invocationCallOrder[0]).toBeGreaterThan(
+          dispatchOrder
+        );
+      });
+
+      it('should not request a save when the editor already holds the result', async () => {
+        const target = createEditorTarget('Title\nBody');
+
+        await aliasManager.removePluginAliasesFromFile(file, target);
+
+        expect(target.editor.cm.dispatch).not.toHaveBeenCalled();
+        expect(target.requestSave).not.toHaveBeenCalled();
+      });
+    });
+
+    it('should save the active view and write the file without an editor target', async () => {
       const mockView = new MarkdownView(plugin.app);
       mockView.file = file;
       mockView.save = vi.fn();
-
       plugin.app.workspace.getActiveViewOfType = vi
         .fn()
         .mockReturnValue(mockView);
 
-      await aliasManager.addAliasToFile(
-        file,
-        'Title',
-        'filename',
-        'Title\nBody'
-      );
+      await aliasManager.addAliasToFile(file, 'Title', 'filename', null);
 
       expect(mockView.save).toHaveBeenCalled();
+      expect(plugin.app.fileManager.processFrontMatter).toHaveBeenCalledWith(
+        file,
+        expect.any(Function)
+      );
+      expect(vi.mocked(mockView.save).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(plugin.app.fileManager.processFrontMatter).mock
+          .invocationCallOrder[0]
+      );
     });
 
     it('should remove aliases when alias matches filename and setting enabled', async () => {
-      plugin.settings.aliases.addAliasOnlyIfTitleDiffers = true;
+      plugin.settings.firstLineProperty.addOnlyIfTitleDiffers = true;
       const title = 'filename';
-      const content = title + '\nBody';
 
       const removeAliasesSpy = vi.spyOn(
         aliasManager,
         'removePluginAliasesFromFile'
       );
 
-      await aliasManager.addAliasToFile(file, title, 'filename', content);
+      await aliasManager.addAliasToFile(file, title, 'filename');
 
-      expect(removeAliasesSpy).toHaveBeenCalledWith(file);
+      expect(removeAliasesSpy).toHaveBeenCalledWith(file, null);
     });
 
     it('should add file to pendingMetadataUpdates', async () => {
       const title = 'First Line';
-      const content = title + '\nBody';
 
       plugin.app.fileManager.processFrontMatter = vi.fn(
         async (_file: TFile, callback: (fm: any) => void) => {
@@ -609,7 +666,7 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(file, title, 'filename', content);
+      await aliasManager.addAliasToFile(file, title, 'filename');
 
       expect(plugin.pendingMetadataUpdates.has(file)).toBe(true);
     });
@@ -621,7 +678,7 @@ describe('AliasManager', () => {
       // The "#" prefix means markup processing produced "Untitled", not the user
 
       // Markup must be stripped for the alias so "# Untitled" reduces to "Untitled"
-      plugin.settings.markupStripping.stripMarkupInAlias = true;
+      plugin.settings.markupStripping.stripMarkupInFirstLineProperty = true;
 
       const removeAliasesSpy = vi.spyOn(
         aliasManager,
@@ -631,19 +688,18 @@ describe('AliasManager', () => {
       await aliasManager.addAliasToFile(
         file,
         '# Untitled', // originalFirstNonEmptyLine (before processing - has # prefix)
-        'filename', // newTitle
-        '# Untitled\nBody' // content
+        'filename' // newTitle
       );
 
       // Should remove aliases because "# Untitled" doesn't literally match "Untitled" pattern
-      expect(removeAliasesSpy).toHaveBeenCalledWith(file);
+      expect(removeAliasesSpy).toHaveBeenCalledWith(file, null);
     });
 
     it('should remove aliases when Untitled extracted from template syntax', async () => {
       // First line is template code, but after processing results in "Untitled"
       // Should NOT add alias since original wasn't literally "Untitled"
 
-      plugin.settings.markupStripping.stripMarkupInAlias = true;
+      plugin.settings.markupStripping.stripMarkupInFirstLineProperty = true;
 
       const removeAliasesSpy = vi.spyOn(
         aliasManager,
@@ -653,11 +709,10 @@ describe('AliasManager', () => {
       await aliasManager.addAliasToFile(
         file,
         '<% tp.file.cursor() %>', // originalFirstNonEmptyLine (template syntax)
-        'filename', // newTitle
-        '<% tp.file.cursor() %>\nBody' // content
+        'filename' // newTitle
       );
 
-      expect(removeAliasesSpy).toHaveBeenCalledWith(file);
+      expect(removeAliasesSpy).toHaveBeenCalledWith(file, null);
     });
 
     it('should handle card link where firstNonEmptyLine differs from titleSourceLine', async () => {
@@ -675,8 +730,7 @@ describe('AliasManager', () => {
       await aliasManager.addAliasToFile(
         file,
         'Link Title', // originalFirstNonEmptyLine
-        'filename', // newTitle
-        '[Link Title](https://example.com)\nBody' // content
+        'filename' // newTitle
       );
 
       const zwsp = '\u200B';
@@ -740,8 +794,8 @@ describe('AliasManager', () => {
       ]);
     });
 
-    it('should delete property when empty and keepEmptyAliasProperty is false', async () => {
-      plugin.settings.aliases.keepEmptyAliasProperty = false;
+    it('should delete property when empty and keepEmptyProperty is false', async () => {
+      plugin.settings.firstLineProperty.keepEmptyProperty = false;
       const zwsp = '\u200B';
 
       let capturedFrontmatter: any;
@@ -760,8 +814,8 @@ describe('AliasManager', () => {
       expect(capturedFrontmatter.aliases).toBeUndefined();
     });
 
-    it('should keep property as null when empty and keepEmptyAliasProperty is true', async () => {
-      plugin.settings.aliases.keepEmptyAliasProperty = true;
+    it('should keep property as null when empty and keepEmptyProperty is true', async () => {
+      plugin.settings.firstLineProperty.keepEmptyProperty = true;
       const zwsp = '\u200B';
 
       let capturedFrontmatter: any;
@@ -781,7 +835,7 @@ describe('AliasManager', () => {
     });
 
     it('should handle multiple alias property keys', async () => {
-      plugin.settings.aliases.aliasPropertyKey = 'aliases, aka';
+      plugin.settings.firstLineProperty.propertyKey = 'aliases, aka';
       const zwsp = '\u200B';
 
       let capturedFrontmatter: any;
@@ -799,11 +853,11 @@ describe('AliasManager', () => {
       await aliasManager.removePluginAliasesFromFile(file);
 
       expect(capturedFrontmatter.aliases).toEqual(['User']);
-      expect(capturedFrontmatter.aka).toBeNull(); // keepEmptyAliasProperty is true
+      expect(capturedFrontmatter.aka).toBeNull(); // keepEmptyProperty is true
     });
 
     it('should collapse non-aliases properties to a scalar after removal', async () => {
-      plugin.settings.aliases.aliasPropertyKey = 'aka';
+      plugin.settings.firstLineProperty.propertyKey = 'aka';
       const zwsp = '\u200B';
 
       let capturedFrontmatter: any;
@@ -887,11 +941,38 @@ describe('AliasManager', () => {
       ).resolves.not.toThrow();
     });
 
-    it('should save active view before modifying frontmatter', async () => {
+    it('should remove aliases in the editor instead of the file', async () => {
+      const zwsp = '\u200B';
       const mockView = new MarkdownView(plugin.app);
       mockView.file = file;
       mockView.save = vi.fn();
+      plugin.app.workspace.getActiveViewOfType = vi
+        .fn()
+        .mockReturnValue(mockView);
+      vi.mocked(getFrontMatterInfo).mockImplementationOnce(
+        splitFrontMatter as unknown as typeof getFrontMatterInfo
+      );
+      vi.mocked(parseYaml).mockReturnValueOnce({
+        aliases: [`${zwsp}Old${zwsp}`, 'User'],
+      });
+      vi.mocked(stringifyYaml).mockReturnValueOnce('aliases:\n  - User\n');
+      const target = createEditorTarget(
+        `---\naliases:\n  - ${zwsp}Old${zwsp}\n  - User\n---\nBody`
+      );
 
+      await aliasManager.removePluginAliasesFromFile(file, target);
+
+      expect(stringifyYaml).toHaveBeenCalledWith({ aliases: ['User'] });
+      expect(target.editor.cm.dispatch).toHaveBeenCalledTimes(1);
+      expect(target.requestSave).toHaveBeenCalled();
+      expect(mockView.save).not.toHaveBeenCalled();
+      expect(plugin.app.fileManager.processFrontMatter).not.toHaveBeenCalled();
+    });
+
+    it('should save the active view and write the file without an editor target', async () => {
+      const mockView = new MarkdownView(plugin.app);
+      mockView.file = file;
+      mockView.save = vi.fn();
       plugin.app.workspace.getActiveViewOfType = vi
         .fn()
         .mockReturnValue(mockView);
@@ -899,6 +980,10 @@ describe('AliasManager', () => {
       await aliasManager.removePluginAliasesFromFile(file);
 
       expect(mockView.save).toHaveBeenCalled();
+      expect(plugin.app.fileManager.processFrontMatter).toHaveBeenCalledWith(
+        file,
+        expect.any(Function)
+      );
     });
   });
 
@@ -920,18 +1005,13 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(
-        file,
-        'Title',
-        file.basename,
-        'Title\nBody'
-      );
+      await aliasManager.addAliasToFile(file, 'Title', file.basename);
 
       expect(capturedFrontmatter.aliases).toBeDefined();
     });
 
     it('should handle very long alias content', async () => {
-      plugin.settings.aliases.truncateAlias = false;
+      plugin.settings.firstLineProperty.truncate = false;
       const veryLongTitle = 'A'.repeat(1000);
 
       let capturedFrontmatter: any;
@@ -943,12 +1023,7 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(
-        file,
-        veryLongTitle,
-        'filename',
-        veryLongTitle + '\nBody'
-      );
+      await aliasManager.addAliasToFile(file, veryLongTitle, 'filename');
 
       expect(capturedFrontmatter.aliases[0]).toContain('A'.repeat(1000));
     });
@@ -965,12 +1040,7 @@ describe('AliasManager', () => {
         }
       );
 
-      await aliasManager.addAliasToFile(
-        file,
-        title,
-        'filename',
-        title + '\nBody'
-      );
+      await aliasManager.addAliasToFile(file, title, 'filename');
 
       expect(capturedFrontmatter.aliases[0]).toContain('\u{1F680}');
       expect(capturedFrontmatter.aliases[0]).toContain('\u00A9\u00AE\u2122');
@@ -983,12 +1053,7 @@ describe('AliasManager', () => {
         .mockReturnValueOnce(file)
         .mockReturnValueOnce(null);
 
-      await aliasManager.addAliasToFile(
-        file,
-        'Title',
-        'filename',
-        'Title\nBody'
-      );
+      await aliasManager.addAliasToFile(file, 'Title', 'filename');
 
       // Should not call processFrontMatter after detecting file deletion
       expect(plugin.app.fileManager.processFrontMatter).not.toHaveBeenCalled();
@@ -996,7 +1061,6 @@ describe('AliasManager', () => {
 
     it('should handle concurrent calls to same file', async () => {
       const title = 'Title';
-      const content = title + '\nBody';
 
       let callCount = 0;
       plugin.app.fileManager.processFrontMatter = vi.fn(
@@ -1009,25 +1073,20 @@ describe('AliasManager', () => {
 
       // Simulate concurrent calls
       await Promise.all([
-        aliasManager.addAliasToFile(file, title, 'filename', content),
-        aliasManager.addAliasToFile(file, title, 'filename', content),
-        aliasManager.addAliasToFile(file, title, 'filename', content),
+        aliasManager.addAliasToFile(file, title, 'filename'),
+        aliasManager.addAliasToFile(file, title, 'filename'),
+        aliasManager.addAliasToFile(file, title, 'filename'),
       ]);
 
       expect(callCount).toBe(3); // All should complete
     });
 
     it('should not open frontmatter when the property key is empty', async () => {
-      plugin.settings.aliases.aliasPropertyKey = '';
+      plugin.settings.firstLineProperty.propertyKey = '';
 
       plugin.app.fileManager.processFrontMatter = vi.fn();
 
-      await aliasManager.addAliasToFile(
-        file,
-        'Title',
-        'filename',
-        'Title\nBody'
-      );
+      await aliasManager.addAliasToFile(file, 'Title', 'filename');
 
       expect(plugin.app.fileManager.processFrontMatter).not.toHaveBeenCalled();
     });

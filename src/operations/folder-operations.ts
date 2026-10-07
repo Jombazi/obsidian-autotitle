@@ -2,6 +2,11 @@ import { App, Notice, TFile, TFolder, normalizePath } from 'obsidian';
 import { verboseLog } from '../utils';
 import { EXCLUSION_STRATEGY, PluginSettings } from '../types';
 import { t } from '../i18n';
+import {
+  excludedFileEntryKey,
+  folderExclusionEntry,
+  hasExcludedFileEntry,
+} from '../utils/file-exclusions';
 
 export class FolderOperations {
   constructor(
@@ -21,22 +26,22 @@ export class FolderOperations {
   ): Promise<void> {
     // Normalize folder path to handle cross-platform differences and user typos
     folderPath = normalizePath(folderPath);
+    const folderEntry = folderExclusionEntry(folderPath);
 
-    const isInList =
-      this.settings.exclusions.excludedFolders.includes(folderPath);
+    const isInList = hasExcludedFileEntry(
+      this.settings.exclusions.excludedFiles,
+      folderEntry
+    );
     const isInverted =
-      this.settings.exclusions.folderScopeStrategy ===
+      this.settings.exclusions.fileScopeStrategy ===
       EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT;
 
     if (isInList) {
-      this.settings.exclusions.excludedFolders =
-        this.settings.exclusions.excludedFolders.filter(
-          (path) => path !== folderPath
+      const folderEntryKey = excludedFileEntryKey(folderEntry);
+      this.settings.exclusions.excludedFiles =
+        this.settings.exclusions.excludedFiles.filter(
+          (entry) => excludedFileEntryKey(entry) !== folderEntryKey
         );
-      // Ensure there's always at least one entry (even if empty)
-      if (this.settings.exclusions.excludedFolders.length === 0) {
-        this.settings.exclusions.excludedFolders.push('');
-      }
 
       if (!suppressNotice) {
         if (isInverted) {
@@ -48,7 +53,7 @@ export class FolderOperations {
           new Notice(
             t('notifications.disabledRenamingInFolder').replace(
               '{{folder}}',
-              folderPath
+              () => folderPath
             )
           );
         } else {
@@ -60,20 +65,13 @@ export class FolderOperations {
           new Notice(
             t('notifications.enabledRenamingInFolder').replace(
               '{{folder}}',
-              folderPath
+              () => folderPath
             )
           );
         }
       }
     } else {
-      if (
-        this.settings.exclusions.excludedFolders.length === 1 &&
-        this.settings.exclusions.excludedFolders[0] === ''
-      ) {
-        this.settings.exclusions.excludedFolders[0] = folderPath;
-      } else {
-        this.settings.exclusions.excludedFolders.push(folderPath);
-      }
+      this.settings.exclusions.excludedFiles.push(folderEntry);
 
       if (!suppressNotice) {
         if (isInverted) {
@@ -85,7 +83,7 @@ export class FolderOperations {
           new Notice(
             t('notifications.enabledRenamingInFolder').replace(
               '{{folder}}',
-              folderPath
+              () => folderPath
             )
           );
         } else {
@@ -97,14 +95,14 @@ export class FolderOperations {
           new Notice(
             t('notifications.disabledRenamingInFolder').replace(
               '{{folder}}',
-              folderPath
+              () => folderPath
             )
           );
         }
       }
     }
 
-    this.debugLog('excludedFolders', this.settings.exclusions.excludedFolders);
+    this.debugLog('excludedFiles', this.settings.exclusions.excludedFiles);
     await this.saveSettings();
     verboseLog(this, `Folder exclusion toggled for: ${folderPath}`, {
       isNowInList: !isInList,
@@ -191,8 +189,7 @@ export class FolderOperations {
   getAllMarkdownFilesInFolder(folder: TFolder): TFile[] {
     const files: TFile[] = [];
 
-    // Always recurse: the removed exclusions.includeSubfolders key was permanently true, and
-    // reusing matchSubfolders here would let an Exclusions setting govern folder-menu bulk renames
+    // Always recurse: the exclusion rules, not this walk, decide which notes in subfolders a folder-menu bulk rename skips
     const processFolder = (currentFolder: TFolder) => {
       currentFolder.children.forEach((child) => {
         if (child instanceof TFile && child.extension === 'md') {
@@ -242,17 +239,21 @@ export class FolderOperations {
 
       await this.processMultipleFiles(allFiles, 'rename');
     } else {
+      // Under "Exclude all except..." a listed folder is one renaming is enabled in, so the action maps to the opposite list state
+      const isInverted =
+        this.settings.exclusions.fileScopeStrategy ===
+        EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT;
+      const shouldBeListed = (action === 'disable') !== isInverted;
       for (const folder of folders) {
+        // The vault root has no entry of its own, as in Obsidian's Excluded files, where `//` matches nothing
+        if (folder.isRoot()) continue;
         try {
-          const normalizedFolderPath = normalizePath(folder.path);
-          const isCurrentlyExcluded =
-            this.settings.exclusions.excludedFolders.includes(
-              normalizedFolderPath
-            );
+          const isListed = hasExcludedFileEntry(
+            this.settings.exclusions.excludedFiles,
+            folderExclusionEntry(folder.path)
+          );
 
-          if (action === 'disable' && !isCurrentlyExcluded) {
-            await this.toggleFolderExclusion(folder.path, true);
-          } else if (action === 'enable' && isCurrentlyExcluded) {
+          if (isListed !== shouldBeListed) {
             await this.toggleFolderExclusion(folder.path, true);
           }
         } catch (error) {

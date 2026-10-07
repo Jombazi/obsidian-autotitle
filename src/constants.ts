@@ -46,53 +46,22 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     debugOutputFullContent: false,
     debugEnabledTimestamp: '',
     hasSetupExclusions: false,
-    lastUsageDate: '',
     hasEnabledForbiddenChars: false,
-    hasEnabledCustomReplacements: false,
-    hasEnabledAliases: false,
-    modalCheckboxStates: {
-      folderRename: {
-        includeSubfolders: true,
-        renameExcludedFolders: false,
-        renameExcludedTags: false,
-        renameExcludedProperties: false,
-      },
-      tagRename: {
-        includeSubtags: true,
-        renameExcludedFolders: false,
-        renameExcludedTags: false,
-        renameExcludedProperties: false,
-      },
-      searchRename: {
-        renameExcludedFolders: false,
-        renameExcludedTags: false,
-        renameExcludedProperties: false,
-      },
-      folderDisable: {
-        includeSubfolders: true,
-      },
-      tagDisable: {
-        includeSubtags: true,
-      },
-    },
   },
   exclusions: {
-    folderScopeStrategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
+    fileScopeStrategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
     tagScopeStrategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
     propertyScopeStrategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
-    fileNameScopeStrategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
     // Empty, not a seeded blank row: deepMerge replaces arrays wholesale, so a seeded
     // entry would materialise a dead rule on every fresh install. The lists render
     // their own empty state.
-    excludedFolders: [],
+    excludedFiles: [],
     excludedTags: [],
     excludedProperties: [],
-    matchSubfolders: true,
     tagMatchingMode: 'In Properties and note body',
     matchSubtags: true,
     disableRenamingKey: 'no rename',
     disableRenamingValue: 'true',
-    excludedFileNames: [],
   },
   characterReplacements: {
     enableForbiddenCharReplacements: false,
@@ -172,7 +141,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
       },
       backslash: {
         replacement: '⧵',
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: false,
       },
@@ -185,23 +154,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     },
   },
   customReplacements: {
-    enableCustomReplacements: false,
-    rules: [
-      {
-        searchText: '- [ ] ',
-        replaceText: '✔️ ',
-        onlyAtStart: true,
-        onlyWholeLine: false,
-        enabled: false,
-      },
-      {
-        searchText: '- [x] ',
-        replaceText: '✅ ',
-        onlyAtStart: true,
-        onlyWholeLine: false,
-        enabled: false,
-      },
-    ],
+    rules: [],
     applyAfterForbiddenChars: false,
   },
   markupStripping: {
@@ -224,7 +177,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
       comments: true,
       htmlTags: true,
     },
-    stripMarkupInAlias: false,
+    stripMarkupInFirstLineProperty: true,
     stripCommentsEntirely: true,
     stripTemplaterSyntax: true,
     stripTableMarkup: true,
@@ -233,18 +186,17 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     stripMathBlockMarkup: true,
     detectDiagrams: true,
     grabTitleFromCardLink: true,
-    applyCustomReplacementsInAlias: false,
+    applyCustomReplacementsInFirstLineProperty: true,
     applyCustomReplacementsAfterMarkupStripping: false,
   },
-  aliases: {
-    enableAliases: false,
-    truncateAlias: false,
-    addAliasOnlyIfTitleDiffers: false,
-    aliasPropertyKey: 'aliases',
-    hideAliasProperty: 'never' as const,
-    hideAliasInSidebar: false,
-    keepEmptyAliasProperty: true,
-    placeAliasLast: true,
+  firstLineProperty: {
+    truncate: false,
+    addOnlyIfTitleDiffers: false,
+    propertyKey: '',
+    hideProperty: 'never' as const,
+    hideInSidebar: false,
+    keepEmptyProperty: true,
+    placeLast: true,
   },
 };
 

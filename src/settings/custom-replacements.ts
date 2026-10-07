@@ -1,21 +1,24 @@
 import {
   Notice,
   PluginSettingTab,
-  Setting,
   SettingDefinitionPage,
   SettingDefinitionRender,
 } from 'obsidian';
 import {
-  updateDisabledRowsAccessibility,
-  addForbiddenCharProtection,
-  appendLines,
-  buildDescRow,
+  buildReplacedWithSummary,
+  buildSummaryRow,
   FirstLineIsTitlePlugin,
-  mountLegacyHost,
   appendEmphasis,
 } from './settings-base';
 import { t, tp } from '../i18n';
 import { CustomReplacement } from '../types';
+import { EntryEditModal } from '../modals/entry-edit-modal';
+
+/** Class on the rule list's group; `styles.css` keys the rule-order note off it. */
+export const RULE_LIST_CLASS = 'flit-rule-list';
+
+/** Attribute on the rule list's rows container holding the localized rule-order note, which `styles.css` draws as generated content. */
+export const RULE_ORDER_NOTE_ATTRIBUTE = 'data-flit-note';
 
 async function persistSettings(plugin: FirstLineIsTitlePlugin): Promise<void> {
   try {
@@ -24,28 +27,6 @@ async function persistSettings(plugin: FirstLineIsTitlePlugin): Promise<void> {
     const notice = new Notice(t('settings.errors.saveFailed'));
     notice.containerEl.addClass('mod-warning');
   }
-}
-
-/**
- * Behavioural notes for the master toggle, as bare newline-separated lines
- * (no bullet markup) — its own row below the toggle, matching the trim-note
- * pattern in `character-replacements.ts`.
- */
-function appendMasterNote(parent: HTMLElement | DocumentFragment): void {
-  appendLines(parent, [
-    (target) =>
-      target.appendText(t('settings.customReplacements.rulesApplyTopToBottom')),
-    (target) => {
-      target.appendText(t('settings.customReplacements.leaveBlank.part1'));
-      appendEmphasis(
-        target,
-        'settings.customReplacements.leaveBlank.replaceWith'
-      );
-      target.appendText(t('settings.customReplacements.leaveBlank.part2'));
-    },
-    (target) =>
-      target.appendText(t('settings.customReplacements.whitespacePreserved')),
-  ]);
 }
 
 function buildApplyAfterForbiddenDescription(): DocumentFragment {
@@ -78,128 +59,157 @@ function buildApplyAfterMarkupDescription(): DocumentFragment {
   });
 }
 
-/**
- * Builds one rule row. Handlers close over the rule object rather than its
- * index so drag-reordering (which mutates the array without re-rendering)
- * cannot make them write to the wrong rule.
- */
+/** A rule's search text as plain text that keeps its runs of spaces, or the muted "Empty" label. */
+function appendRuleSide(parent: DocumentFragment, text: string): void {
+  if (text === '') {
+    parent.createSpan({
+      cls: 'u-muted',
+      text: t('settings.characterReplacements.emptyPlaceholder'),
+    });
+    return;
+  }
+  parent.createSpan({ cls: 'flit-rule-text', text });
+}
+
+function ruleSideLabel(text: string): string {
+  return text === ''
+    ? t('settings.characterReplacements.emptyPlaceholder')
+    : text;
+}
+
+/** What the rule does, worded like a character's summary so both sections read alike; the quotes show a replacement's leading and trailing spaces. */
+function buildRuleSummary(rule: CustomReplacement): string | DocumentFragment {
+  let options = '';
+  if (rule.onlyAtStart) {
+    options += t('settings.customReplacements.summary.onlyAtLineStart');
+  }
+  if (rule.onlyWholeLine) {
+    options += t('settings.customReplacements.summary.onlyWholeLine');
+  }
+  return rule.replaceText === ''
+    ? t('settings.characterReplacements.summary.removed') + options
+    : buildReplacedWithSummary(rule.replaceText, options);
+}
+
+/** A mapped copy of the rule's fields, because the dialog's values need an index signature that an interface lacks. */
+type RuleValues = Pick<CustomReplacement, keyof CustomReplacement>;
+
+/** Opens the rule dialog; `rule` null adds a rule on Save, otherwise Save rewrites that rule in place. */
+function openRuleDialog(
+  plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab,
+  rule: CustomReplacement | null
+): void {
+  const initialValues: RuleValues = {
+    searchText: rule?.searchText ?? '',
+    replaceText: rule?.replaceText ?? '',
+    onlyAtStart: rule?.onlyAtStart ?? false,
+    onlyWholeLine: rule?.onlyWholeLine ?? false,
+  };
+
+  new EntryEditModal<RuleValues>(plugin.app, {
+    title: rule
+      ? t('settings.customReplacements.editReplacement')
+      : t('settings.customReplacements.addReplacement'),
+    initialValues,
+    fields: [
+      {
+        type: 'text',
+        key: 'searchText',
+        name: t('settings.customReplacements.headers.textToReplace'),
+        desc: t('settings.customReplacements.whitespacePreserved'),
+        placeholder: t('settings.characterReplacements.emptyPlaceholder'),
+        required: true,
+      },
+      {
+        type: 'text',
+        key: 'replaceText',
+        name: t('settings.customReplacements.headers.replaceWith'),
+        desc: `${t('settings.customReplacements.whitespacePreserved')} ${t('settings.customReplacements.leaveBlank')}`,
+        placeholder: t('settings.characterReplacements.emptyPlaceholder'),
+        forbiddenChars: 'currentOS',
+      },
+      {
+        type: 'toggle',
+        key: 'onlyAtStart',
+        name: t('settings.customReplacements.headers.onlyMatchLineStart'),
+        // The engine takes only the whole-line branch when both are on, so the two are kept exclusive
+        onChange: (value, setOther) => {
+          if (value) setOther('onlyWholeLine', false);
+        },
+      },
+      {
+        type: 'toggle',
+        key: 'onlyWholeLine',
+        name: t('settings.customReplacements.headers.onlyMatchWholeLine'),
+        onChange: (value, setOther) => {
+          if (value) setOther('onlyAtStart', false);
+        },
+      },
+    ],
+    onSave: async (values) => {
+      const saved: CustomReplacement = {
+        searchText: values.searchText,
+        replaceText: values.replaceText,
+        onlyAtStart: values.onlyAtStart,
+        onlyWholeLine: values.onlyWholeLine,
+      };
+      const rules = plugin.settings.customReplacements.rules;
+      if (rule) {
+        Object.assign(rule, saved);
+      } else {
+        rules.push(saved);
+      }
+      plugin.debugLog('customReplacements', rules);
+      await persistSettings(plugin);
+      tab.update();
+    },
+    // Editing a rule often only flips an option, so the keyboard comes up by itself only for a new rule, which starts with typing its text
+    focusFirstTextFieldOnMobile: rule === null,
+  }).open();
+}
+
+/** One rule's summary row: its search text, then what it is replaced with and its match options, then Edit and Delete. */
 function buildRuleRow(
   plugin: FirstLineIsTitlePlugin,
   tab: PluginSettingTab,
   rule: CustomReplacement
 ): SettingDefinitionRender {
-  const ruleIndex = () =>
-    plugin.settings.customReplacements.rules.indexOf(rule);
-
-  return {
-    name:
-      rule.searchText ||
-      rule.replaceText ||
-      t('settings.customReplacements.emptyRule', 'Empty rule'),
+  const summaryRow = buildSummaryRow({
+    name: `${ruleSideLabel(rule.searchText)} → ${ruleSideLabel(rule.replaceText)}`,
+    // The row key keeps both sides, so two rules for the same text still get distinct keys
+    buildNameFragment: () =>
+      createFragment((frag) => appendRuleSide(frag, rule.searchText)),
+    buildDesc: () => buildRuleSummary(rule),
+    // User data, so it stays out of the settings search index
     searchable: false,
-    render: (setting) => {
-      const host = mountLegacyHost(setting.settingEl);
-
-      const enableSetting = new Setting(host).setName(
-        t('settings.customReplacements.headers.enable')
-      );
-      const searchTextSetting = new Setting(host).setName(
-        t('settings.customReplacements.headers.textToReplace')
-      );
-      const replaceTextSetting = new Setting(host).setName(
-        t('settings.customReplacements.headers.replaceWith')
-      );
-      const onlyAtStartSetting = new Setting(host).setName(
-        t('settings.customReplacements.headers.onlyMatchLineStart')
-      );
-      const onlyWholeLineSetting = new Setting(host).setName(
-        t('settings.customReplacements.headers.onlyMatchWholeLine')
-      );
-
-      /** Per-rule enable gates the rule's own fields, not its enable toggle. */
-      const applyRowEnabledState = () => {
-        [
-          searchTextSetting,
-          replaceTextSetting,
-          onlyAtStartSetting,
-          onlyWholeLineSetting,
-        ].forEach((dependent) => {
-          dependent.setDisabled(!rule.enabled);
-          dependent.settingEl.classList.toggle(
-            'flit-row-disabled',
-            !rule.enabled
-          );
-        });
-        updateDisabledRowsAccessibility(host);
-      };
-
-      enableSetting.addToggle((toggle) => {
-        toggle.setValue(rule.enabled).onChange(async (value) => {
-          rule.enabled = value;
-          plugin.debugLog(`customReplacements[${ruleIndex()}].enabled`, value);
-          await persistSettings(plugin);
-          applyRowEnabledState();
-        });
-      });
-
-      searchTextSetting.addText((text) => {
-        text
-          .setPlaceholder(t('settings.characterReplacements.emptyPlaceholder'))
-          .setValue(rule.searchText)
-          .onChange(async (value) => {
-            rule.searchText = value;
-            plugin.debugLog(
-              `customReplacements[${ruleIndex()}].searchText`,
-              value
-            );
-            await persistSettings(plugin);
-          });
-      });
-
-      replaceTextSetting.addText((text) => {
-        text
-          .setPlaceholder(t('settings.characterReplacements.emptyPlaceholder'))
-          .setValue(rule.replaceText)
-          .onChange(async (value) => {
-            rule.replaceText = value;
-            plugin.debugLog(
-              `customReplacements[${ruleIndex()}].replaceText`,
-              value
-            );
-            await persistSettings(plugin);
-          });
-        addForbiddenCharProtection(text.inputEl);
-      });
-
-      onlyAtStartSetting.addToggle((toggle) => {
-        toggle.setValue(rule.onlyAtStart).onChange(async (value) => {
-          rule.onlyAtStart = value;
-          plugin.debugLog(
-            `customReplacements[${ruleIndex()}].onlyAtStart`,
-            value
-          );
-          // The two match modes are mutually exclusive.
-          if (value) rule.onlyWholeLine = false;
-          await persistSettings(plugin);
-          tab.update();
-        });
-      });
-
-      onlyWholeLineSetting.addToggle((toggle) => {
-        toggle.setValue(rule.onlyWholeLine).onChange(async (value) => {
-          rule.onlyWholeLine = value;
-          plugin.debugLog(
-            `customReplacements[${ruleIndex()}].onlyWholeLine`,
-            value
-          );
-          // The two match modes are mutually exclusive.
-          if (value) rule.onlyAtStart = false;
-          await persistSettings(plugin);
-          tab.update();
-        });
-      });
-
-      applyRowEnabledState();
+    editEntry: () => openRuleDialog(plugin, tab, rule),
+    deleteEntry: () => {
+      void (async () => {
+        const rules = plugin.settings.customReplacements.rules;
+        const index = rules.indexOf(rule);
+        if (index === -1) return;
+        rules.splice(index, 1);
+        plugin.debugLog('customReplacements', rules);
+        await persistSettings(plugin);
+        tab.update();
+      })();
+    },
+  });
+  return {
+    ...summaryRow,
+    render: (setting, group) => {
+      const cleanup = summaryRow.render(setting, group);
+      // The note cannot be a row: the list's drag sorter re-inserts a dragged row by child index, so any element at the top of the list would end up below a rule dragged there
+      const rowsContainer = setting.settingEl.parentElement;
+      // A new row is already in the rows container when it renders, though that container may not be in the document yet
+      if (rowsContainer?.matches(`.${RULE_LIST_CLASS} > .setting-items`)) {
+        rowsContainer.setAttribute(
+          RULE_ORDER_NOTE_ATTRIBUTE,
+          t('settings.customReplacements.rulesApplyTopToBottom')
+        );
+      }
+      return cleanup;
     },
   };
 }
@@ -207,110 +217,80 @@ function buildRuleRow(
 /**
  * Custom replacements sub-page.
  *
- * The rule collection uses the native list type, so add / delete / reorder
- * affordances come from the framework. List `items` are captured when the
- * definitions are built, so every mutation that changes the row set calls
- * `tab.update()`.
+ * Rules are a native list of summary rows, edited in a dialog: the list draws
+ * the add and drag affordances, each row its own Edit and Delete. List `items`
+ * are captured when the definitions are built, so every mutation that changes
+ * the row set calls `tab.update()`.
  */
 export function buildCustomReplacementsPage(
   plugin: FirstLineIsTitlePlugin,
   tab: PluginSettingTab
 ): SettingDefinitionPage {
   const rules = () => plugin.settings.customReplacements.rules;
+  const hasRules = () => rules().length > 0;
 
   return {
     type: 'page',
     name: t('settings.sections.customReplacements'),
     desc: t('settings.customReplacements.desc'),
-    // Counts what the plugin acts on, not what the list holds: a disabled or
-    // blank-search rule never fires, so counting it would overstate the page.
-    // Silent at zero and while the master toggle is off, rather than reading
-    // "0 rules": the count is an at-a-glance summary, and a summary of nothing
-    // is noise the native affordance does not show either.
+    // Counts what the plugin acts on, not what the list holds: a blank-search
+    // rule never fires, so counting it would overstate the page.
+    // Silent at zero rather than reading "0 rules": the count is an
+    // at-a-glance summary, and a summary of nothing is noise the native
+    // affordance does not show either.
     displayValue: () => {
-      if (!plugin.settings.customReplacements.enableCustomReplacements)
-        return '';
-      const active = rules().filter(
-        (rule) => rule.enabled && rule.searchText
-      ).length;
+      const active = rules().filter((rule) => rule.searchText).length;
       return active ? tp('settings.ruleCount', active) : '';
     },
     items: [
       {
-        name: t('settings.customReplacements.name'),
-        desc: t('settings.customReplacements.toggleDesc'),
-        control: {
-          type: 'toggle',
-          key: 'customReplacements.enableCustomReplacements',
-        },
+        type: 'group',
+        // Ordering options mean nothing with no rules to order; every add and delete calls `tab.update()`, which re-evaluates this.
+        visible: hasRules,
+        items: [
+          {
+            name: t(
+              'settings.customReplacements.processingOrder.applyAfterForbidden'
+            ),
+            desc: buildApplyAfterForbiddenDescription(),
+            control: {
+              type: 'toggle',
+              key: 'customReplacements.applyAfterForbiddenChars',
+            },
+          },
+          {
+            name: t(
+              'settings.customReplacements.processingOrder.applyAfterMarkup'
+            ),
+            desc: buildApplyAfterMarkupDescription(),
+            control: {
+              type: 'toggle',
+              key: 'markupStripping.applyCustomReplacementsAfterMarkupStripping',
+            },
+          },
+        ],
       },
-      {
-        name: t(
-          'settings.customReplacements.processingOrder.applyAfterForbidden'
-        ),
-        desc: buildApplyAfterForbiddenDescription(),
-        visible: () =>
-          plugin.settings.customReplacements.enableCustomReplacements,
-        control: {
-          type: 'toggle',
-          key: 'customReplacements.applyAfterForbiddenChars',
-        },
-      },
-      {
-        name: t('settings.customReplacements.processingOrder.applyAfterMarkup'),
-        desc: buildApplyAfterMarkupDescription(),
-        visible: () =>
-          plugin.settings.customReplacements.enableCustomReplacements,
-        control: {
-          type: 'toggle',
-          key: 'markupStripping.applyCustomReplacementsAfterMarkupStripping',
-        },
-      },
-      buildDescRow(
-        createFragment((frag) => appendMasterNote(frag)),
-        {
-          visible: () =>
-            plugin.settings.customReplacements.enableCustomReplacements,
-        }
-      ),
       {
         type: 'list',
-        visible: () =>
-          plugin.settings.customReplacements.enableCustomReplacements,
+        // The rule-order note above the first rule is drawn in `styles.css` from an attribute each rule row sets; see `buildRuleRow`
+        cls: RULE_LIST_CLASS,
         emptyState: t(
           'settings.customReplacements.emptyState',
           'No custom replacements.'
         ),
         items: rules().map((rule) => buildRuleRow(plugin, tab, rule)),
-        onDelete: (index) => {
-          void (async () => {
-            rules().splice(index, 1);
-            await persistSettings(plugin);
-            tab.update();
-          })();
-        },
         onReorder: (oldIndex, newIndex) => {
           void (async () => {
             const [moved] = rules().splice(oldIndex, 1);
             rules().splice(newIndex, 0, moved);
+            // A keyboard move (Alt+Up/Down) reports the new order without moving the rows, so re-render from the stored order; before the save's await, because Obsidian focuses the row at the new index right after this handler returns
+            tab.update();
             await persistSettings(plugin);
           })();
         },
         addItem: {
           name: t('settings.customReplacements.addReplacement'),
-          action: () => {
-            void (async () => {
-              rules().push({
-                searchText: '',
-                replaceText: '',
-                onlyAtStart: false,
-                onlyWholeLine: false,
-                enabled: true,
-              });
-              await persistSettings(plugin);
-              tab.update();
-            })();
-          },
+          action: () => openRuleDialog(plugin, tab, null),
         },
       },
     ],

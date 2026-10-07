@@ -1,10 +1,4 @@
-import {
-  TFile,
-  MarkdownView,
-  getFrontMatterInfo,
-  parseYaml,
-  Editor,
-} from 'obsidian';
+import { TFile, MarkdownView, getFrontMatterInfo, parseYaml } from 'obsidian';
 import { PluginSettings } from '../types';
 import {
   verboseLog,
@@ -16,7 +10,15 @@ import {
 import { resolveCurrentFrontmatter } from '../utils/file-exclusions';
 import { t } from '../i18n';
 import { readFileContent } from '../utils/content-reader';
-import { keepPagePreviewCursors } from '../utils/page-preview';
+import {
+  hasFirstLinePropertyName,
+  parseFirstLinePropertyKeys,
+} from '../utils/first-line-property-keys';
+import {
+  SourceEditorTarget,
+  applyFrontMatterChange,
+  replaceEditorText,
+} from '../utils/frontmatter-edit';
 import FirstLineIsTitle from '../../main';
 
 const ZWSP = '\u200B';
@@ -54,47 +56,36 @@ export class AliasManager {
    * Called multiple times per operation but not cached since:
    * - Property string is typically short ("aliases")
    * - Caching adds complexity without measurable benefit
-   *
-   * A blank setting yields an empty array rather than falling back to
-   * `aliases`: the field is stored exactly as typed, so blank means the user
-   * asked for no alias property at all.
    */
   private getAliasPropertyKeys(): string[] {
-    return this.settings.aliases.aliasPropertyKey
-      .split(',')
-      .map((key) => key.trim())
-      .filter((key) => key.length > 0);
+    return parseFirstLinePropertyKeys(
+      this.settings.firstLineProperty.propertyKey
+    );
   }
 
   /**
-   * True when the alias property name setting resolves to no key at all.
+   * True when the alias property name setting resolves to no key at all, which is also what turns the first line property off.
    *
    * Every public entry point checks this before doing any work. Letting the
    * per-key loops iterate zero times is not enough: the surrounding code still
-   * calls `activeView.save()` and `processFrontMatter()`, both of which write
-   * the file, to accomplish nothing.
+   * reaches `writeFrontMatter()`, which writes the note to accomplish nothing.
    */
   private hasNoAliasProperty(): boolean {
-    return this.getAliasPropertyKeys().length === 0;
+    return !hasFirstLinePropertyName(this.settings);
   }
 
   async updateAliasIfNeeded(
     file: TFile,
     providedContent?: string,
     targetTitle?: string,
-    editor?: Editor,
-    isBatchOperation = false
+    target?: SourceEditorTarget | null
   ): Promise<boolean> {
-    // Ahead of `trackUsage()`, which can persist `data.json`: with no property
-    // to populate this call is not plugin usage, it is a no-op. `false` matches
-    // every other skip in this method, including the `enableAliases` one — it
-    // means "no alias update performed", not "failed".
+    // With no property to populate this call is a no-op. `false` matches every
+    // other skip in this method — it means "no alias update performed", not
+    // "failed".
     if (this.hasNoAliasProperty()) {
       return false;
     }
-
-    // Track plugin usage
-    this.plugin.trackUsage();
 
     try {
       const currentFile = this.app.vault.getAbstractFileByPath(file.path);
@@ -118,7 +109,7 @@ export class AliasManager {
           resolveCurrentFrontmatter(
             file,
             this.app,
-            providedContent ?? editor?.getValue()
+            providedContent ?? target?.editor.getValue()
           ) ?? {},
           this.settings.exclusions.disableRenamingKey,
           this.settings.exclusions.disableRenamingValue
@@ -144,23 +135,9 @@ export class AliasManager {
         return false;
       }
 
-      // Skip ALL alias operations in canvas due to Obsidian sync/cache issues
-      // Canvas has: delayed disk writes, stale editor cache, content mismatches
-      const mostRecentLeaf = this.app.workspace.getMostRecentLeaf();
-      const viewType = mostRecentLeaf?.view?.getViewType?.();
-      const isCanvas = viewType === 'canvas';
-
-      if (isCanvas) {
-        verboseLog(
-          this.plugin,
-          `Skipping alias update in canvas: ${file.path}`
-        );
-        return false;
-      }
-
       const content = await readFileContent(this.plugin, file, {
         providedContent,
-        providedEditor: editor,
+        providedEditor: target?.editor,
       });
 
       if (!content || content.trim() === '') {
@@ -181,9 +158,7 @@ export class AliasManager {
       }
 
       if (!firstNonEmptyLine || firstNonEmptyLine.trim() === '') {
-        if (this.settings.aliases.enableAliases) {
-          await this.removePluginAliasesFromFile(file);
-        }
+        await this.removePluginAliasesFromFile(file, target ?? null);
         return false;
       }
 
@@ -194,10 +169,6 @@ export class AliasManager {
         this.settings,
         this.plugin
       );
-
-      if (!this.settings.aliases.enableAliases) {
-        return false;
-      }
 
       // Parse frontmatter from fresh editor content instead of stale cache
       // This prevents race conditions where cache hasn't updated yet during YAML edits
@@ -226,7 +197,7 @@ export class AliasManager {
         processedTitleSource.trim() === titleToCompare;
 
       const shouldHaveAlias =
-        !this.settings.aliases.addAliasOnlyIfTitleDiffers ||
+        !this.settings.firstLineProperty.addOnlyIfTitleDiffers ||
         !processedLineMatchesFilename;
 
       if (!shouldHaveAlias) {
@@ -234,16 +205,17 @@ export class AliasManager {
           this.plugin,
           `Removing plugin aliases - first line matches filename: "${processedTitleSource}" = "${titleToCompare}"`
         );
-        await this.removePluginAliasesFromFile(file);
+        await this.removePluginAliasesFromFile(file, target ?? null);
         return false;
       }
 
       const aliasPropertyKeys = this.getAliasPropertyKeys();
-      let expectedAlias = this.settings.markupStripping.stripMarkupInAlias
+      let expectedAlias = this.settings.markupStripping
+        .stripMarkupInFirstLineProperty
         ? extractTitle(titleSourceLine, this.settings)
         : titleSourceLine;
       // Apply truncation if enabled (must match what addAliasToFile will produce)
-      if (this.settings.aliases.truncateAlias) {
+      if (this.settings.firstLineProperty.truncate) {
         if (expectedAlias.length > this.settings.core.charCount - 1) {
           expectedAlias =
             expectedAlias.slice(0, this.settings.core.charCount - 1).trimEnd() +
@@ -275,9 +247,9 @@ export class AliasManager {
           break;
         }
 
-        // Check if alias needs repositioning (placeAliasLast ON but not last)
+        // Check if alias needs repositioning (placeLast ON but not last)
         if (
-          this.settings.aliases.placeAliasLast &&
+          this.settings.firstLineProperty.placeLast &&
           existingAliases.length > 1
         ) {
           const lastAlias = existingAliases[existingAliases.length - 1];
@@ -308,9 +280,7 @@ export class AliasManager {
           file,
           titleSourceLine,
           titleToCompare,
-          content,
-          editor,
-          isBatchOperation
+          target ?? null
         );
         return true;
       } catch (error) {
@@ -327,20 +297,18 @@ export class AliasManager {
     file: TFile,
     originalFirstNonEmptyLine: string,
     newTitle: string,
-    content: string,
-    editor?: Editor,
-    isBatchOperation = false
+    target: SourceEditorTarget | null = null
   ): Promise<void> {
-    // No property to write the alias into - skip before `activeView.save()` and
-    // `processFrontMatter()` touch the file.
+    // No property to write the alias into - skip before `writeFrontMatter()`
+    // touches the note.
     if (this.hasNoAliasProperty()) {
       return;
     }
 
     try {
       // Validate file exists and get fresh reference from vault.
-      // We also re-validate before each processFrontMatter call to guard against
-      // file deletion during activeView.save().
+      // writeFrontMatter re-validates before its processFrontMatter call to guard
+      // against file deletion during activeView.save().
       const currentFile = this.app.vault.getAbstractFileByPath(file.path);
       if (!currentFile || !(currentFile instanceof TFile)) {
         verboseLog(
@@ -356,11 +324,10 @@ export class AliasManager {
 
       // Apply custom replacements to alias if enabled
       if (
-        this.settings.customReplacements.enableCustomReplacements &&
-        this.settings.markupStripping.applyCustomReplacementsInAlias
+        this.settings.markupStripping.applyCustomReplacementsInFirstLineProperty
       ) {
         for (const replacement of this.settings.customReplacements.rules) {
-          if (replacement.searchText === '' || !replacement.enabled) continue;
+          if (replacement.searchText === '') continue;
 
           let tempLine = aliasProcessedLine;
           if (replacement.onlyWholeLine) {
@@ -374,9 +341,10 @@ export class AliasManager {
                 tempLine.slice(replacement.searchText.length);
             }
           } else {
+            // Replacer function so `$&` and `$$` in the user's replacement text stay literal.
             tempLine = tempLine.replaceAll(
               replacement.searchText,
-              replacement.replaceText
+              () => replacement.replaceText
             );
           }
           aliasProcessedLine = tempLine;
@@ -393,7 +361,7 @@ export class AliasManager {
         this.settings.characterReplacements.enableForbiddenCharReplacements = false;
         aliasToAdd = extractTitle(aliasProcessedLine, this.settings, {
           skipMarkupStripping:
-            !this.settings.markupStripping.stripMarkupInAlias,
+            !this.settings.markupStripping.stripMarkupInFirstLineProperty,
         });
       } finally {
         this.settings.characterReplacements.enableForbiddenCharReplacements =
@@ -405,7 +373,7 @@ export class AliasManager {
       const targetTitle = newTitle.trim();
       const aliasMatchesFilename = aliasToAdd.trim() === targetTitle;
       const shouldAddAlias =
-        !this.settings.aliases.addAliasOnlyIfTitleDiffers ||
+        !this.settings.firstLineProperty.addOnlyIfTitleDiffers ||
         !aliasMatchesFilename;
 
       if (!shouldAddAlias) {
@@ -413,12 +381,12 @@ export class AliasManager {
           this.plugin,
           `Removing plugin aliases and skipping add - alias matches filename: \`${aliasToAdd}\` = \`${targetTitle}\``
         );
-        await this.removePluginAliasesFromFile(file);
+        await this.removePluginAliasesFromFile(file, target);
         return;
       }
 
       // Apply truncation to alias if enabled
-      if (this.settings.aliases.truncateAlias) {
+      if (this.settings.firstLineProperty.truncate) {
         if (aliasToAdd.length > this.settings.core.charCount - 1) {
           aliasToAdd =
             aliasToAdd.slice(0, this.settings.core.charCount - 1).trimEnd() +
@@ -437,7 +405,7 @@ export class AliasManager {
           this.plugin,
           `Removing plugin alias - no meaningful content found`
         );
-        await this.removePluginAliasesFromFile(file);
+        await this.removePluginAliasesFromFile(file, target);
         return;
       }
 
@@ -462,115 +430,17 @@ export class AliasManager {
             this.plugin,
             `Removing stale aliases - extracted title is "Untitled" from markup: ${originalFirstLineTrimmed}`
           );
-          await this.removePluginAliasesFromFile(file);
+          await this.removePluginAliasesFromFile(file, target);
           return;
         }
       }
 
       // Mark alias with ZWSP for identification
       const markedAlias = ZWSP + aliasToAdd + ZWSP;
-      const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-      if (activeView && activeView.file === file) {
-        await activeView.save();
-      }
-
-      // Parse content directly to avoid race conditions with metadata cache
-      const lines = content.split('\n');
-      const hasFrontmatter = lines.length > 0 && lines[0].trim() === '---';
-
-      if (!hasFrontmatter) {
-        // Re-validate: file could be renamed/deleted during save() above
-        const currentFileForFrontmatter = this.app.vault.getAbstractFileByPath(
-          file.path
-        );
-        if (
-          !currentFileForFrontmatter ||
-          !(currentFileForFrontmatter instanceof TFile)
-        ) {
-          verboseLog(
-            this.plugin,
-            `Skipping frontmatter creation - file no longer exists: ${file.path}`
-          );
-          return;
-        }
-
-        // No frontmatter exists - use processFrontMatter to create it properly
-        const aliasPropertyKeys = this.getAliasPropertyKeys();
-        keepPagePreviewCursors(this.app, currentFileForFrontmatter);
-        await this.app.fileManager.processFrontMatter(
-          currentFileForFrontmatter,
-          (frontmatter: Record<string, unknown>) => {
-            // Insert alias into all specified properties
-            for (const aliasPropertyKey of aliasPropertyKeys) {
-              // Use array format for 'aliases' property, inline format for custom properties
-              if (aliasPropertyKey === 'aliases') {
-                frontmatter[aliasPropertyKey] = [markedAlias];
-              } else {
-                frontmatter[aliasPropertyKey] = markedAlias;
-              }
-            }
-          }
-        );
-
-        // Mark file as having pending metadata cache update
-        this.plugin.pendingMetadataUpdates.add(currentFileForFrontmatter);
-        verboseLog(
-          this.plugin,
-          `Created frontmatter and added alias \`${aliasToAdd}\` to ${currentFileForFrontmatter.path}`
-        );
-        return;
-      }
-
-      // Re-validate: file could be renamed/deleted during save() above
-      const currentFileForUpdate = this.app.vault.getAbstractFileByPath(
-        file.path
-      );
-      if (!currentFileForUpdate || !(currentFileForUpdate instanceof TFile)) {
-        verboseLog(
-          this.plugin,
-          `Skipping frontmatter update - file no longer exists: ${file.path}`
-        );
-        return;
-      }
-
-      // Try editor-based update first (avoids "modified externally" notification)
-      // Skip for batch operations - most files won't have editor open
-      // Skip when placeAliasLast is ON - need processFrontMatter to reorder
-      if (
-        !isBatchOperation &&
-        !this.settings.aliases.placeAliasLast &&
-        (await this.tryEditorBasedAliasUpdate(
-          currentFileForUpdate,
-          aliasToAdd,
-          editor
-        ))
-      ) {
-        // Save to flush editor changes to disk and update metadata cache
-        // Without this, reading/live preview mode won't reflect the change
-        const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (activeView && activeView.file === currentFileForUpdate) {
-          // Mark as pending to prevent duplicate processing from metadata-changed event
-          this.plugin.pendingMetadataUpdates.add(currentFileForUpdate);
-          await activeView.save();
-        }
-        verboseLog(
-          this.plugin,
-          `TRY_EDITOR_UPDATE: used editor path for ${currentFileForUpdate.path}`
-        );
-        return;
-      }
-      if (!isBatchOperation) {
-        verboseLog(
-          this.plugin,
-          `TRY_EDITOR_UPDATE: falling back to processFrontMatter for ${currentFileForUpdate.path}`
-        );
-      }
-
-      // File has frontmatter - update aliases via processFrontMatter
       const aliasPropertyKeys = this.getAliasPropertyKeys();
-      keepPagePreviewCursors(this.app, currentFileForUpdate);
-      await this.app.fileManager.processFrontMatter(
-        currentFileForUpdate,
+      // With no properties block yet the callback receives `{}` and creates each property holding the alias alone.
+      const written = await this.writeFrontMatter(
+        file,
         (frontmatter: Record<string, unknown>) => {
           // Insert alias into all specified properties
           for (const aliasPropertyKey of aliasPropertyKeys) {
@@ -601,18 +471,18 @@ export class AliasManager {
                 if (existingPluginIndex === -1) {
                   // No existing plugin alias - always add at end
                   userAliases.push(markedAlias);
-                } else if (this.settings.aliases.placeAliasLast) {
-                  // Has existing plugin alias, placeAliasLast ON - move to end
+                } else if (this.settings.firstLineProperty.placeLast) {
+                  // Has existing plugin alias, placeLast ON - move to end
                   userAliases.push(markedAlias);
                 } else {
-                  // Has existing plugin alias, placeAliasLast OFF - keep original position
+                  // Has existing plugin alias, placeLast OFF - keep original position
                   userAliases.splice(existingPluginIndex, 0, markedAlias);
                 }
                 frontmatter[aliasPropertyKey] = userAliases;
               } else {
                 // Alias already exists unmarked - just keep user aliases
                 if (userAliases.length === 0) {
-                  if (this.settings.aliases.keepEmptyAliasProperty) {
+                  if (this.settings.firstLineProperty.keepEmptyProperty) {
                     frontmatter[aliasPropertyKey] = null;
                   } else {
                     delete frontmatter[aliasPropertyKey];
@@ -663,11 +533,11 @@ export class AliasManager {
                     if (existingPluginIndex === -1) {
                       // No existing plugin value - always add at end
                       userValues.push(markedAlias);
-                    } else if (this.settings.aliases.placeAliasLast) {
-                      // Has existing plugin value, placeAliasLast ON - move to end
+                    } else if (this.settings.firstLineProperty.placeLast) {
+                      // Has existing plugin value, placeLast ON - move to end
                       userValues.push(markedAlias);
                     } else {
-                      // Has existing plugin value, placeAliasLast OFF - keep position
+                      // Has existing plugin value, placeLast OFF - keep position
                       userValues.splice(existingPluginIndex, 0, markedAlias);
                     }
                     frontmatter[aliasPropertyKey] = userValues;
@@ -675,7 +545,7 @@ export class AliasManager {
                 } else {
                   // Value already exists, just restore user values
                   if (userValues.length === 0) {
-                    if (this.settings.aliases.keepEmptyAliasProperty) {
+                    if (this.settings.firstLineProperty.keepEmptyProperty) {
                       frontmatter[aliasPropertyKey] = null;
                     } else {
                       delete frontmatter[aliasPropertyKey];
@@ -689,15 +559,16 @@ export class AliasManager {
               }
             }
           }
-        }
+        },
+        target
       );
 
-      // Mark file as having pending metadata cache update
-      this.plugin.pendingMetadataUpdates.add(currentFileForUpdate);
-      verboseLog(
-        this.plugin,
-        `Updated alias \`${aliasToAdd}\` in ${currentFileForUpdate.path}`
-      );
+      if (written) {
+        verboseLog(
+          this.plugin,
+          `Updated alias \`${aliasToAdd}\` in ${file.path}`
+        );
+      }
     } catch (error) {
       if (isFileNotFoundError(error)) {
         // File was renamed during operation - this is expected race condition, log as info
@@ -713,21 +584,24 @@ export class AliasManager {
     }
   }
 
-  async removePluginAliasesFromFile(file: TFile): Promise<void> {
-    // No property to clean up - skip before `activeView.save()` and
-    // `processFrontMatter()` touch the file. Aliases written under a key the
-    // user has since cleared or renamed are left in place by design: the
-    // plugin stores no history of property names it previously used, and acts
-    // only on the property currently named in settings. Cleaning them up would
-    // mean writing to a property the user has not authorised.
+  async removePluginAliasesFromFile(
+    file: TFile,
+    target: SourceEditorTarget | null = null
+  ): Promise<void> {
+    // No property to clean up - skip before `writeFrontMatter()` touches the
+    // note. Aliases written under a key the user has since cleared or renamed
+    // are left in place by design: the plugin stores no history of property
+    // names it previously used, and acts only on the property currently named
+    // in settings. Cleaning them up would mean writing to a property the user
+    // has not authorized.
     if (this.hasNoAliasProperty()) {
       return;
     }
 
     try {
       // Validate file exists and get fresh reference from vault.
-      // We check twice: once here and once before processFrontMatter.
-      // The second check guards against file deletion during activeView.save().
+      // writeFrontMatter checks again before its processFrontMatter call, which
+      // guards against file deletion during activeView.save().
       const currentFile = this.app.vault.getAbstractFileByPath(file.path);
       if (!currentFile || !(currentFile instanceof TFile)) {
         verboseLog(
@@ -738,27 +612,8 @@ export class AliasManager {
       }
       file = currentFile;
 
-      // Save any unsaved changes before modifying frontmatter
-      const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-      if (activeView && activeView.file === file) {
-        await activeView.save();
-      }
-
-      // Re-validate: file could be renamed/deleted during save() above
-      const currentFileForRemoval = this.app.vault.getAbstractFileByPath(
-        file.path
-      );
-      if (!currentFileForRemoval || !(currentFileForRemoval instanceof TFile)) {
-        verboseLog(
-          this.plugin,
-          `Skipping alias removal - file no longer exists: ${file.path}`
-        );
-        return;
-      }
-
-      keepPagePreviewCursors(this.app, currentFileForRemoval);
-      await this.app.fileManager.processFrontMatter(
-        currentFileForRemoval,
+      const written = await this.writeFrontMatter(
+        file,
         (frontmatter: Record<string, unknown>) => {
           const aliasPropertyKeys = this.getAliasPropertyKeys();
 
@@ -776,7 +631,7 @@ export class AliasManager {
               propValue === undefined ||
               propValue === ''
             ) {
-              if (!this.settings.aliases.keepEmptyAliasProperty) {
+              if (!this.settings.firstLineProperty.keepEmptyProperty) {
                 delete frontmatter[aliasPropertyKey];
               }
               continue;
@@ -798,7 +653,7 @@ export class AliasManager {
 
             // Update or remove the property based on remaining values
             if (filteredValues.length === 0) {
-              if (!this.settings.aliases.keepEmptyAliasProperty) {
+              if (!this.settings.firstLineProperty.keepEmptyProperty) {
                 // Delete empty property completely
                 delete frontmatter[aliasPropertyKey];
               } else {
@@ -816,15 +671,13 @@ export class AliasManager {
               frontmatter[aliasPropertyKey] = filteredValues;
             }
           }
-        }
+        },
+        target
       );
 
-      // Mark file as having pending metadata cache update
-      this.plugin.pendingMetadataUpdates.add(currentFileForRemoval);
-      verboseLog(
-        this.plugin,
-        `Removed plugin aliases from ${currentFileForRemoval.path}`
-      );
+      if (written) {
+        verboseLog(this.plugin, `Removed plugin aliases from ${file.path}`);
+      }
     } catch (error) {
       if (isFileNotFoundError(error)) {
         // File was renamed during operation - this is expected race condition, log as info
@@ -843,204 +696,55 @@ export class AliasManager {
   }
 
   /**
-   * Get active editor for a specific file (if currently active)
+   * Change a note's properties in the editor the caller chose, or in the file.
+   * @param file - Note to change
+   * @param mutate - Changes the parsed properties in place
+   * @param target - Editor showing the note, or null to write the file
+   * @returns False when nothing was written: the editor already held the result, or the file is gone
    */
-  private getActiveEditorForFile(file: TFile): Editor | undefined {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    return view?.file === file ? view.editor : undefined;
-  }
-
-  /**
-   * Try to update alias via editor.replaceRange() instead of processFrontMatter.
-   * This avoids disk write and "modified externally" notifications.
-   * @returns true if update succeeded via editor, false if processFrontMatter needed
-   */
-  private async tryEditorBasedAliasUpdate(
+  private async writeFrontMatter(
     file: TFile,
-    newAlias: string,
-    editor?: Editor
+    mutate: (frontmatter: Record<string, unknown>) => void,
+    target: SourceEditorTarget | null
   ): Promise<boolean> {
-    // Step 1: Get editor
-    const activeEditor = editor ?? this.getActiveEditorForFile(file);
-    if (!activeEditor) {
-      verboseLog(
-        this.plugin,
-        `TRY_EDITOR_UPDATE [1]: FAIL - no editor available for ${file.path}`
-      );
-      return false;
-    }
-    verboseLog(
-      this.plugin,
-      `TRY_EDITOR_UPDATE [1]: file=${file.path}, editor=defined`
-    );
-
-    // Step 2: Get editor content
-    const content = activeEditor.getValue();
-    verboseLog(
-      this.plugin,
-      `TRY_EDITOR_UPDATE [2]: content length=${content.length}`
-    );
-
-    // Step 3: Check frontmatter exists
-    const fmInfo = getFrontMatterInfo(content);
-    if (!fmInfo.exists) {
-      verboseLog(this.plugin, `TRY_EDITOR_UPDATE [3]: FAIL - no frontmatter`);
-      return false;
-    }
-    verboseLog(
-      this.plugin,
-      `TRY_EDITOR_UPDATE [3]: frontmatter exists, contentStart=${fmInfo.contentStart}`
-    );
-
-    // Step 4: Extract frontmatter section
-    const frontmatterText = content.substring(0, fmInfo.contentStart);
-    verboseLog(
-      this.plugin,
-      `TRY_EDITOR_UPDATE [4]: frontmatter length=${frontmatterText.length}`
-    );
-
-    // Step 5: Get alias property keys
-    const aliasKeys = this.getAliasPropertyKeys();
-    verboseLog(
-      this.plugin,
-      `TRY_EDITOR_UPDATE [5]: alias keys=${aliasKeys.join(',')}`
-    );
-
-    // Step 6: For each property, find ZWSP value by parsing frontmatter directly
-    // Using parseYaml instead of cache avoids timing issues with cache updates
-    let frontmatter: Record<string, unknown> | null = null;
-    try {
-      frontmatter = parseYaml(fmInfo.frontmatter) as Record<
-        string,
-        unknown
-      > | null;
-    } catch {
-      verboseLog(
-        this.plugin,
-        `TRY_EDITOR_UPDATE [6]: FAIL - could not parse frontmatter YAML`
-      );
-      return false;
-    }
-
-    const positions: Array<{
-      key: string;
-      oldValue: string;
-      arrayIndex?: number;
-    }> = [];
-    let anyMissing = false;
-
-    for (const key of aliasKeys) {
-      const propValue = frontmatter?.[key];
-      verboseLog(
-        this.plugin,
-        `TRY_EDITOR_UPDATE [6]: checking key=${key}, type=${typeof propValue}`
-      );
-
-      if (propValue === undefined) {
-        verboseLog(this.plugin, `TRY_EDITOR_UPDATE [6]: key=${key} MISSING`);
-        anyMissing = true;
-        continue;
-      }
-
-      if (Array.isArray(propValue)) {
-        // Search from end for ZWSP-wrapped value
-        let found = false;
-        for (let i = propValue.length - 1; i >= 0; i--) {
-          const val: unknown = propValue[i];
-          if (isPluginAlias(val)) {
-            verboseLog(
-              this.plugin,
-              `TRY_EDITOR_UPDATE [6]: key=${key} FOUND at index=${i}`
-            );
-            positions.push({ key, oldValue: val as string, arrayIndex: i });
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          verboseLog(
-            this.plugin,
-            `TRY_EDITOR_UPDATE [6]: key=${key} array has no ZWSP value`
-          );
-          anyMissing = true;
-        }
-      } else if (typeof propValue === 'string') {
-        if (isPluginAlias(propValue)) {
-          verboseLog(
-            this.plugin,
-            `TRY_EDITOR_UPDATE [6]: key=${key} FOUND string value`
-          );
-          positions.push({ key, oldValue: propValue });
-        } else {
-          verboseLog(
-            this.plugin,
-            `TRY_EDITOR_UPDATE [6]: key=${key} string not ZWSP-wrapped`
-          );
-          anyMissing = true;
-        }
-      } else {
-        // null or other non-array, non-string value
-        verboseLog(
-          this.plugin,
-          `TRY_EDITOR_UPDATE [6]: key=${key} has null/invalid value`
+    // A note open in an editor is changed in place, because a file write landing while the user types makes Obsidian merge and show "modified externally"; notes not open in one take the file write.
+    if (target) {
+      // Marks the change as the plugin's own, so the editor-change it fires does not start another rename pass
+      this.plugin.fileStateManager.markEditorSyncing(file.path);
+      let changed: boolean;
+      try {
+        changed = replaceEditorText(
+          target.editor,
+          applyFrontMatterChange(target.editor.getValue(), mutate)
         );
-        anyMissing = true;
+      } finally {
+        this.plugin.fileStateManager.clearEditorSyncing(file.path);
       }
-    }
-
-    // Step 7: Check if any missing
-    if (anyMissing) {
-      verboseLog(
-        this.plugin,
-        `TRY_EDITOR_UPDATE [7]: FAIL - some properties missing ZWSP value`
-      );
-      return false;
-    }
-    verboseLog(
-      this.plugin,
-      `TRY_EDITOR_UPDATE [7]: all ${positions.length} properties have ZWSP values`
-    );
-
-    // Step 8: Replace ZWSP values line-by-line
-    const newMarkedAlias = `${ZWSP}${newAlias}${ZWSP}`;
-    const oldValue = positions[0].oldValue; // All positions have same ZWSP-wrapped value
-    const fmLines = frontmatterText.split('\n');
-    let replacedCount = 0;
-
-    for (let lineNum = 0; lineNum < fmLines.length; lineNum++) {
-      const line = fmLines[lineNum];
-      const ch = line.lastIndexOf(oldValue); // Rightmost occurrence on line
-      if (ch !== -1) {
-        verboseLog(
-          this.plugin,
-          `TRY_EDITOR_UPDATE [8]: replacing at line=${lineNum} ch=${ch}`
-        );
-        activeEditor.replaceRange(
-          newMarkedAlias,
-          { line: lineNum, ch },
-          { line: lineNum, ch: ch + oldValue.length }
-        );
-        replacedCount++;
+      if (changed) {
+        target.requestSave?.();
       }
+      return changed;
     }
 
-    if (replacedCount !== positions.length) {
+    // Save any unsaved changes before modifying frontmatter
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (activeView && activeView.file === file) {
+      await activeView.save();
+    }
+
+    // Re-validate: file could be renamed/deleted during save() above
+    const currentFile = this.app.vault.getAbstractFileByPath(file.path);
+    if (!currentFile || !(currentFile instanceof TFile)) {
       verboseLog(
         this.plugin,
-        `TRY_EDITOR_UPDATE [8]: FAIL - expected ${positions.length} replacements, got ${replacedCount}`
+        `Skipping properties write - file no longer exists: ${file.path}`
       );
       return false;
     }
 
-    // Step 9: Force sync and verify
-    if (!activeEditor.getValue().includes(newMarkedAlias)) {
-      verboseLog(
-        this.plugin,
-        `TRY_EDITOR_UPDATE [9]: FAIL - change not persisted`
-      );
-      return false;
-    }
-    verboseLog(this.plugin, `TRY_EDITOR_UPDATE [9]: SUCCESS`);
+    // Mark file as having pending metadata cache update
+    this.plugin.pendingMetadataUpdates.add(currentFile);
+    await this.app.fileManager.processFrontMatter(currentFile, mutate);
     return true;
   }
 }

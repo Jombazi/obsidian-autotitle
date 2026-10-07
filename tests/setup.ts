@@ -26,6 +26,8 @@ global.HTMLElement = dom.window.HTMLElement as any;
 global.Element = dom.window.Element as any;
 global.Node = dom.window.Node as any;
 global.MutationObserver = dom.window.MutationObserver as any;
+// Title extraction decodes character references through the platform's HTML parser.
+global.DOMParser = dom.window.DOMParser as any;
 
 // Obsidian's runtime patches HTMLElement.prototype with DOM helpers like addClass;
 // jsdom doesn't have this, so tests that call it on real elements (e.g. Notice.containerEl) need it polyfilled.
@@ -35,6 +37,20 @@ global.HTMLElement.prototype.addClass = function (...classNames: string[]) {
 
 global.HTMLElement.prototype.removeClass = function (...classNames: string[]) {
   this.classList.remove(...classNames);
+};
+
+global.HTMLElement.prototype.toggleClass = function (
+  classes: string | string[],
+  value: boolean
+) {
+  for (const className of Array.isArray(classes) ? classes : [classes]) {
+    this.classList.toggle(className, value);
+  }
+};
+
+// Obsidian's `trigger` dispatches a plain event of the given type; FolderSuggest fires `input` through it
+global.HTMLElement.prototype.trigger = function (eventType: string) {
+  this.dispatchEvent(new dom.window.Event(eventType));
 };
 
 // Obsidian also patches Node.prototype with element factories and exposes createFragment globally;
@@ -66,6 +82,11 @@ function applyElementInfo(
   if (options.type !== undefined) el.setAttribute('type', options.type);
 }
 
+// Dialogs clear their content with Obsidian's `empty` before building it
+global.Node.prototype.empty = function () {
+  while (this.firstChild) this.removeChild(this.firstChild);
+};
+
 global.Node.prototype.appendText = function (text: string) {
   this.appendChild(document.createTextNode(text));
 };
@@ -86,6 +107,20 @@ global.Node.prototype.createDiv = function (info?: DomElementInfo | string) {
 global.Node.prototype.createSpan = function (info?: DomElementInfo | string) {
   return this.createEl('span', info);
 };
+
+// Obsidian gives every node its owning document and window, which popout-safe code schedules timers and reads focus through
+Object.defineProperty(global.Node.prototype, 'doc', {
+  get(this: Node) {
+    return this.ownerDocument ?? document;
+  },
+  configurable: true,
+});
+Object.defineProperty(global.Node.prototype, 'win', {
+  get(this: Node) {
+    return (this.ownerDocument ?? document).defaultView ?? window;
+  },
+  configurable: true,
+});
 
 globalThis.createFragment = (
   callback?: (frag: DocumentFragment) => void

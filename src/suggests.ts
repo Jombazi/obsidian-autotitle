@@ -3,27 +3,20 @@ import { AbstractInputSuggest, TFolder, App } from 'obsidian';
 export class FolderSuggest extends AbstractInputSuggest<TFolder> {
   private inputEl: HTMLInputElement;
   private onSelectCallback: (value: string) => void;
-  private excludedPaths: Set<string>;
 
   constructor(
     app: App,
     inputEl: HTMLInputElement,
-    onSelectCallback: (value: string) => void,
-    currentExclusions: string[] = []
+    onSelectCallback: (value: string) => void
   ) {
     super(app, inputEl);
     this.inputEl = inputEl;
     this.onSelectCallback = onSelectCallback;
-    this.excludedPaths = new Set(
-      currentExclusions.map((path) => path.trim()).filter((path) => path !== '')
-    );
   }
 
   getSuggestions(query: string): TFolder[] {
-    const folders = this.app.vault
-      .getAllLoadedFiles()
-      .filter((file): file is TFolder => file instanceof TFolder)
-      .filter((folder) => !this.excludedPaths.has(folder.path));
+    // Leaves out the vault root, as Obsidian's own folder suggestions in the Excluded files dialog do
+    const folders = this.app.vault.getAllFolders(false);
 
     if (!query) {
       return folders.slice(0, 10);
