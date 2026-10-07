@@ -19,8 +19,6 @@ tests/
 ├── utils.test.ts
 ├── version-bump.test.ts
 ├── core/                       # Core module tests
-│   ├── alias-manager.test.ts
-│   ├── alias-properties-only-skip.test.ts
 │   ├── cache-manager.test.ts
 │   ├── command-registrar.test.ts
 │   ├── disable-property-transition.test.ts
@@ -30,6 +28,8 @@ tests/
 │   ├── event-handler-manager.test.ts
 │   ├── file-creation-coordinator.test.ts
 │   ├── file-state-manager.test.ts
+│   ├── first-line-property-manager.test.ts
+│   ├── first-line-property-properties-only-skip.test.ts
 │   ├── plugin-initializer.test.ts
 │   ├── rate-limiter.test.ts
 │   ├── rename-engine.test.ts

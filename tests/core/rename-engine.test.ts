@@ -26,8 +26,8 @@ function createMockPlugin() {
       isLocked: vi.fn().mockReturnValue(false),
       acquireLock: vi.fn().mockReturnValue(true),
       releaseLock: vi.fn(),
-      markPendingAliasRecheck: vi.fn(),
-      hasPendingAliasRecheck: vi.fn().mockReturnValue(false),
+      markPendingFirstLinePropertyRecheck: vi.fn(),
+      hasPendingFirstLinePropertyRecheck: vi.fn().mockReturnValue(false),
       getContent: vi.fn().mockReturnValue(undefined),
       setContent: vi.fn(),
       reservePath: vi.fn(),
@@ -58,11 +58,11 @@ function createMockPlugin() {
       // Editor syncing
       markEditorSyncing: vi.fn(),
       clearEditorSyncing: vi.fn(),
-      // Pending alias recheck
-      markPendingAliasRecheck: vi.fn(),
-      hasPendingAliasRecheck: vi.fn().mockReturnValue(false),
-      clearPendingAliasRecheck: vi.fn(),
-      getFilesWithPendingAliasRecheck: vi.fn().mockReturnValue([]),
+      // Pending first line property recheck
+      markPendingFirstLinePropertyRecheck: vi.fn(),
+      hasPendingFirstLinePropertyRecheck: vi.fn().mockReturnValue(false),
+      clearPendingFirstLinePropertyRecheck: vi.fn(),
+      getFilesWithPendingFirstLinePropertyRecheck: vi.fn().mockReturnValue([]),
       // Lifecycle timers
       setCreationDelayTimer: vi.fn(),
       clearCreationDelayTimer: vi.fn(),
@@ -90,12 +90,12 @@ function createMockPlugin() {
       getState: vi.fn().mockReturnValue(undefined),
     },
     eventHandlerManager: {
-      isAliasUpdatePending: vi.fn().mockReturnValue(false),
-      markAliasUpdatePending: vi.fn(),
-      clearAliasUpdatePending: vi.fn(),
+      isFirstLinePropertyUpdatePending: vi.fn().mockReturnValue(false),
+      markFirstLinePropertyUpdatePending: vi.fn(),
+      clearFirstLinePropertyUpdatePending: vi.fn(),
     },
-    aliasManager: {
-      updateAliasIfNeeded: vi.fn().mockResolvedValue(false),
+    firstLinePropertyManager: {
+      updateFirstLinePropertyIfNeeded: vi.fn().mockResolvedValue(false),
     },
     outputDebugFileContent: vi.fn(),
     recentlyRenamedPaths: new Set<string>(),
@@ -413,9 +413,9 @@ describe('RenameEngine', () => {
 
       await renameEngine.processEditorChangeOptimal(editor, file);
 
-      expect(plugin.cacheManager.markPendingAliasRecheck).toHaveBeenCalledWith(
-        file.path
-      );
+      expect(
+        plugin.cacheManager.markPendingFirstLinePropertyRecheck
+      ).toHaveBeenCalledWith(file.path);
     });
 
     it('should not mark for recheck when editor is syncing', async () => {
@@ -425,7 +425,7 @@ describe('RenameEngine', () => {
       await renameEngine.processEditorChangeOptimal(editor, file);
 
       expect(
-        plugin.cacheManager.markPendingAliasRecheck
+        plugin.cacheManager.markPendingFirstLinePropertyRecheck
       ).not.toHaveBeenCalled();
     });
 
@@ -1211,11 +1211,11 @@ describe('RenameEngine', () => {
       expect(result.split('\n').length).toBe(1000);
     });
   });
-  // The consolidated alias step in processFile matches on the outcome's `reason`. The
+  // The consolidated first line property step in processFile matches on the outcome's `reason`. The
   // successful-rename outcome once carried no reason at all, so the gate skipped exactly
   // the case that renames a file, and only the manual commands noticed — the editor-change
-  // handlers call updateAliasIfNeeded themselves.
-  describe('processFile alias gate', () => {
+  // handlers call updateFirstLinePropertyIfNeeded themselves.
+  describe('processFile first line property gate', () => {
     beforeEach(() => {
       plugin.settings.firstLineProperty.propertyKey = 'aliases';
       plugin.app.vault.getAbstractFileByPath = vi.fn().mockReturnValue(file);
@@ -1227,45 +1227,55 @@ describe('RenameEngine', () => {
         .mockResolvedValue(outcome);
     }
 
-    it('should update the alias after a successful rename', async () => {
+    it('should update the first line property after a successful rename', async () => {
       stubOutcome({ success: true, reason: 'renamed' });
 
       await renameEngine.processFile(file);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).toHaveBeenCalledTimes(1);
     });
 
-    it('should update the alias when no rename was needed', async () => {
+    it('should update the first line property when no rename was needed', async () => {
       stubOutcome({ success: true, reason: 'no-rename-needed' });
 
       await renameEngine.processFile(file);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).toHaveBeenCalledTimes(1);
     });
 
-    it('should update the alias when empty content was retained', async () => {
+    it('should update the first line property when empty content was retained', async () => {
       stubOutcome({ success: false, reason: 'empty-content-retained' });
 
       await renameEngine.processFile(file);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).toHaveBeenCalledTimes(1);
     });
 
-    it('should not update the alias when the file was excluded', async () => {
+    it('should not update the first line property when the file was excluded', async () => {
       stubOutcome({ success: false, reason: 'excluded' });
 
       await renameEngine.processFile(file);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).not.toHaveBeenCalled();
     });
 
-    it('should not update the alias when the property name is blank', async () => {
+    it('should not update the first line property when the property name is blank', async () => {
       plugin.settings.firstLineProperty.propertyKey = '';
       stubOutcome({ success: true, reason: 'renamed' });
 
       await renameEngine.processFile(file);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).not.toHaveBeenCalled();
     });
   });
 
@@ -1276,10 +1286,10 @@ describe('RenameEngine', () => {
     beforeEach(() => {
       vi.useFakeTimers();
       plugin.app.vault.getAbstractFileByPath = vi.fn().mockReturnValue(file);
-      plugin.cacheManager.hasPendingAliasRecheck = vi
+      plugin.cacheManager.hasPendingFirstLinePropertyRecheck = vi
         .fn()
         .mockReturnValue(true);
-      plugin.cacheManager.clearPendingAliasRecheck = vi.fn();
+      plugin.cacheManager.clearPendingFirstLinePropertyRecheck = vi.fn();
       vi.spyOn(renameEngine as any, 'processFileInternal').mockResolvedValue({
         success: false,
         reason: 'excluded',
@@ -1303,9 +1313,9 @@ describe('RenameEngine', () => {
 
       await renameEngine.processFile(file);
 
-      expect(plugin.cacheManager.clearPendingAliasRecheck).toHaveBeenCalledWith(
-        file.path
-      );
+      expect(
+        plugin.cacheManager.clearPendingFirstLinePropertyRecheck
+      ).toHaveBeenCalledWith(file.path);
       expect(processEditorChangeOptimal).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(TIMING.UI_SETTLE_DELAY_MS);
@@ -1327,9 +1337,9 @@ describe('RenameEngine', () => {
       await renameEngine.processFile(file);
       await vi.advanceTimersByTimeAsync(TIMING.UI_SETTLE_DELAY_MS);
 
-      expect(plugin.cacheManager.clearPendingAliasRecheck).toHaveBeenCalledWith(
-        file.path
-      );
+      expect(
+        plugin.cacheManager.clearPendingFirstLinePropertyRecheck
+      ).toHaveBeenCalledWith(file.path);
       expect(processEditorChangeOptimal).toHaveBeenCalledTimes(1);
       expect(processEditorChangeOptimal).toHaveBeenCalledWith(
         view.editor,
@@ -1348,9 +1358,9 @@ describe('RenameEngine', () => {
 
       await renameEngine.processFile(file);
 
-      expect(plugin.cacheManager.clearPendingAliasRecheck).toHaveBeenCalledWith(
-        file.path
-      );
+      expect(
+        plugin.cacheManager.clearPendingFirstLinePropertyRecheck
+      ).toHaveBeenCalledWith(file.path);
       expect(vi.getTimerCount()).toBe(0);
       expect(processEditorChangeOptimal).not.toHaveBeenCalled();
     });
@@ -1360,7 +1370,7 @@ describe('RenameEngine', () => {
 
       expect(vi.getTimerCount()).toBe(0);
       expect(
-        plugin.cacheManager.clearPendingAliasRecheck
+        plugin.cacheManager.clearPendingFirstLinePropertyRecheck
       ).not.toHaveBeenCalled();
       expect(processEditorChangeOptimal).not.toHaveBeenCalled();
     });

@@ -293,7 +293,7 @@ export class CacheManager {
   // ==================== FILE OPERATION LOCK (CONSOLIDATED) ====================
 
   /**
-   * Acquire lock for file operation (rename, alias update, etc.)
+   * Acquire lock for file operation (rename, first line property update, etc.)
    * Prevents concurrent operations on same file
    */
   acquireLock(filePath: string): boolean {
@@ -322,24 +322,26 @@ export class CacheManager {
   }
 
   /**
-   * Mark file as needing alias recheck after current operation completes
+   * Mark file as needing first line property recheck after current operation completes
    */
-  markPendingAliasRecheck(filePath: string): void {
-    this.plugin.fileStateManager.markPendingAliasRecheck(filePath);
+  markPendingFirstLinePropertyRecheck(filePath: string): void {
+    this.plugin.fileStateManager.markPendingFirstLinePropertyRecheck(filePath);
   }
 
   /**
-   * Check if file has pending alias recheck
+   * Check if file has pending first line property recheck
    */
-  hasPendingAliasRecheck(filePath: string): boolean {
-    return this.plugin.fileStateManager.hasPendingAliasRecheck(filePath);
+  hasPendingFirstLinePropertyRecheck(filePath: string): boolean {
+    return this.plugin.fileStateManager.hasPendingFirstLinePropertyRecheck(
+      filePath
+    );
   }
 
   /**
-   * Clear pending alias recheck flag
+   * Clear pending first line property recheck flag
    */
-  clearPendingAliasRecheck(filePath: string): void {
-    this.plugin.fileStateManager.clearPendingAliasRecheck(filePath);
+  clearPendingFirstLinePropertyRecheck(filePath: string): void {
+    this.plugin.fileStateManager.clearPendingFirstLinePropertyRecheck(filePath);
   }
 
   // ==================== MONITORING ====================

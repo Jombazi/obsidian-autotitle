@@ -58,64 +58,73 @@ export class RenameEngine {
   }
 
   /**
-   * Update alias for a file with coordination to prevent concurrent updates.
-   * Used by manual commands to ensure alias stays in sync with filename.
-   * Coordinates with event-handler-manager's pendingAliasUpdates to prevent double-processing.
+   * Update the first line property for a file with coordination to prevent concurrent updates.
+   * Used by manual commands to ensure the first line property stays in sync with filename.
+   * Coordinates with event-handler-manager's pendingFirstLinePropertyUpdates to prevent double-processing.
    *
-   * @param file - The file to update alias for
+   * @param file - The file to update the first line property for
    * @param isManualCommand - Whether this is a manual command (determines if we should update)
-   * @param editor - Editor the rename was read from, which the alias is written into
-   * @returns true if alias was updated, false if skipped
+   * @param editor - Editor the rename was read from, which the first line property is written into
+   * @returns true if the first line property was updated, false if skipped
    */
-  private async updateAliasWithCoordination(
+  private async updateFirstLinePropertyWithCoordination(
     file: TFile,
     _isManualCommand: boolean,
     editor?: Editor
   ): Promise<boolean> {
-    // Update alias when a property name is set (for both manual and automatic modes)
+    // Update the first line property when a property name is set (for both manual and automatic modes)
     if (!hasFirstLinePropertyName(this.plugin.settings)) {
       return false;
     }
 
     // Check if event handler already has an update in progress
-    if (this.plugin.eventHandlerManager?.isAliasUpdatePending(file.path)) {
+    if (
+      this.plugin.eventHandlerManager?.isFirstLinePropertyUpdatePending(
+        file.path
+      )
+    ) {
       verboseLog(
         this.plugin,
-        `Skipping alias update - event handler already processing: ${file.path}`
+        `Skipping first line property update - event handler already processing: ${file.path}`
       );
       return false;
     }
 
     // Mark as in-progress to prevent event handlers from double-processing
-    this.plugin.eventHandlerManager?.markAliasUpdatePending(file.path);
+    this.plugin.eventHandlerManager?.markFirstLinePropertyUpdatePending(
+      file.path
+    );
 
     try {
-      const target = this.findAliasTarget(file, editor);
+      const target = this.findFirstLinePropertyTarget(file, editor);
 
       verboseLog(
         this.plugin,
-        `// EDITOR_PASS (manual): Passing target=${target ? 'editor' : 'file'} to updateAliasIfNeeded`
+        `// EDITOR_PASS (manual): Passing target=${target ? 'editor' : 'file'} to updateFirstLinePropertyIfNeeded`
       );
 
-      const aliasResult = await this.plugin.aliasManager.updateAliasIfNeeded(
-        file,
-        undefined,
-        undefined,
-        target
-      );
-      return aliasResult;
+      const firstLinePropertyResult =
+        await this.plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded(
+          file,
+          undefined,
+          undefined,
+          target
+        );
+      return firstLinePropertyResult;
     } finally {
-      this.plugin.eventHandlerManager?.clearAliasUpdatePending(file.path);
+      this.plugin.eventHandlerManager?.clearFirstLinePropertyUpdatePending(
+        file.path
+      );
     }
   }
 
   /**
-   * Choose where the alias update goes: the editor the rename was read from when there is one, since that is where the user is typing, otherwise any editor showing the note.
+   * Choose where the first line property update goes: the editor the rename was read from when there is one, since that is where the user is typing, otherwise any editor showing the note.
    * @param file - Note being renamed
    * @param editor - Editor the rename was read from
    * @returns The editor to write into, or null to write the file
    */
-  private findAliasTarget(
+  private findFirstLinePropertyTarget(
     file: TFile,
     editor?: Editor
   ): SourceEditorTarget | null {
@@ -174,7 +183,9 @@ export class RenameEngine {
         // Only mark for recheck if not from our own background editor sync
         // This prevents setValue() on background editors from scheduling spurious rechecks
         if (!this.plugin.fileStateManager.isEditorSyncing(file.path)) {
-          this.plugin.cacheManager?.markPendingAliasRecheck(file.path);
+          this.plugin.cacheManager?.markPendingFirstLinePropertyRecheck(
+            file.path
+          );
         } else if (this.plugin.settings.core.debug) {
           console.debug(
             `Skipping recheck - editor-change from background editor sync: ${file.path}`
@@ -280,13 +291,13 @@ export class RenameEngine {
           );
         }
 
-        // Still process aliases if alias settings changed (edge case)
+        // Still process the first line property if its settings changed (edge case)
         // For now, skip all processing when title region unchanged
         return;
       }
 
       // Update lastEditorContent only when we're about to process
-      // (prevents alias/metadata handlers from incorrectly skipping)
+      // (prevents first line property/metadata handlers from incorrectly skipping)
       this.plugin.fileStateManager.setLastEditorContent(
         file.path,
         currentContent
@@ -492,18 +503,22 @@ export class RenameEngine {
         pathsToUnlock.add(file.path);
       }
 
-      // Handle alias in ONE place - after processFileInternal completes
-      // This consolidates alias logic instead of scattering it across multiple code paths
-      const aliasHandlingReasons: readonly RenameOutcomeReason[] = [
+      // Handle the first line property in ONE place - after processFileInternal completes
+      // This consolidates first line property logic instead of scattering it across multiple code paths
+      const firstLinePropertyHandlingReasons: readonly RenameOutcomeReason[] = [
         'renamed',
         'no-rename-needed',
         'empty-content-retained',
       ];
       if (
-        aliasHandlingReasons.includes(result.reason) &&
+        firstLinePropertyHandlingReasons.includes(result.reason) &&
         hasFirstLinePropertyName(this.plugin.settings)
       ) {
-        await this.updateAliasWithCoordination(file, showNotices, editor);
+        await this.updateFirstLinePropertyWithCoordination(
+          file,
+          showNotices,
+          editor
+        );
       }
 
       return result;
@@ -513,15 +528,17 @@ export class RenameEngine {
         this.plugin.cacheManager?.releaseLock(path);
       }
 
-      // Check if content changed during processing (rapid edits during rename/alias operations)
+      // Check if content changed during processing (rapid edits during rename/first line property operations)
       const newPath = file.path;
       if (
-        this.plugin.cacheManager?.hasPendingAliasRecheck(originalPath) ||
-        this.plugin.cacheManager?.hasPendingAliasRecheck(newPath)
+        this.plugin.cacheManager?.hasPendingFirstLinePropertyRecheck(
+          originalPath
+        ) ||
+        this.plugin.cacheManager?.hasPendingFirstLinePropertyRecheck(newPath)
       ) {
         verboseLog(
           this.plugin,
-          `Content changed during processing with pending alias: ${originalPath}`
+          `Content changed during processing with pending first line property recheck: ${originalPath}`
         );
 
         if (
@@ -529,19 +546,27 @@ export class RenameEngine {
           this.plugin.fileStateManager.hasThrottleTimer(newPath)
         ) {
           // A scheduled timer processes the latest text itself, and an immediate recheck would rename once more outside a linked note's delay.
-          this.plugin.cacheManager?.clearPendingAliasRecheck(originalPath);
+          this.plugin.cacheManager?.clearPendingFirstLinePropertyRecheck(
+            originalPath
+          );
           if (newPath !== originalPath) {
-            this.plugin.cacheManager?.clearPendingAliasRecheck(newPath);
+            this.plugin.cacheManager?.clearPendingFirstLinePropertyRecheck(
+              newPath
+            );
           }
           verboseLog(
             this.plugin,
-            `Pending alias flag cleared, the scheduled timer processes the latest text: ${newPath}`
+            `Pending first line property recheck flag cleared, the scheduled timer processes the latest text: ${newPath}`
           );
         } else if (findSourceEditorForFile(this.plugin.app, file)) {
           // Any editor counts, not just the active tab: keystrokes in a page preview or Canvas card set the flag too, and with no recheck the name would stop short of the first line until the next edit.
-          this.plugin.cacheManager?.clearPendingAliasRecheck(originalPath);
+          this.plugin.cacheManager?.clearPendingFirstLinePropertyRecheck(
+            originalPath
+          );
           if (newPath !== originalPath) {
-            this.plugin.cacheManager?.clearPendingAliasRecheck(newPath);
+            this.plugin.cacheManager?.clearPendingFirstLinePropertyRecheck(
+              newPath
+            );
           }
 
           // Delayed so the editor's own change handling settles before the recheck reads it.
@@ -568,7 +593,7 @@ export class RenameEngine {
           // No editor holds newer text to recheck against - the flag stays set and the next processFile on this file rechecks it
           verboseLog(
             this.plugin,
-            `Pending alias flag stays set, next processFile on this file rechecks it: ${newPath}`
+            `Pending first line property recheck flag stays set, next processFile on this file rechecks it: ${newPath}`
           );
         }
       }
@@ -741,8 +766,8 @@ export class RenameEngine {
         // File was always empty - retain current filename
         cacheManager?.setContent(file.path, content);
 
-        // Alias handling moved to processFile - called via updateAliasWithCoordination
-        // which will remove stale aliases when content is empty
+        // First line property handling moved to processFile - called via updateFirstLinePropertyWithCoordination
+        // which will remove stale first line property values when content is empty
 
         verboseLog(
           this.plugin,
@@ -1071,7 +1096,7 @@ export class RenameEngine {
         this.plugin,
         `No rename needed for ${file.path} - already has correct name`
       );
-      // Alias handling moved to processFile - single code path for all outcomes
+      // First line property handling moved to processFile - single code path for all outcomes
 
       if (showNotices && !isBatchOperation) {
         const finalFileName =
@@ -1140,7 +1165,7 @@ export class RenameEngine {
             this.plugin,
             `No rename needed for ${file.path} - already has correct name with counter`
           );
-          // Alias handling moved to processFile - single code path for all outcomes
+          // First line property handling moved to processFile - single code path for all outcomes
 
           if (showNotices && !isBatchOperation) {
             // Extract actual final filename from newPath (includes counter)
@@ -1250,7 +1275,7 @@ export class RenameEngine {
       this.updateTitleRegionCacheKey(oldPath, newPath);
       cacheManager?.notifyFileRenamed(oldPath, newPath);
 
-      // Alias handling moved to processFile - single code path for all outcomes
+      // First line property handling moved to processFile - single code path for all outcomes
 
       if (showNotices && !isBatchOperation) {
         // Extract actual final filename from newPath (includes counter if added)

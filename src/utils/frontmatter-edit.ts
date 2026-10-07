@@ -142,9 +142,9 @@ export function replaceEditorText(editor: Editor, newText: string): boolean {
   if (editor.cm) {
     editor.cm.dispatch({
       changes: { from, to, insert },
-      // Kept out of the undo history so the user's undo reverts their own typing, not the alias.
+      // Kept out of the undo history so the user's undo reverts their own typing, not the first line property value.
       annotations: Transaction.addToHistory.of(false),
-      // Unfiltered, as CodeMirror applies remote changes: Live Preview's properties filter drops a change to the properties when the cursor maps to before their old end, which a shrinking alias causes.
+      // Unfiltered, as CodeMirror applies remote changes: Live Preview's properties filter drops a change to the properties when the cursor maps to before their old end, which a shrinking first line property value causes.
       filter: false,
     });
   } else {

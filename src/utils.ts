@@ -60,7 +60,7 @@ export function isValidHeading(line: string): boolean {
 
 /**
  * Check if only frontmatter changed between two content versions.
- * Used to detect YAML-only edits and skip unnecessary alias updates.
+ * Used to detect YAML-only edits and skip unnecessary first line property updates.
  *
  * @param currentContent - Current file content
  * @param previousContent - Previous file content to compare against

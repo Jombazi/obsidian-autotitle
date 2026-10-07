@@ -185,27 +185,27 @@ describe('FileStateManager', () => {
     });
   });
 
-  describe('pending alias recheck', () => {
-    it('should mark and check pending alias recheck', () => {
-      expect(manager.hasPendingAliasRecheck('test.md')).toBe(false);
+  describe('pending first line property recheck', () => {
+    it('should mark and check pending first line property recheck', () => {
+      expect(manager.hasPendingFirstLinePropertyRecheck('test.md')).toBe(false);
 
-      manager.markPendingAliasRecheck('test.md');
-      expect(manager.hasPendingAliasRecheck('test.md')).toBe(true);
+      manager.markPendingFirstLinePropertyRecheck('test.md');
+      expect(manager.hasPendingFirstLinePropertyRecheck('test.md')).toBe(true);
     });
 
-    it('should clear pending alias recheck', () => {
-      manager.markPendingAliasRecheck('test.md');
-      manager.clearPendingAliasRecheck('test.md');
+    it('should clear pending first line property recheck', () => {
+      manager.markPendingFirstLinePropertyRecheck('test.md');
+      manager.clearPendingFirstLinePropertyRecheck('test.md');
 
-      expect(manager.hasPendingAliasRecheck('test.md')).toBe(false);
+      expect(manager.hasPendingFirstLinePropertyRecheck('test.md')).toBe(false);
     });
 
-    it('should get files with pending alias recheck', () => {
-      manager.markPendingAliasRecheck('test1.md');
-      manager.markPendingAliasRecheck('test2.md');
+    it('should get files with pending first line property recheck', () => {
+      manager.markPendingFirstLinePropertyRecheck('test1.md');
+      manager.markPendingFirstLinePropertyRecheck('test2.md');
       manager.setLastEditorContent('test3.md', 'no recheck');
 
-      const files = manager.getFilesWithPendingAliasRecheck();
+      const files = manager.getFilesWithPendingFirstLinePropertyRecheck();
       expect(files).toContain('test1.md');
       expect(files).toContain('test2.md');
       expect(files).not.toContain('test3.md');
@@ -303,8 +303,8 @@ describe('FileStateManager', () => {
     it('removes a state whose lock, recheck and syncing flags were all cleared', () => {
       manager.acquireLock('test.md');
       manager.releaseLock('test.md');
-      manager.markPendingAliasRecheck('test.md');
-      manager.clearPendingAliasRecheck('test.md');
+      manager.markPendingFirstLinePropertyRecheck('test.md');
+      manager.clearPendingFirstLinePropertyRecheck('test.md');
       manager.markEditorSyncing('test.md');
       manager.clearEditorSyncing('test.md');
 

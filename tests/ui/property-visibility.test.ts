@@ -1,7 +1,7 @@
 /**
  * Tests for PropertyVisibility
  *
- * Focus: a blank alias property name means there is no property to hide, so
+ * Focus: a blank first line property name means there is no property to hide, so
  * setup must install no observer and must leave no stale hiding behind.
  */
 
@@ -46,11 +46,11 @@ function renderPropertiesMarkup(): HTMLElement {
   return container;
 }
 
-function aliasPropertyEl(): HTMLElement {
+function firstLinePropertyEl(): HTMLElement {
   const el = document.querySelector<HTMLElement>(
     '[data-property-key="aliases"]'
   );
-  if (!el) throw new Error('alias property element missing');
+  if (!el) throw new Error('first line property element missing');
   return el;
 }
 
@@ -67,7 +67,7 @@ describe('PropertyVisibility', () => {
     document.body.replaceChildren();
   });
 
-  describe('blank alias property name', () => {
+  describe('blank first line property name', () => {
     it('should install no observer', () => {
       propertyVisibility = new PropertyVisibility(
         createMockPlugin({
@@ -90,9 +90,9 @@ describe('PropertyVisibility', () => {
 
       propertyVisibility.updatePropertyVisibility();
 
-      expect(aliasPropertyEl().classList.contains('flit-property-hidden')).toBe(
-        false
-      );
+      expect(
+        firstLinePropertyEl().classList.contains('flit-property-hidden')
+      ).toBe(false);
     });
 
     // Clearing the field while hiding is active goes through this same path, so
@@ -106,16 +106,16 @@ describe('PropertyVisibility', () => {
       propertyVisibility = new PropertyVisibility(plugin);
 
       propertyVisibility.updatePropertyVisibility();
-      expect(aliasPropertyEl().classList.contains('flit-property-hidden')).toBe(
-        true
-      );
+      expect(
+        firstLinePropertyEl().classList.contains('flit-property-hidden')
+      ).toBe(true);
 
       plugin.settings.firstLineProperty.propertyKey = '';
       propertyVisibility.updatePropertyVisibility();
 
-      expect(aliasPropertyEl().classList.contains('flit-property-hidden')).toBe(
-        false
-      );
+      expect(
+        firstLinePropertyEl().classList.contains('flit-property-hidden')
+      ).toBe(false);
       expect(propertyVisibility['propertyObserver']).toBeUndefined();
     });
   });
@@ -132,9 +132,9 @@ describe('PropertyVisibility', () => {
       propertyVisibility.updatePropertyVisibility();
 
       expect(propertyVisibility['propertyObserver']).toBeDefined();
-      expect(aliasPropertyEl().classList.contains('flit-property-hidden')).toBe(
-        true
-      );
+      expect(
+        firstLinePropertyEl().classList.contains('flit-property-hidden')
+      ).toBe(true);
     });
 
     it('should leave other properties alone', () => {

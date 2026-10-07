@@ -11,7 +11,7 @@ const PROPERTIES_ONLY_EDIT =
   '---\naliases: [Hand typed, Second hand typed]\n---\nNote title\nBody';
 const BODY_EDIT = '---\naliases: [Hand typed]\n---\nNote title\nBody edited';
 
-/** Event registrars every handler needs, a real file state manager for the baselines, and the alias entry point the save handlers call. */
+/** Event registrars every handler needs, a real file state manager for the baselines, and the first line property entry point the save handlers call. */
 function createMockPlugin() {
   const plugin = {
     app: {
@@ -51,7 +51,9 @@ function createMockPlugin() {
     },
     cacheManager: { isLocked: vi.fn(() => false) },
     fileStateManager: new FileStateManager({} as any),
-    aliasManager: { updateAliasIfNeeded: vi.fn().mockResolvedValue(true) },
+    firstLinePropertyManager: {
+      updateFirstLinePropertyIfNeeded: vi.fn().mockResolvedValue(true),
+    },
     pendingMetadataUpdates: new Set<TFile>(),
     isFullyLoaded: true,
     renameEngine: { processFile: vi.fn() },
@@ -89,7 +91,7 @@ async function flushPromises(): Promise<void> {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
-describe('alias update on a properties-only save', () => {
+describe('first line property update on a properties-only save', () => {
   let plugin: MockPlugin;
   let note: TFile;
   let modify: Callback;
@@ -138,49 +140,57 @@ describe('alias update on a properties-only save', () => {
       ]);
     });
 
-    it('skips the alias when only the properties changed since the baseline', async () => {
+    it('skips the first line property when only the properties changed since the baseline', async () => {
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
       plugin.app.vault.read.mockResolvedValue(PROPERTIES_ONLY_EDIT);
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).not.toHaveBeenCalled();
       expect(plugin.fileStateManager.getLastSavedContent(note.path)).toBe(
         PROPERTIES_ONLY_EDIT
       );
     });
 
-    it('skips the alias even when the baseline is six minutes old', async () => {
+    it('skips the first line property even when the baseline is six minutes old', async () => {
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
       vi.advanceTimersByTime(SIX_MINUTES_MS);
       plugin.app.vault.read.mockResolvedValue(PROPERTIES_ONLY_EDIT);
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).not.toHaveBeenCalled();
     });
 
-    it('updates the alias when the body changed', async () => {
+    it('updates the first line property when the body changed', async () => {
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
       plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).toHaveBeenCalledTimes(1);
       expect(plugin.fileStateManager.getLastSavedContent(note.path)).toBe(
         BODY_EDIT
       );
     });
 
-    it('updates the alias when there is no baseline', async () => {
+    it('updates the first line property when there is no baseline', async () => {
       plugin.app.vault.read.mockResolvedValue(PROPERTIES_ONLY_EDIT);
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).toHaveBeenCalledTimes(1);
     });
 
-    it('leaves the alias to the rename path while the editor holds unsaved typing', async () => {
+    it('leaves the first line property to the rename path while the editor holds unsaved typing', async () => {
       const view = createSourceView(note, BODY_EDIT, true);
       plugin.app.workspace.getLeavesOfType.mockReturnValue([{ view }]);
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
@@ -188,14 +198,16 @@ describe('alias update on a properties-only save', () => {
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).not.toHaveBeenCalled();
       expect(plugin.fileStateManager.getLastSavedContent(note.path)).toBe(
         BODY_EDIT
       );
     });
 
     // A tab, card or preview saves 2 s after its first unsaved keystroke, while a linked note's rename can still be waiting.
-    it('leaves the alias to the rename path while a rename is scheduled', async () => {
+    it('leaves the first line property to the rename path while a rename is scheduled', async () => {
       const view = createSourceView(note, BODY_EDIT, false);
       plugin.app.workspace.getLeavesOfType.mockReturnValue([{ view }]);
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
@@ -204,7 +216,9 @@ describe('alias update on a properties-only save', () => {
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).not.toHaveBeenCalled();
       expect(plugin.fileStateManager.getLastSavedContent(note.path)).toBe(
         BODY_EDIT
       );
@@ -217,7 +231,9 @@ describe('alias update on a properties-only save', () => {
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledWith(
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).toHaveBeenCalledWith(
         note,
         BODY_EDIT,
         undefined,
@@ -232,12 +248,9 @@ describe('alias update on a properties-only save', () => {
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledWith(
-        note,
-        BODY_EDIT,
-        undefined,
-        null
-      );
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).toHaveBeenCalledWith(note, BODY_EDIT, undefined, null);
     });
   });
 
@@ -255,43 +268,51 @@ describe('alias update on a properties-only save', () => {
       plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
     });
 
-    it('leaves the alias alone and drops the baseline when the note was never edited', async () => {
+    it('leaves the first line property alone and drops the baseline when the note was never edited', async () => {
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).not.toHaveBeenCalled();
       expect(
         plugin.fileStateManager.getLastSavedContent(note.path)
       ).toBeUndefined();
     });
 
-    it('updates the alias when the note is open in an editor', async () => {
+    it('updates the first line property when the note is open in an editor', async () => {
       plugin.app.workspace.getLeavesOfType.mockReturnValue([
         { view: { file: note } },
       ]);
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).toHaveBeenCalledTimes(1);
     });
 
-    it('updates the alias when the note was edited 1 s earlier', async () => {
+    it('updates the first line property when the note was edited 1 s earlier', async () => {
       await editNoteInEditor();
       vi.advanceTimersByTime(1000);
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).toHaveBeenCalledTimes(1);
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).toHaveBeenCalledTimes(1);
     });
 
-    it('leaves the alias alone and drops the baseline when the note was edited 6 s earlier', async () => {
+    it('leaves the first line property alone and drops the baseline when the note was edited 6 s earlier', async () => {
       await editNoteInEditor();
       vi.advanceTimersByTime(6000);
 
       await handler()(note);
 
-      expect(plugin.aliasManager.updateAliasIfNeeded).not.toHaveBeenCalled();
+      expect(
+        plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
+      ).not.toHaveBeenCalled();
       expect(
         plugin.fileStateManager.getLastSavedContent(note.path)
       ).toBeUndefined();

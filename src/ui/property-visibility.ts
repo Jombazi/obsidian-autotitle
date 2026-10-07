@@ -15,7 +15,7 @@ export class PropertyVisibility {
    * Parse comma-separated property keys from settings
    * @returns Array of property keys, empty when the setting is blank
    */
-  private getAliasPropertyKeys(): string[] {
+  private getFirstLinePropertyKeys(): string[] {
     return parseFirstLinePropertyKeys(
       this.settings.firstLineProperty.propertyKey
     );
@@ -227,9 +227,9 @@ export class PropertyVisibility {
       return; // No hiding needed
     }
 
-    const propertyKeys = this.getAliasPropertyKeys();
+    const propertyKeys = this.getFirstLinePropertyKeys();
 
-    // A blank alias property name leaves nothing to hide. The
+    // A blank first line property name leaves nothing to hide. The
     // `cleanupPropertyObserver()` above has already un-hidden whatever a
     // previous key hid, so this only avoids installing a document-wide
     // observer that could never match a property.

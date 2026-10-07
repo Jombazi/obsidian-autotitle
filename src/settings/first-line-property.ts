@@ -141,7 +141,7 @@ export function buildFirstLinePropertyPage(
             .onChange(async (value) => {
               // Stored as typed, empty included, so the field keeps what the
               // user put in it. An empty key is a valid choice meaning "no
-              // first line property": both `alias-manager.ts` and
+              // first line property": both `first-line-property-manager.ts` and
               // `property-visibility.ts` no-op entirely on it.
               plugin.settings.firstLineProperty.propertyKey = value.trim();
               syncRestoreState();

@@ -15,7 +15,7 @@ import { RenameEngine } from './src/core/rename-engine';
 import { ContextMenuManager } from './src/ui/context-menus';
 import { FolderOperations } from './src/operations/folder-operations';
 import { TagOperations } from './src/operations/tag-operations';
-import { AliasManager } from './src/core/alias-manager';
+import { FirstLinePropertyManager } from './src/core/first-line-property-manager';
 import { FileOperations } from './src/operations/file-operations';
 import { PropertyVisibility } from './src/ui/property-visibility';
 import { setDisableRenamingProperty } from './src/utils/property-value';
@@ -60,7 +60,7 @@ export default class FirstLineIsTitle extends Plugin {
   renameEngine: RenameEngine;
   contextMenuManager: ContextMenuManager;
   notebookNavigatorIntegration: NotebookNavigatorIntegration;
-  aliasManager: AliasManager;
+  firstLinePropertyManager: FirstLinePropertyManager;
   fileOperations: FileOperations;
   commandRegistrar: CommandRegistrar;
   editorLifecycle: EditorLifecycleManager;
@@ -133,7 +133,7 @@ export default class FirstLineIsTitle extends Plugin {
     return this._linkManager;
   }
 
-  // Track files with pending metadata cache updates (for alias manager sync)
+  // Track files with pending metadata cache updates (for first line property manager sync)
   pendingMetadataUpdates: Set<TFile> = new Set();
 
   isTagWranglerEnabled(): boolean {
@@ -480,8 +480,8 @@ export default class FirstLineIsTitle extends Plugin {
     // Initialize the rename engine
     this.renameEngine = new RenameEngine(this);
 
-    // Initialize the alias manager
-    this.aliasManager = new AliasManager(this);
+    // Initialize the first line property manager
+    this.firstLinePropertyManager = new FirstLinePropertyManager(this);
 
     this.contextMenuManager = new ContextMenuManager(this);
     this.notebookNavigatorIntegration = new NotebookNavigatorIntegration(this);

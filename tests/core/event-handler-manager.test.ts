@@ -6,7 +6,7 @@ import { Menu, TFile, TFolder } from '../mockObsidian';
 import { captureMenuItems, createTestSettings } from '../testUtils';
 
 // Minimal mock plugin for EventHandlerManager
-// Only includes what's needed for testing the pendingAliasUpdates coordination
+// Only includes what's needed for testing the pendingFirstLinePropertyUpdates coordination
 function createMockPlugin() {
   return {
     app: {
@@ -172,52 +172,52 @@ describe('EventHandlerManager', () => {
     manager = new EventHandlerManager(plugin);
   });
 
-  describe('pendingAliasUpdates coordination', () => {
+  describe('pendingFirstLinePropertyUpdates coordination', () => {
     it('should initially have no pending updates', () => {
-      expect(manager.isAliasUpdatePending('test.md')).toBe(false);
+      expect(manager.isFirstLinePropertyUpdatePending('test.md')).toBe(false);
     });
 
-    it('should mark alias update as pending', () => {
-      manager.markAliasUpdatePending('test.md');
-      expect(manager.isAliasUpdatePending('test.md')).toBe(true);
+    it('should mark first line property update as pending', () => {
+      manager.markFirstLinePropertyUpdatePending('test.md');
+      expect(manager.isFirstLinePropertyUpdatePending('test.md')).toBe(true);
     });
 
-    it('should clear pending alias update', () => {
-      manager.markAliasUpdatePending('test.md');
-      manager.clearAliasUpdatePending('test.md');
-      expect(manager.isAliasUpdatePending('test.md')).toBe(false);
+    it('should clear pending first line property update', () => {
+      manager.markFirstLinePropertyUpdatePending('test.md');
+      manager.clearFirstLinePropertyUpdatePending('test.md');
+      expect(manager.isFirstLinePropertyUpdatePending('test.md')).toBe(false);
     });
 
     it('should handle multiple files independently', () => {
-      manager.markAliasUpdatePending('file1.md');
-      manager.markAliasUpdatePending('file2.md');
+      manager.markFirstLinePropertyUpdatePending('file1.md');
+      manager.markFirstLinePropertyUpdatePending('file2.md');
 
-      expect(manager.isAliasUpdatePending('file1.md')).toBe(true);
-      expect(manager.isAliasUpdatePending('file2.md')).toBe(true);
-      expect(manager.isAliasUpdatePending('file3.md')).toBe(false);
+      expect(manager.isFirstLinePropertyUpdatePending('file1.md')).toBe(true);
+      expect(manager.isFirstLinePropertyUpdatePending('file2.md')).toBe(true);
+      expect(manager.isFirstLinePropertyUpdatePending('file3.md')).toBe(false);
 
-      manager.clearAliasUpdatePending('file1.md');
-      expect(manager.isAliasUpdatePending('file1.md')).toBe(false);
-      expect(manager.isAliasUpdatePending('file2.md')).toBe(true);
+      manager.clearFirstLinePropertyUpdatePending('file1.md');
+      expect(manager.isFirstLinePropertyUpdatePending('file1.md')).toBe(false);
+      expect(manager.isFirstLinePropertyUpdatePending('file2.md')).toBe(true);
     });
 
     it('should handle clear on non-existent path', () => {
       expect(() =>
-        manager.clearAliasUpdatePending('nonexistent.md')
+        manager.clearFirstLinePropertyUpdatePending('nonexistent.md')
       ).not.toThrow();
     });
 
     it('should handle double mark', () => {
-      manager.markAliasUpdatePending('test.md');
-      manager.markAliasUpdatePending('test.md');
-      expect(manager.isAliasUpdatePending('test.md')).toBe(true);
+      manager.markFirstLinePropertyUpdatePending('test.md');
+      manager.markFirstLinePropertyUpdatePending('test.md');
+      expect(manager.isFirstLinePropertyUpdatePending('test.md')).toBe(true);
     });
 
     it('should handle double clear', () => {
-      manager.markAliasUpdatePending('test.md');
-      manager.clearAliasUpdatePending('test.md');
-      manager.clearAliasUpdatePending('test.md');
-      expect(manager.isAliasUpdatePending('test.md')).toBe(false);
+      manager.markFirstLinePropertyUpdatePending('test.md');
+      manager.clearFirstLinePropertyUpdatePending('test.md');
+      manager.clearFirstLinePropertyUpdatePending('test.md');
+      expect(manager.isFirstLinePropertyUpdatePending('test.md')).toBe(false);
     });
   });
 
@@ -262,10 +262,9 @@ describe('EventHandlerManager', () => {
         setLastSavedContent: vi.fn(),
         getLastSavedContent: vi.fn(),
         isSavedContentStale: vi.fn(),
-        setLastAliasUpdateStatus: vi.fn(),
       };
-      plugin.aliasManager = {
-        updateAliasIfNeeded: vi.fn(),
+      plugin.firstLinePropertyManager = {
+        updateFirstLinePropertyIfNeeded: vi.fn(),
       };
       plugin.cacheManager = {
         isLocked: vi.fn(),

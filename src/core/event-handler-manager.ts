@@ -39,8 +39,8 @@ interface WorkspaceWithSearchEvents {
  */
 export class EventHandlerManager {
   private plugin: FirstLineIsTitlePlugin;
-  /** Tracks files with alias updates in progress to prevent concurrent updates */
-  private pendingAliasUpdates: Set<string> = new Set();
+  /** Tracks files with first line property updates in progress to prevent concurrent updates */
+  private pendingFirstLinePropertyUpdates: Set<string> = new Set();
   /** Notes last seen blocking renaming, keyed by `TFile` because the object survives renames */
   private notesBlockingRename = new WeakSet<TFile>();
   /** Notes shown in a Markdown leaf since load, keyed by `TFile` because the object survives renames */
@@ -67,12 +67,12 @@ export class EventHandlerManager {
   }
 
   /**
-   * Choose where a background alias update goes, from the file text the handler just read.
-   * @param file - Note whose alias may change
+   * Choose where a background first line property update goes, from the file text the handler just read.
+   * @param file - Note whose first line property may change
    * @param fileContent - Text the handler read from the file
-   * @returns `'user-typing'` to skip the update, since the rename path owns alias updates while the user has unsaved typing or a scheduled rename; the editor to write into; or null to write the file
+   * @returns `'user-typing'` to skip the update, since the rename path owns first line property updates while the user has unsaved typing or a scheduled rename; the editor to write into; or null to write the file
    */
-  private findBackgroundAliasTarget(
+  private findBackgroundFirstLinePropertyTarget(
     file: TFile,
     fileContent: string
   ): SourceEditorTarget | 'user-typing' | null {
@@ -89,27 +89,27 @@ export class EventHandlerManager {
   }
 
   /**
-   * Check if alias update is in progress for a file.
+   * Check if a first line property update is in progress for a file.
    * Used by rename-engine to coordinate with event handlers.
    */
-  isAliasUpdatePending(path: string): boolean {
-    return this.pendingAliasUpdates.has(path);
+  isFirstLinePropertyUpdatePending(path: string): boolean {
+    return this.pendingFirstLinePropertyUpdates.has(path);
   }
 
   /**
-   * Mark alias update as in progress for a file.
+   * Mark a first line property update as in progress for a file.
    * Used by rename-engine to coordinate with event handlers.
    */
-  markAliasUpdatePending(path: string): void {
-    this.pendingAliasUpdates.add(path);
+  markFirstLinePropertyUpdatePending(path: string): void {
+    this.pendingFirstLinePropertyUpdates.add(path);
   }
 
   /**
-   * Clear alias update in progress flag for a file.
+   * Clear the first line property update in progress flag for a file.
    * Used by rename-engine to coordinate with event handlers.
    */
-  clearAliasUpdatePending(path: string): void {
-    this.pendingAliasUpdates.delete(path);
+  clearFirstLinePropertyUpdatePending(path: string): void {
+    this.pendingFirstLinePropertyUpdates.delete(path);
   }
 
   /**
@@ -124,7 +124,7 @@ export class EventHandlerManager {
     this.registerTagSearchMenuHandler();
     this.registerSearchResultsMenuHandler();
     this.registerEditorChangeHandler();
-    // `processFile` takes the file lock before its first `await`, so the alias `changed` handler registered after it sees the lock and leaves the alias to the rename path.
+    // `processFile` takes the file lock before its first `await`, so the first line property `changed` handler registered after it sees the lock and leaves the first line property to the rename path.
     this.registerDisablePropertyTransitionHandler();
     this.registerFileSystemHandlers();
   }
@@ -500,7 +500,7 @@ export class EventHandlerManager {
     }
   }
 
-  /** Seeds the baseline the alias handlers compare a save against, so a properties-only save of an open note never writes an alias. */
+  /** Seeds the baseline the first line property handlers compare a save against, so a properties-only save of an open note never writes a first line property value. */
   private rememberSavedContentBaseline(file: TFile): void {
     const { fileStateManager } = this.plugin;
     const existingBaseline = fileStateManager.getLastSavedContent(file.path);
@@ -509,7 +509,7 @@ export class EventHandlerManager {
       fileStateManager.setLastSavedContent(file.path, existingBaseline);
       return;
     }
-    // An edit fires before its save, so disk still holds the content the alias handlers compare that save against.
+    // An edit fires before its save, so disk still holds the content the first line property handlers compare that save against.
     void this.plugin.app.vault.cachedRead(file).then(
       (content) => {
         if (fileStateManager.getLastSavedContent(file.path) === undefined) {
@@ -589,8 +589,8 @@ export class EventHandlerManager {
             this.plugin.cacheManager.notifyFileRenamed(oldPath, file.path);
           }
 
-          // Clean up pendingAliasUpdates for old path (state moved to new path)
-          this.pendingAliasUpdates.delete(oldPath);
+          // Clean up pendingFirstLinePropertyUpdates for old path (state moved to new path)
+          this.pendingFirstLinePropertyUpdates.delete(oldPath);
 
           verboseLog(
             this.plugin,
@@ -607,8 +607,8 @@ export class EventHandlerManager {
           this.plugin.cacheManager?.notifyFileDeleted(file.path);
           this.plugin.editorLifecycle.clearCreationDelayTimer(file.path);
           this.plugin.fileStateManager?.notifyFileDeleted(file.path);
-          // Clean up pendingAliasUpdates to prevent memory leak and blocking
-          this.pendingAliasUpdates.delete(file.path);
+          // Clean up pendingFirstLinePropertyUpdates to prevent memory leak and blocking
+          this.pendingFirstLinePropertyUpdates.delete(file.path);
         }
       })
     );
@@ -656,8 +656,8 @@ export class EventHandlerManager {
           }
         }
 
-        // Update aliases if a property name is set (respects manual/automatic mode)
-        // Note: Alias updates happen on save events only (not every keystroke) to reduce
+        // Update the first line property if a property name is set (respects manual/automatic mode)
+        // Note: First line property updates happen on save events only (not every keystroke) to reduce
         // "modified externally" notifications from processFrontMatter writes.
         if (
           hasFirstLinePropertyName(this.plugin.settings) &&
@@ -673,12 +673,12 @@ export class EventHandlerManager {
             return;
           }
 
-          // Skip if alias update already in progress for this file
-          if (this.pendingAliasUpdates.has(file.path)) {
+          // Skip if first line property update already in progress for this file
+          if (this.pendingFirstLinePropertyUpdates.has(file.path)) {
             return;
           }
 
-          // Background alias updates follow only notes being edited: a closed note changed by sync, another plugin or a script is left alone, its saved-content baseline is dropped so the next open reseeds it from disk, and manual commands write their own aliases.
+          // Background first line property updates follow only notes being edited: a closed note changed by sync, another plugin or a script is left alone, its saved-content baseline is dropped so the next open reseeds it from disk, and manual commands write their own first line property values.
           if (!this.isEditingNote(file)) {
             this.plugin.fileStateManager.deleteLastSavedContent(file.path);
             return;
@@ -686,14 +686,14 @@ export class EventHandlerManager {
 
           // Mark as in-progress BEFORE any async operation to prevent race
           // between modify and metadata-changed handlers
-          this.pendingAliasUpdates.add(file.path);
+          this.pendingFirstLinePropertyUpdates.add(file.path);
           try {
             let currentContent: string;
             try {
               currentContent = await this.plugin.app.vault.read(file);
             } catch {
               // File was deleted or inaccessible - clean up and return
-              this.pendingAliasUpdates.delete(file.path);
+              this.pendingFirstLinePropertyUpdates.delete(file.path);
               return;
             }
 
@@ -707,7 +707,7 @@ export class EventHandlerManager {
             ) {
               verboseLog(
                 this.plugin,
-                `Skipping modify-alias update - only frontmatter edited: ${file.path}`
+                `Skipping first line property update (modify) - only frontmatter edited: ${file.path}`
               );
               // Still update lastSavedContent even when skipping
               this.plugin.fileStateManager.setLastSavedContent(
@@ -717,11 +717,14 @@ export class EventHandlerManager {
               return;
             }
 
-            const target = this.findBackgroundAliasTarget(file, currentContent);
+            const target = this.findBackgroundFirstLinePropertyTarget(
+              file,
+              currentContent
+            );
             if (target === 'user-typing') {
               verboseLog(
                 this.plugin,
-                `Skipping modify-alias update - unsaved typing or a scheduled rename: ${file.path}`
+                `Skipping first line property update (modify) - unsaved typing or a scheduled rename: ${file.path}`
               );
               // Still update lastSavedContent even when skipping
               this.plugin.fileStateManager.setLastSavedContent(
@@ -733,10 +736,10 @@ export class EventHandlerManager {
 
             verboseLog(
               this.plugin,
-              `// EDITOR_PASS (modify): Passing target=${target ? 'editor' : 'file'} to updateAliasIfNeeded`
+              `// EDITOR_PASS (modify): Passing target=${target ? 'editor' : 'file'} to updateFirstLinePropertyIfNeeded`
             );
 
-            await this.plugin.aliasManager.updateAliasIfNeeded(
+            await this.plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded(
               file,
               currentContent,
               undefined,
@@ -749,7 +752,7 @@ export class EventHandlerManager {
               currentContent
             );
           } finally {
-            this.pendingAliasUpdates.delete(file.path);
+            this.pendingFirstLinePropertyUpdates.delete(file.path);
           }
         }
       })
@@ -769,7 +772,7 @@ export class EventHandlerManager {
         if (this.plugin.editorLifecycle.isFileInCreationDelay(file.path)) {
           if (this.plugin.settings.core.debug) {
             console.debug(
-              `Skipping metadata-alias: file in creation delay: ${file.path}`
+              `Skipping first line property update (metadata): file in creation delay: ${file.path}`
             );
           }
           return;
@@ -783,15 +786,15 @@ export class EventHandlerManager {
             this.plugin,
             `// PENDING_META_CLEAR: Clearing ${file.path} from pendingMetadataUpdates (set size: ${this.plugin.pendingMetadataUpdates.size})`
           );
-          // Don't return - continue to check if alias update is needed
+          // Don't return - continue to check if first line property update is needed
         }
 
-        // Skip if alias update already in progress for this file
-        if (this.pendingAliasUpdates.has(file.path)) {
+        // Skip if first line property update already in progress for this file
+        if (this.pendingFirstLinePropertyUpdates.has(file.path)) {
           return;
         }
 
-        // Background alias updates follow only notes being edited: a closed note changed by sync, another plugin or a script is left alone, its saved-content baseline is dropped so the next open reseeds it from disk, and manual commands write their own aliases.
+        // Background first line property updates follow only notes being edited: a closed note changed by sync, another plugin or a script is left alone, its saved-content baseline is dropped so the next open reseeds it from disk, and manual commands write their own first line property values.
         if (!this.isEditingNote(file)) {
           this.plugin.fileStateManager.deleteLastSavedContent(file.path);
           return;
@@ -799,15 +802,15 @@ export class EventHandlerManager {
 
         // Mark as in-progress BEFORE any async operation to prevent race
         // between modify and metadata-changed handlers
-        this.pendingAliasUpdates.add(file.path);
+        this.pendingFirstLinePropertyUpdates.add(file.path);
         try {
-          // Check if only frontmatter changed - skip alias update to preserve YAML formatting
+          // Check if only frontmatter changed - skip first line property update to preserve YAML formatting
           let currentContent: string;
           try {
             currentContent = await this.plugin.app.vault.read(file);
           } catch {
             // File was deleted or inaccessible - clean up and return
-            this.pendingAliasUpdates.delete(file.path);
+            this.pendingFirstLinePropertyUpdates.delete(file.path);
             return;
           }
 
@@ -821,7 +824,7 @@ export class EventHandlerManager {
           ) {
             if (this.plugin.settings.core.debug) {
               console.debug(
-                `Skipping metadata-alias update - only frontmatter edited: ${file.path}`
+                `Skipping first line property update (metadata) - only frontmatter edited: ${file.path}`
               );
             }
             // Still update lastSavedContent even when skipping
@@ -831,13 +834,16 @@ export class EventHandlerManager {
             );
             return;
           }
-          // No previousContent means no baseline: a note open or just edited but not yet seeded, or purged, so a YAML-only edit cannot be told apart and the alias update proceeds
+          // No previousContent means no baseline: a note open or just edited but not yet seeded, or purged, so a YAML-only edit cannot be told apart and the first line property update proceeds
 
-          const target = this.findBackgroundAliasTarget(file, currentContent);
+          const target = this.findBackgroundFirstLinePropertyTarget(
+            file,
+            currentContent
+          );
           if (target === 'user-typing') {
             verboseLog(
               this.plugin,
-              `Skipping metadata-alias update - unsaved typing or a scheduled rename: ${file.path}`
+              `Skipping first line property update (metadata) - unsaved typing or a scheduled rename: ${file.path}`
             );
             // Still update lastSavedContent even when skipping
             this.plugin.fileStateManager.setLastSavedContent(
@@ -849,10 +855,10 @@ export class EventHandlerManager {
 
           verboseLog(
             this.plugin,
-            `// EDITOR_PASS (metadata): Passing target=${target ? 'editor' : 'file'} to updateAliasIfNeeded`
+            `// EDITOR_PASS (metadata): Passing target=${target ? 'editor' : 'file'} to updateFirstLinePropertyIfNeeded`
           );
 
-          await this.plugin.aliasManager.updateAliasIfNeeded(
+          await this.plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded(
             file,
             currentContent,
             undefined,
@@ -865,7 +871,7 @@ export class EventHandlerManager {
             currentContent
           );
         } finally {
-          this.pendingAliasUpdates.delete(file.path);
+          this.pendingFirstLinePropertyUpdates.delete(file.path);
         }
       })
     );

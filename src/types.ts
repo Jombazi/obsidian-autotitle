@@ -38,7 +38,7 @@ export type RenameOutcomeReason =
   | 'self-referential'
   | 'time-rate-limited';
 
-// `reason` is required, not optional: the alias gate in `processFile` matches on it, and the
+// `reason` is required, not optional: the first line property gate in `processFile` matches on it, and the
 // successful-rename path used to omit it, so the gate silently skipped the one outcome that
 // renames a file. Requiring it makes any future drift a compile error.
 export interface RenameOutcome {

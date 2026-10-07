@@ -35,7 +35,7 @@ export interface FileState {
   operationData?: OperationData;
   isLocked?: boolean;
   lockTimestamp?: number; // When lock was acquired (for stale lock cleanup)
-  pendingAliasRecheck?: boolean;
+  pendingFirstLinePropertyRecheck?: boolean;
   isSyncingEditors?: boolean; // True when syncing background editors to prevent spurious rechecks
 
   // Rename tracking - prevents processing stale content after rename
@@ -362,37 +362,37 @@ export class FileStateManager {
   }
 
   /**
-   * Mark file for pending alias recheck
+   * Mark file for pending first line property recheck
    */
-  markPendingAliasRecheck(path: string): void {
+  markPendingFirstLinePropertyRecheck(path: string): void {
     const state = this.getOrCreateState(path);
-    state.pendingAliasRecheck = true;
+    state.pendingFirstLinePropertyRecheck = true;
   }
 
   /**
-   * Check if file has pending alias recheck
+   * Check if file has pending first line property recheck
    */
-  hasPendingAliasRecheck(path: string): boolean {
-    return this.fileStates.get(path)?.pendingAliasRecheck ?? false;
+  hasPendingFirstLinePropertyRecheck(path: string): boolean {
+    return this.fileStates.get(path)?.pendingFirstLinePropertyRecheck ?? false;
   }
 
   /**
-   * Clear pending alias recheck
+   * Clear pending first line property recheck
    */
-  clearPendingAliasRecheck(path: string): void {
+  clearPendingFirstLinePropertyRecheck(path: string): void {
     const state = this.fileStates.get(path);
     if (state) {
-      delete state.pendingAliasRecheck;
+      delete state.pendingFirstLinePropertyRecheck;
     }
   }
 
   /**
-   * Get all file paths with pending alias recheck
+   * Get all file paths with pending first line property recheck
    */
-  getFilesWithPendingAliasRecheck(): string[] {
+  getFilesWithPendingFirstLinePropertyRecheck(): string[] {
     const files: string[] = [];
     for (const [path, state] of this.fileStates.entries()) {
-      if (state.pendingAliasRecheck) {
+      if (state.pendingFirstLinePropertyRecheck) {
         files.push(path);
       }
     }

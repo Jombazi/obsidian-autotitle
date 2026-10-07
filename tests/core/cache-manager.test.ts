@@ -16,9 +16,9 @@ function createMockPlugin() {
     releaseLock: vi.fn(),
     isLocked: vi.fn().mockReturnValue(false),
     clearAllLocks: vi.fn(),
-    markPendingAliasRecheck: vi.fn(),
-    hasPendingAliasRecheck: vi.fn().mockReturnValue(false),
-    clearPendingAliasRecheck: vi.fn(),
+    markPendingFirstLinePropertyRecheck: vi.fn(),
+    hasPendingFirstLinePropertyRecheck: vi.fn().mockReturnValue(false),
+    clearPendingFirstLinePropertyRecheck: vi.fn(),
   };
 
   return {
@@ -309,34 +309,34 @@ describe('CacheManager', () => {
     });
   });
 
-  describe('Alias Recheck Flags', () => {
-    it('should delegate mark pending alias recheck', () => {
+  describe('First Line Property Recheck Flags', () => {
+    it('should delegate mark pending first line property recheck', () => {
       const filePath = 'test.md';
 
-      cacheManager.markPendingAliasRecheck(filePath);
+      cacheManager.markPendingFirstLinePropertyRecheck(filePath);
 
       expect(
-        mockPlugin.fileStateManager.markPendingAliasRecheck
+        mockPlugin.fileStateManager.markPendingFirstLinePropertyRecheck
       ).toHaveBeenCalledWith(filePath);
     });
 
-    it('should delegate has pending alias recheck check', () => {
+    it('should delegate has pending first line property recheck check', () => {
       const filePath = 'test.md';
 
-      cacheManager.hasPendingAliasRecheck(filePath);
+      cacheManager.hasPendingFirstLinePropertyRecheck(filePath);
 
       expect(
-        mockPlugin.fileStateManager.hasPendingAliasRecheck
+        mockPlugin.fileStateManager.hasPendingFirstLinePropertyRecheck
       ).toHaveBeenCalledWith(filePath);
     });
 
-    it('should delegate clear pending alias recheck', () => {
+    it('should delegate clear pending first line property recheck', () => {
       const filePath = 'test.md';
 
-      cacheManager.clearPendingAliasRecheck(filePath);
+      cacheManager.clearPendingFirstLinePropertyRecheck(filePath);
 
       expect(
-        mockPlugin.fileStateManager.clearPendingAliasRecheck
+        mockPlugin.fileStateManager.clearPendingFirstLinePropertyRecheck
       ).toHaveBeenCalledWith(filePath);
     });
   });

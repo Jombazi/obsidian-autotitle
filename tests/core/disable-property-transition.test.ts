@@ -83,7 +83,7 @@ function setUp() {
     plugin.app.workspace.on,
     'editor-change'
   );
-  // The first `changed` registration is the transition handler; the alias handler comes after it.
+  // The first `changed` registration is the transition handler; the first line property handler comes after it.
   const transition = registeredCallback(plugin.app.metadataCache.on, 'changed');
 
   return {
