@@ -14,6 +14,9 @@ import {
   buildDescRow,
   buildSummaryRow,
   appendEmphasis,
+  LIST_NOTE_CLASS,
+  quoteLabel,
+  withListNote,
 } from './settings-base';
 import { EXCLUSION_STRATEGY, ExcludedProperty } from '../types';
 import { TagSuggest } from '../suggests';
@@ -39,16 +42,13 @@ function buildPageIntro(): DocumentFragment {
   });
 }
 
-function buildFilesIntro(): DocumentFragment {
-  return createFragment((frag) => {
-    frag.appendText(t('settings.exclusions.files.renamedWarning'));
-  });
+/** Notes drawn above the first entry of each list, as on the replacement pages; see `withListNote`. */
+function buildFilesListNote(): string {
+  return t('settings.exclusions.files.renamedWarning');
 }
 
-function buildTagsIntro(): DocumentFragment {
-  return createFragment((frag) => {
-    frag.appendText(t('settings.exclusions.tags.tagWranglerWarning'));
-  });
+function buildTagsListNote(): string {
+  return t('settings.exclusions.tags.tagWranglerWarning');
 }
 
 /** Second line of the "Exclusion mode" desc, not the group intro — the note only applies to that setting's "Exclude all except..." option. */
@@ -68,27 +68,15 @@ function buildTagsExclusionModeDesc(): DocumentFragment {
   });
 }
 
-/**
- * The "renamed elsewhere" warning sorts first; case-sensitivity sorts last,
- * after the other behavioural notes.
- */
-function buildPropertiesIntro(): DocumentFragment {
-  return createFragment((frag) => {
-    appendLines(frag, [
-      (target) =>
-        target.appendText(t('settings.exclusions.properties.renamedWarning')),
-      (target) => {
-        target.appendText(t('settings.exclusions.properties.leaveBlank.part1'));
-        appendEmphasis(
-          target,
-          'settings.exclusions.properties.leaveBlank.value'
-        );
-        target.appendText(t('settings.exclusions.properties.leaveBlank.part2'));
-      },
-      (target) =>
-        target.appendText(t('settings.exclusions.properties.caseInsensitive')),
-    ]);
-  });
+/** The "renamed elsewhere" warning sorts first; case-sensitivity sorts last, after the other behavioral notes. */
+function buildPropertiesListNote(): string {
+  return [
+    t('settings.exclusions.properties.renamedWarning'),
+    t('settings.exclusions.properties.leaveBlank.part1') +
+      quoteLabel(t('settings.exclusions.properties.leaveBlank.value')) +
+      t('settings.exclusions.properties.leaveBlank.part2'),
+    t('settings.exclusions.properties.caseInsensitive'),
+  ].join('\n');
 }
 
 /** Second line of the "Exclusion mode" desc, not the group intro — the note only applies to that setting's "Exclude all except..." option. */
@@ -504,15 +492,17 @@ function buildAddItem(
 function buildStringExclusionList(
   options: StringExclusionListOptions,
   addButtonText: string,
-  emptyState: string
+  emptyState: string,
+  note: string
 ): SettingDefinitionList {
   const { plugin, tab, getItems } = options;
 
   return {
     type: 'list',
+    cls: LIST_NOTE_CLASS,
     emptyState,
     items: getItems().map((_, index) =>
-      buildStringExclusionRow(options, index)
+      withListNote(buildStringExclusionRow(options, index), note)
     ),
     addItem: buildAddItem(
       addButtonText,
@@ -582,9 +572,13 @@ function buildExcludedFilesList(
 
   return {
     type: 'list',
+    cls: LIST_NOTE_CLASS,
     emptyState: t('settings.exclusions.files.emptyState'),
     items: getEntries().map((entry) =>
-      buildExcludedFileRow(plugin, tab, entry)
+      withListNote(
+        buildExcludedFileRow(plugin, tab, entry),
+        buildFilesListNote()
+      )
     ),
     addItem: {
       name: t('settings.exclusions.files.addButton'),
@@ -648,7 +642,6 @@ export function buildExclusionsPage(
         type: 'group',
         heading: t('settings.exclusions.files.title'),
         items: [
-          buildDescRow(buildFilesIntro()),
           {
             name: t('settings.exclusions.files.exclusionMode.name'),
             desc: t('settings.exclusions.files.exclusionMode.desc'),
@@ -666,7 +659,6 @@ export function buildExclusionsPage(
         type: 'group',
         heading: t('settings.exclusions.tags.title'),
         items: [
-          buildDescRow(buildTagsIntro()),
           {
             name: t('settings.exclusions.tags.matchTags.name'),
             desc: t('settings.exclusions.tags.matchTags.desc'),
@@ -717,14 +709,14 @@ export function buildExclusionsPage(
           },
         },
         t('settings.exclusions.tags.addButton'),
-        t('settings.exclusions.tags.emptyState')
+        t('settings.exclusions.tags.emptyState'),
+        buildTagsListNote()
       ),
 
       {
         type: 'group',
         heading: t('settings.exclusions.properties.title'),
         items: [
-          buildDescRow(buildPropertiesIntro()),
           {
             name: t('settings.exclusions.properties.exclusionMode.name'),
             desc: buildPropertiesExclusionModeDesc(),
@@ -738,9 +730,13 @@ export function buildExclusionsPage(
       },
       {
         type: 'list',
+        cls: LIST_NOTE_CLASS,
         emptyState: t('settings.exclusions.properties.emptyState'),
         items: exclusions().excludedProperties.map((property) =>
-          buildPropertyRow(plugin, tab, property)
+          withListNote(
+            buildPropertyRow(plugin, tab, property),
+            buildPropertiesListNote()
+          )
         ),
         addItem: buildAddItem(
           t('settings.exclusions.properties.addButton'),
@@ -762,6 +758,8 @@ export function buildExclusionsPage(
       {
         type: 'group',
         heading: t('settings.exclusions.disableProperty.title'),
+        // Spaces its rows vertically like the list boxes above; see `styles.css`
+        cls: 'flit-list-spacing',
         items: [
           buildDescRow(buildDisablePropertyIntro()),
           buildDisablePropertyRow(plugin),

@@ -205,13 +205,14 @@ input.flit-property-value-input {
   white-space: pre;
 }
 
-/* The rule-order note is generated content on the rows container, not a row: the list's drag sorter re-inserts a dragged row by child index, so any child at the top would move during a drag */
-/* The attribute outlives the last rule because the container is reused for the empty state, so the note is skipped while that state shows */
-/* Spacing, color and type copy a description-only row in a list box, such as the one on the Character replacements page */
-.flit-rule-list
+/* A list note (the custom replacements rule order, the exclusion lists' caveats) is generated content on the rows container, not a row; see `withListNote` */
+/* The attribute outlives the last row because the container is reused for the empty state, so the note is skipped while that state shows */
+/* Spacing, color and type copy a description-only row in a list box, such as the one on the Character replacements page; a multi-line note breaks at its newlines */
+.flit-list-note
   > .setting-items[data-flit-note]:not(:has(> .mod-empty-state))::before {
   content: attr(data-flit-note);
   display: block;
+  white-space: pre-line;
   padding: calc(var(--setting-items-padding-y, 8px) + var(--size-4-1))
     var(--setting-items-padding-x, 16px) var(--setting-items-padding-y, 8px);
   color: var(--text-muted, #5c5c5c);
@@ -219,11 +220,22 @@ input.flit-property-value-input {
   line-height: var(--line-height-tight, 1.3);
 }
 
-/* Obsidian omits the first row's divider, which here separates the note from the first rule */
-.flit-rule-list
+/* Obsidian omits the first row's divider, which here separates the note from the first row */
+.flit-list-note
   > .setting-items[data-flit-note]:not(:has(> .mod-empty-state))
   > .setting-item:not(.setting-item-heading):first-child::before {
   content: '';
+}
+
+/* A regular group spaced vertically like a list box, so its note and rows sit like the list notes and rows beside it; the sides keep the group's own inset */
+.flit-list-spacing > .setting-items > .setting-item {
+  padding-top: var(--size-4-2);
+  padding-bottom: var(--size-4-2);
+}
+
+/* A note row at the top takes a list note's extra top space */
+.flit-list-spacing > .setting-items > .setting-item:first-child {
+  padding-top: var(--size-4-3);
 }
 
 /* ── Utilities ── */

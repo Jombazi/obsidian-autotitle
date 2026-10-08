@@ -155,7 +155,7 @@ describe('Character replacements page', () => {
 
       expect(allOSes.heading).toBe('All OSes');
       expect(allOSes.items?.[0].desc).toBe(
-        'Replace characters that are forbidden in Obsidian file names on every operating system.'
+        'These characters are forbidden in Obsidian file names on every operating system.'
       );
       expect(charRows(allOSes).map((row) => row.name)).toEqual([
         'Left bracket [',
@@ -306,7 +306,7 @@ describe('Character replacements page', () => {
         'backslash',
         "Note: The backslash is replaced only when it's visible in Reading view.",
       ],
-      ['dot', 'Note: The dot is forbidden at file name start only.'],
+      ['dot', 'Note: The dot is forbidden only at the start of the file name.'],
     ] as const)('shows the %s note under Replace', (key, note) => {
       const dialog = openEditDialog(buildHarness(), key);
 

@@ -169,8 +169,8 @@ describe('First line property page', () => {
       const desc = propertyNameRow(buildHarness('')).desc as DocumentFragment;
 
       expect(desc.textContent).toBe(
-        'Property name in which to insert the first line when renaming.' +
-          'To populate multiple properties, separate by comma.' +
+        'The name of the property to copy the first line to when renaming.' +
+          'To populate multiple properties, separate with commas.' +
           'Use “aliases” to make the first line searchable in the Quick switcher and link suggestions.'
       );
     });

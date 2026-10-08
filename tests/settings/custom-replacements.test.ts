@@ -35,13 +35,13 @@ vi.mock('../../src/modals/entry-edit-modal', async () => {
   return { ...actual, EntryEditModal: RecordingEntryEditModal };
 });
 
-import {
-  buildCustomReplacementsPage,
-  RULE_LIST_CLASS,
-  RULE_ORDER_NOTE_ATTRIBUTE,
-} from '../../src/settings/custom-replacements';
+import { buildCustomReplacementsPage } from '../../src/settings/custom-replacements';
 import { EntryEditModal } from '../../src/modals/entry-edit-modal';
-import type { FirstLineIsTitlePlugin } from '../../src/settings/settings-base';
+import {
+  LIST_NOTE_ATTRIBUTE,
+  LIST_NOTE_CLASS,
+  type FirstLineIsTitlePlugin,
+} from '../../src/settings/settings-base';
 import { DEFAULT_SETTINGS } from '../../src/constants';
 import type { CustomReplacement, PluginSettings } from '../../src/types';
 
@@ -264,8 +264,8 @@ describe('Custom replacements page', () => {
 
       renderDefinition(ruleRowDefinition(harness, 0), rowsEl);
 
-      expect(harness.list.cls).toBe(RULE_LIST_CLASS);
-      expect(rowsEl.getAttribute(RULE_ORDER_NOTE_ATTRIBUTE)).toBe(
+      expect(harness.list.cls).toBe(LIST_NOTE_CLASS);
+      expect(rowsEl.getAttribute(LIST_NOTE_ATTRIBUTE)).toBe(
         'Rules apply top to bottom.'
       );
     });
@@ -276,7 +276,7 @@ describe('Custom replacements page', () => {
 
       renderDefinition(ruleRowDefinition(harness, 0), rowsEl);
 
-      expect(rowsEl.hasAttribute(RULE_ORDER_NOTE_ATTRIBUTE)).toBe(false);
+      expect(rowsEl.hasAttribute(LIST_NOTE_ATTRIBUTE)).toBe(false);
     });
   });
 

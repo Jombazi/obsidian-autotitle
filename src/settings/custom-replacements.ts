@@ -9,16 +9,12 @@ import {
   buildSummaryRow,
   FirstLineIsTitlePlugin,
   appendEmphasis,
+  LIST_NOTE_CLASS,
+  withListNote,
 } from './settings-base';
 import { t, tp } from '../i18n';
 import { CustomReplacement } from '../types';
 import { EntryEditModal } from '../modals/entry-edit-modal';
-
-/** Class on the rule list's group; `styles.css` keys the rule-order note off it. */
-export const RULE_LIST_CLASS = 'flit-rule-list';
-
-/** Attribute on the rule list's rows container holding the localized rule-order note, which `styles.css` draws as generated content. */
-export const RULE_ORDER_NOTE_ATTRIBUTE = 'data-flit-note';
 
 async function persistSettings(plugin: FirstLineIsTitlePlugin): Promise<void> {
   try {
@@ -196,22 +192,10 @@ function buildRuleRow(
       })();
     },
   });
-  return {
-    ...summaryRow,
-    render: (setting, group) => {
-      const cleanup = summaryRow.render(setting, group);
-      // The note cannot be a row: the list's drag sorter re-inserts a dragged row by child index, so any element at the top of the list would end up below a rule dragged there
-      const rowsContainer = setting.settingEl.parentElement;
-      // A new row is already in the rows container when it renders, though that container may not be in the document yet
-      if (rowsContainer?.matches(`.${RULE_LIST_CLASS} > .setting-items`)) {
-        rowsContainer.setAttribute(
-          RULE_ORDER_NOTE_ATTRIBUTE,
-          t('settings.customReplacements.rulesApplyTopToBottom')
-        );
-      }
-      return cleanup;
-    },
-  };
+  return withListNote(
+    summaryRow,
+    t('settings.customReplacements.rulesApplyTopToBottom')
+  );
 }
 
 /**
@@ -272,8 +256,8 @@ export function buildCustomReplacementsPage(
       },
       {
         type: 'list',
-        // The rule-order note above the first rule is drawn in `styles.css` from an attribute each rule row sets; see `buildRuleRow`
-        cls: RULE_LIST_CLASS,
+        // The rule-order note above the first rule comes from `withListNote` in `buildRuleRow`
+        cls: LIST_NOTE_CLASS,
         emptyState: t(
           'settings.customReplacements.emptyState',
           'No custom replacements.'

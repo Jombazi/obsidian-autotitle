@@ -177,7 +177,7 @@
     "general": {
       "renameAutomatically": {
         "name": "Rename automatically",
-        "desc": "Rename open notes automatically when edited. Turn this off to only rename via command."
+        "desc": "Rename open notes automatically when edited. Turn this off to only rename via commands."
       },
       "renameOnFocus": {
         "name": "Rename on focus",
@@ -206,14 +206,14 @@
       "convertReplacementChars": {
         "name": "Convert replacement characters",
         "desc": {
-          "part1": "When inserting title on note creation, convert replacements for forbidden characters back to their original forms, as set in ",
+          "part1": "When inserting the title on note creation, convert replacements for forbidden characters back to their original forms, as set in ",
           "characterReplacements": "Character replacements",
           "part2": " settings."
         }
       },
       "formatAsHeading": {
         "name": "Format as heading",
-        "desc": "When inserting title on note creation, make it a heading."
+        "desc": "When inserting the title on note creation, make it a heading."
       },
       "renameOnSave": {
         "name": "Rename on save",
@@ -236,7 +236,7 @@
       }
     },
     "exclusions": {
-      "desc": "Set how notes should be excluded from renaming.",
+      "desc": "Exclude files, tags and properties from renaming.",
       "note": "Note: A file is skipped if any rule excludes it, even if another rule includes it. For example, a note in an excluded folder but with an included tag will not be renamed.",
       "files": {
         "title": "Excluded files",
@@ -290,7 +290,7 @@
           "excludeAllExcept": "Exclude all except...",
           "part2": " also excludes notes with no properties."
         },
-        "renamedWarning": "Renamed property names aren't reflected below. Update manually after renaming.",
+        "renamedWarning": "Renamed properties aren't reflected below. Update manually after renaming.",
         "exclusionMode": {
           "name": "Exclusion mode",
           "desc": "How properties should be excluded."
@@ -312,14 +312,14 @@
       "desc": "Copy the first line to a property when renaming.",
       "propertyName": {
         "name": "First line property",
-        "desc": "Property name in which to insert the first line when renaming.",
+        "desc": "The name of the property to copy the first line to when renaming.",
         "quickSwitcher": "Use “aliases” to make the first line searchable in the Quick switcher and link suggestions.",
-        "multipleProperties": "To populate multiple properties, separate by comma.",
+        "multipleProperties": "To populate multiple properties, separate with commas.",
         "placeholder": "Property name"
       },
       "addOnlyIfTitleDiffers": {
         "name": "Add only if title differs from first line",
-        "desc": "For example, if the file name was truncated, or some characters have been replaced or removed."
+        "desc": "Only fill the first line property if the first line and the title are not identical, for example, if the file name was truncated, or some characters have been replaced or removed."
       },
       "truncate": {
         "name": "Truncate",
@@ -334,7 +334,7 @@
       "applyCustomReplacements": {
         "name": "Apply custom replacements",
         "desc": {
-          "part1": "Apply custom text replacements to the property, as set in ",
+          "part1": "Apply custom text replacements to the first line property, as set in ",
           "customReplacements": "Custom replacements",
           "part2": " settings."
         }
@@ -342,22 +342,22 @@
       "stripMarkup": {
         "name": "Strip markup",
         "desc": {
-          "part1": "Omit markup syntax in the property, as set in ",
+          "part1": "Omit markup syntax in the first line property, as set in ",
           "markupStripping": "Markup stripping",
           "part2": " settings."
         }
       },
       "keepEmptyProperty": {
         "name": "Keep empty property",
-        "desc": "When the plugin removes its value and no other values remain, keep the empty property rather than delete it."
+        "desc": "When the plugin removes the first line property value and no other values remain, keep the empty property rather than delete it."
       },
       "placeLast": {
         "name": "Place last in list",
-        "desc": "Place the first line last in list-type property."
+        "desc": "Place the first line property value last in a list-type property."
       },
       "hideProperty": {
         "name": "Hide property",
-        "desc": "Hide the property in Reading view and Live Preview. Will always remain visible in Source view.",
+        "desc": "Hide the first line property in Reading view and Live Preview.",
         "never": "Never",
         "onlyWhenEmpty": "Only when empty",
         "always": "Always"
@@ -369,15 +369,15 @@
     },
     "characterReplacements": {
       "name": "Replace forbidden characters",
-      "desc": "Replace characters forbidden in file name with safe alternatives.",
+      "desc": "Replace characters forbidden in the file name with safe alternatives.",
       "toggleDesc": "Replace characters not allowed in Obsidian file names with safe alternatives. Turn this off to remove them entirely.",
       "allOSes": {
         "title": "All OSes",
-        "desc": "Replace characters that are forbidden in Obsidian file names on every operating system."
+        "desc": "These characters are forbidden in Obsidian file names on every operating system."
       },
       "windowsAndroid": {
-        "title": "Windows/Android",
-        "desc": "Replace characters that are forbidden in Obsidian file names on Windows and Android only."
+        "title": "Windows and Android",
+        "desc": "These characters are forbidden in Obsidian file names on Windows and Android only."
       },
       "headers": {
         "replaceWith": "Replace with",
@@ -408,7 +408,7 @@
         "forwardSlash": "Forward slash /",
         "colon": "Colon :",
         "dot": "Dot .",
-        "dotNote": "Note: The dot is forbidden at file name start only.",
+        "dotNote": "Note: The dot is forbidden only at the start of the file name.",
         "asterisk": "Asterisk *",
         "quote": "Quote \"",
         "lessThan": "Less than <",
@@ -418,10 +418,10 @@
       "emptyPlaceholder": "Empty"
     },
     "customReplacements": {
-      "desc": "Configure custom text replacements for file name.",
+      "desc": "Configure custom text replacements for the file name.",
       "rulesApplyTopToBottom": "Rules apply top to bottom.",
-      "whitespacePreserved": "Whitespace preserved.",
-      "leaveBlank": "Leave empty to omit text entirely.",
+      "whitespacePreserved": "Whitespace is preserved.",
+      "leaveBlank": "Leave empty to omit the text entirely.",
       "summary": {
         "onlyAtLineStart": ", only at line start",
         "onlyWholeLine": ", only as the whole line"
@@ -451,7 +451,7 @@
       "emptyState": "No custom replacements."
     },
     "markupStripping": {
-      "desc": "Remove markup syntax in file name.",
+      "desc": "Remove markup syntax in the file name.",
       "headings": {
         "name": "Strip heading markup",
         "desc": {
@@ -582,7 +582,7 @@
       },
       "stripHorizontalRuleMarkup": {
         "name": "Strip horizontal rule markup",
-        "desc": "Instead, put the first line after horizontal rule in title."
+        "desc": "Instead, put the first line after the horizontal rule in the title."
       },
       "code": {
         "name": "Strip inline code markup",
@@ -596,14 +596,14 @@
       },
       "codeBlocks": {
         "name": "Strip code block markup",
-        "desc": "Instead, put the first line within code block in title."
+        "desc": "Instead, put the first line within the code block in the title."
       },
       "detectDiagrams": {
         "name": "Detect diagrams",
         "desc": {
           "part1": "For Mermaid diagram blocks, put ",
           "diagram": "Diagram",
-          "part2": " in title."
+          "part2": " in the title."
         }
       },
       "footnotes": {
@@ -630,14 +630,14 @@
       },
       "commentsEntirely": {
         "name": "Strip comments entirely",
-        "desc": "Omit comment content in title."
+        "desc": "Omit comment content in the title."
       },
       "stripTableMarkup": {
         "name": "Strip table markup",
         "desc": {
           "part1": "Instead, put ",
           "table": "Table",
-          "part2": " in title."
+          "part2": " in the title."
         }
       },
       "stripInlineMathMarkup": {
@@ -655,7 +655,7 @@
         "desc": {
           "part1": "Instead, put ",
           "mathBlock": "Math block",
-          "part2": " in title."
+          "part2": " in the title."
         }
       },
       "htmlTags": {
@@ -682,26 +682,26 @@
       "desc": "Set which plugin commands appear in context menus.",
       "file": {
         "name": "Show file commands",
-        "desc": "Show plugin commands in file context menu."
+        "desc": "Show plugin commands in the file context menu."
       },
       "folder": {
         "name": "Show folder commands",
-        "desc": "Show plugin commands in folder context menu."
+        "desc": "Show plugin commands in the folder context menu."
       },
       "tag": {
         "name": "Show tag commands",
-        "desc": "Show plugin commands in tag context menu."
+        "desc": "Show plugin commands in the tag context menu."
       },
       "search": {
         "name": "Show search commands",
-        "desc": "Show commands in vault search context menu."
+        "desc": "Show plugin commands in the vault search context menu."
       }
     },
     "other": {
       "desc": "Fine-tune, troubleshoot, manage settings.",
       "charCount": {
         "name": "Character count",
-        "desc": "The maximum number of characters to put in file name."
+        "desc": "The maximum number of characters to put in the file name."
       },
       "notificationMode": {
         "name": "Show notification when renaming manually",
@@ -715,23 +715,23 @@
         "desc": {
           "part1": "If a note starts with a card link created with ",
           "part2": " or ",
-          "part3": ", the card link title will be put in file name."
+          "part3": ", the card link title will be put in the file name."
         }
       },
       "newNoteDelay": {
         "name": "New note delay",
-        "desc": "Delay processing new notes by this amount in milliseconds. May resolve issues on note creation."
+        "desc": "Delay renaming new notes by this amount in milliseconds. May resolve issues on note creation."
       },
       "contentReadMethod": {
         "name": "Content read method",
-        "desc": "Set how the plugin reads note content. Cache or file read may resolve issues but will be slower.",
+        "desc": "How the plugin reads note content. Cache or file read may resolve issues but will be slower.",
         "editor": "Editor (default)",
         "cache": "Cache",
         "file": "File"
       },
       "checkInterval": {
         "name": "Check interval",
-        "desc": "Interval in milliseconds for checking first-line changes. Increase in case of issues."
+        "desc": "The interval in milliseconds for checking first-line changes. Increase it in case of issues."
       },
       "debug": {
         "name": "Debug",
@@ -739,7 +739,7 @@
       },
       "debugOutputFullContent": {
         "name": "Output full file content in console",
-        "desc": "Log the complete content of files (including YAML frontmatter) whenever they are modified."
+        "desc": "Log the complete content of files (including properties) whenever they are modified."
       },
       "troubleshooting": {
         "title": "Troubleshooting"

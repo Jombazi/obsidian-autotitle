@@ -235,6 +235,38 @@ export function buildDescRow(
   };
 }
 
+/** Class on a list group that shows a note above its first row; `styles.css` draws the note from `LIST_NOTE_ATTRIBUTE`. */
+export const LIST_NOTE_CLASS = 'flit-list-note';
+
+/** Attribute on a noted list's rows container holding the localized note; newlines in it break lines. */
+export const LIST_NOTE_ATTRIBUTE = 'data-flit-note';
+
+/**
+ * Wraps a row of a list whose group carries `LIST_NOTE_CLASS` so that
+ * rendering it puts `note` on the list's rows container.
+ *
+ * The note cannot be a row: a list shows its empty state only while it has no
+ * rows, and a reorderable list's drag sorter re-inserts a dragged row by child
+ * index, so any row at the top would end up below a row dragged there.
+ */
+export function withListNote(
+  row: SettingDefinitionRender,
+  note: string
+): SettingDefinitionRender {
+  return {
+    ...row,
+    render: (setting, group) => {
+      const cleanup = row.render(setting, group);
+      const rowsContainer = setting.settingEl.parentElement;
+      // A new row is already in the rows container when it renders, though that container may not be in the document yet
+      if (rowsContainer?.matches(`.${LIST_NOTE_CLASS} > .setting-items`)) {
+        rowsContainer.setAttribute(LIST_NOTE_ATTRIBUTE, note);
+      }
+      return cleanup;
+    },
+  };
+}
+
 /**
  * A single button to mount via `buildButtonRow`. `onClick` receives the
  * row's `Setting` instance for call sites that need it (e.g. resolving the
