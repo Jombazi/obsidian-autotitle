@@ -129,6 +129,13 @@ Object.defineProperty(global.Node.prototype, 'win', {
   configurable: true,
 });
 
+// Obsidian's global for the focused window's document, which dialogs read their opener's focus through; its typings declare it with `let`, which `globalThis` does not carry
+Object.defineProperty(globalThis, 'activeDocument', {
+  value: document,
+  writable: true,
+  configurable: true,
+});
+
 globalThis.createFragment = (
   callback?: (frag: DocumentFragment) => void
 ): DocumentFragment => {

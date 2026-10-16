@@ -15,7 +15,7 @@ import {
   EntryEditModal,
   EntryEditModalOptions,
 } from '../../src/modals/entry-edit-modal';
-import { flush, pressEnter, typeInto } from '../testUtils';
+import { flush, focusOpener, pressEnter, typeInto } from '../testUtils';
 
 type RuleValues = {
   searchText: string;
@@ -136,6 +136,16 @@ describe('EntryEditModal', () => {
 
       expect(modal.containerEl.classList.contains('flit-modal')).toBe(true);
     });
+
+    it.each([true, false])(
+      'hands focus back to its opener on close only when opened from the keyboard (keyboard: %s)',
+      (openedByKeyboard) => {
+        focusOpener(openedByKeyboard);
+        const { modal } = openDialog();
+
+        expect(modal.shouldRestoreSelection).toBe(openedByKeyboard);
+      }
+    );
 
     it('renders one row per field, with its name and description', () => {
       const { modal, rows } = openDialog();

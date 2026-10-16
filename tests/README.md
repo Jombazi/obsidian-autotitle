@@ -46,6 +46,7 @@ tests/
 ├── modals/                     # Dialog tests
 │   ├── entry-edit-modal.test.ts
 │   ├── exclusion-entry-modal.test.ts
+│   ├── focus-restore.test.ts
 │   ├── form-sheet-header.test.ts
 │   └── settings-transfer-modals.test.ts
 ├── operations/                 # Batch operation tests

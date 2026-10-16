@@ -122,6 +122,16 @@ export function pressEnter(
   );
 }
 
+/** Focuses a connected button as a dialog's opener, matching `:focus-visible` as a keyboard-focused button does or not as a clicked one does; jsdom matches it on text fields only, so the button answers for itself. */
+export function focusOpener(openedByKeyboard: boolean): HTMLButtonElement {
+  const openerEl = document.body.createEl('button');
+  openerEl.focus();
+  vi.spyOn(openerEl, 'matches').mockImplementation(
+    (selector: string) => selector === ':focus-visible' && openedByKeyboard
+  );
+  return openerEl;
+}
+
 type EntryEditModalModule = typeof import('../src/modals/entry-edit-modal');
 
 /** The entry dialog module with its dialog recording every instance in `openedModals`, for a `vi.mock` factory to return; the base Modal mock declares `onOpen` as an instance field, so a test opens a recorded instance through the real prototype. */

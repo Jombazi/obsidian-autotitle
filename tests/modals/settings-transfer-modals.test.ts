@@ -133,7 +133,7 @@ describe('SettingsExportModal', () => {
 
   it('downloads the edited JSON and stays open', async () => {
     const { modal, editorEl, buttons } = openExport();
-    // The real download reaches `activeDocument`, which the test setup does not define
+    // jsdom has no download behavior; the download tests below pin the real one
     const download = vi
       .spyOn(modal as unknown as ExportActions, 'downloadTransfer')
       .mockImplementation(() => {});

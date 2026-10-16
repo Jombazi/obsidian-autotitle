@@ -12,6 +12,7 @@ import {
   addRestoreDefaultButton,
 } from '../settings/settings-base';
 import { addFlitModalClass } from './flit-modal-class';
+import { restoreFocusOnlyIfOpenedByKeyboard } from './focus-restore';
 import { FormSheetActions, addFormSheetActions } from './form-sheet-header';
 
 export type EntryFieldValue = string | boolean;
@@ -86,6 +87,7 @@ export class EntryEditModal<
   constructor(app: App, options: EntryEditModalOptions<V>) {
     super(app);
     addFlitModalClass(this);
+    restoreFocusOnlyIfOpenedByKeyboard(this);
     this.options = options;
   }
 

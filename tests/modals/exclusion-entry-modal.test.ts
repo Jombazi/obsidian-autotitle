@@ -31,6 +31,7 @@ import {
 } from '../../src/modals/exclusion-entry-modal';
 import {
   flush,
+  focusOpener,
   openLatestExclusionEntryDialog,
   pressEnter,
   typeInto,
@@ -70,6 +71,16 @@ describe('ExclusionEntryModal', () => {
   afterEach(() => {
     document.body.replaceChildren();
   });
+
+  it.each([true, false])(
+    'hands focus back to its opener on close only when opened from the keyboard (keyboard: %s)',
+    (openedByKeyboard) => {
+      focusOpener(openedByKeyboard);
+      const { modal } = openDialog(NAME_AND_VALUE);
+
+      expect(modal.shouldRestoreSelection).toBe(openedByKeyboard);
+    }
+  );
 
   describe('fields', () => {
     it('draws one labeled field per entry, each followed by its help line', () => {

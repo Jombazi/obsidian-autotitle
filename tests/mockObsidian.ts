@@ -376,6 +376,8 @@ export class Modal {
     register: ReturnType<typeof vi.fn>;
     unregister: ReturnType<typeof vi.fn>;
   };
+  // Obsidian 1.14.4's default
+  shouldRestoreSelection = true;
 
   constructor(app: App) {
     this.app = app;

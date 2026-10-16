@@ -1,6 +1,7 @@
 import { App, Modal, TextComponent, displayTooltip } from 'obsidian';
 import { t } from '../i18n';
 import { addFlitModalClass } from './flit-modal-class';
+import { restoreFocusOnlyIfOpenedByKeyboard } from './focus-restore';
 import { addFormSheetActions } from './form-sheet-header';
 
 export interface ExclusionEntryField {
@@ -40,6 +41,7 @@ export class ExclusionEntryModal extends Modal {
   constructor(app: App, options: ExclusionEntryModalOptions) {
     super(app);
     addFlitModalClass(this);
+    restoreFocusOnlyIfOpenedByKeyboard(this);
     this.options = options;
   }
 
