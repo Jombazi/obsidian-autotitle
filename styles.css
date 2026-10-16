@@ -170,16 +170,3 @@
     padding-inline-end: var(--setting-items-padding-x, 20px);
   }
 }
-
-/* A regular group spaced vertically like a list box, so its note and rows sit like the list notes and rows beside it; the sides keep the group's own inset */
-.flit-list-spacing > .setting-items > .setting-item {
-  padding-top: var(--size-4-2);
-  padding-bottom: var(--size-4-2);
-}
-
-/* Its note sits where a top row's description would: the rows' top space plus a list note's extra, then the description's own top padding */
-.setting-group.flit-list-spacing
-  > .setting-items[data-flit-note]:has(> .flit-desc-row)::before {
-  padding-top: calc(var(--size-4-2) + var(--size-4-1) + var(--size-4-1));
-  padding-bottom: var(--size-4-2);
-}

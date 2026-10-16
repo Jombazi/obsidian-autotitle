@@ -636,10 +636,9 @@ export function buildExclusionsPage(
       buildExcludedPropertiesList(plugin, tab),
 
       {
-        type: 'group',
+        // A list, not a plain group, though nothing is added, deleted or dragged: on phones Obsidian stacks a plain group's controls under the row text, and only list rows keep the Restore default and Edit buttons to the right
+        type: 'list',
         heading: t('settings.exclusions.disableProperty.title'),
-        // Spaces its rows vertically like the list boxes above; see `styles.css`
-        cls: 'flit-list-spacing',
         items: [
           buildDescRow(buildDisablePropertyIntro()),
           buildDisablePropertyRow(plugin, tab),

@@ -154,14 +154,15 @@ describe('Exclusions list add affordances', () => {
     document.body.replaceChildren();
   });
 
-  it('gives every list a native addItem rather than a sibling add row', () => {
+  it('gives every list a native addItem rather than a sibling add row, except the single disable-property row', () => {
     const { lists } = buildHarness();
 
-    expect(lists).toHaveLength(3);
+    expect(lists).toHaveLength(4);
     expect(lists.map((list) => list.addItem?.name)).toEqual([
       'settings.exclusions.files.addButton',
       'settings.exclusions.tags.addButton',
       'settings.exclusions.properties.addButton',
+      undefined,
     ]);
   });
 

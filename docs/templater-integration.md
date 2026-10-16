@@ -1,6 +1,6 @@
 ---
 title: Templater integration
-description: How the new-note pipeline waits for Templater and acts on the note it leaves — the Templater 2.26.0 behavior it mirrors, the creation decision nodes from templater-enabled to template-cursor, template exclusions, the background-tab path, the creation hold, and a known gap.
+description: How the new-note pipeline waits for Templater and acts on the note it leaves — the Templater 2.26.0 behavior it mirrors, the creation decision nodes from templater-enabled to template-cursor, template exclusions, the background-tab path, the creation hold, and a body of only cursor placeholders.
 author: 🤖 Generated with Claude Code
 updated: 2026-10-16
 ---
@@ -132,13 +132,15 @@ For the platform behavior behind each step, see "A vault write reloads the open 
 - **Except where the title goes**: a template cursor exactly where the title goes — at the body start of an empty body, or on the empty heading line the title fills — ends at the title line end when "Move cursor to first line" and "Place cursor at line end" are both on (`keep-template-cursor`), since CodeMirror would leave it in front of an inserted title. With either off, it stays where CodeMirror maps it.
 - **"Place cursor at line end" applies in background tabs too**: `moveCursorOnceViewReloads` passes it to `handleCursorPositioning`.
 
-## Known gap: a cursor-only template in a background tab
+## A body of only cursor placeholders
 
-Templater never jumps to its cursor placeholder in a background tab, since its jumper runs only for the active note. A template whose body is only `<% tp.file.cursor() %>` therefore:
+Templater leaves its cursor placeholder in the note whenever its jumper does not run: in a background tab, since the jumper runs only for the active note, and in the current tab with "Automatic jump to cursor" off. A body of only placeholders and whitespace counts as no body for the new-note title, whatever "Strip Templater markup" says, since a placeholder is Templater's transient marker, not note content.
 
-1. **Leaves the placeholder line in the note**.
-2. **Gets no title**: `insertTitle` inserts no title above a body that is not an empty heading.
-3. **Ends `Untitled`**: the creation rename names the note from the placeholder line, which "Strip Templater markup" empties.
+- **One test, two readers**: `isOnlyCursorPlaceholders` in `templater-integration.ts` is read by the coordinator's `content-below-yaml` and by `hasBodyContent` in `deriveTitleInsertionPoint`, which the editor path's live re-derivation and the `vault.process` path share.
+- **The title goes above the placeholder**: the note ends as its properties, the title, then the placeholder line, which stays for a later jump. The cursor follows the usual rules, in a background tab once its view reloads.
+- **The note keeps its name**: the creation rename reads the title as the first line, not the placeholder line, which "Strip Templater markup" empties and which named the note `Untitled` before (measured).
+- **Other text makes it a body**: a placeholder beside any other text, on its own line or another, still leaves the note without a title.
+- **The rename engine is unchanged**: with "Insert title" off, a placeholder-only first line still names the note as it did.
 
 ## Platform references
 
