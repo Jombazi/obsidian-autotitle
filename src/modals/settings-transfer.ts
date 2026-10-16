@@ -7,47 +7,38 @@
  * the terms of the GNU General Public License as published by the Free Software
  * Foundation, either version 3 of the License, or (at your option) any later version.
  */
+// Import and export behavior and styles are ported from Notebook Navigator and aim to match it as closely as possible, so users of both plugins get the same familiar experience.
 
 import {
   App,
   ButtonComponent,
+  ConfirmationButton,
   ConfirmationModal,
-  Modal,
-  Notice,
+  Platform,
   PluginSettingTab,
   Setting,
 } from 'obsidian';
 import { t } from '../i18n';
 import { evaluateSettingsImport } from '../settings/import-guard';
-import { FirstLineIsTitlePlugin } from '../settings/settings-base';
+import { FirstLineIsTitlePlugin, showNotice } from '../settings/settings-base';
 import {
   applySettingsTransfer,
   createSettingsTransferFilename,
   createSettingsTransferJson,
   SettingsTransfer,
 } from '../settings/transfer';
+import { addFlitModalClass } from './flit-modal-class';
 
 const JSON_MIME_TYPE = 'application/json';
 
 /** Message for a notice, without leaking `[object Object]` from a non-Error throw. */
 function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  // The message closes the notice ("Failed to copy settings: …"): a one-sentence notice ends without a period, so a one-sentence message drops its own, while a longer one keeps it
+  return /[.!?]\s+\S/.test(message) ? message : message.replace(/\.$/, '');
 }
 
-function showWarningNotice(message: string): void {
-  const notice = new Notice(message);
-  notice.containerEl.addClass('mod-warning');
-}
-
-function showSuccessNotice(message: string): void {
-  const notice = new Notice(message);
-  notice.containerEl.addClass('mod-success');
-}
-
-/**
- * The JSON editor both modals are built around. Monospace and resizable via the
- * stylesheet; spellcheck off because every "word" in it is a settings key.
- */
+/** The JSON editor both modals are built around. Monospace and resizable via the stylesheet; spellcheck off because every "word" in it is a settings key. */
 function createTransferEditor(
   parent: HTMLElement,
   options: { value?: string; placeholder?: string }
@@ -63,23 +54,13 @@ function createTransferEditor(
   return editorEl;
 }
 
-function createButtonRow(parent: HTMLElement): HTMLElement {
-  return parent.createDiv({
-    cls: 'modal-button-container flit-modal-button-container',
-  });
-}
-
-/**
- * Shows the current settings as transfer JSON, to copy to the clipboard or save as a file.
- *
- * The JSON stays editable: Copy and Download both read the textarea, so a user can trim
- * the payload before taking it anywhere.
- */
-export class SettingsExportModal extends Modal {
+/** Shows the current settings as transfer JSON, to copy to the clipboard or save as a file. The JSON stays editable: Copy and the save button (Download on desktop, Save to vault on mobile) both read the textarea, so a user can trim the payload before taking it anywhere. */
+export class SettingsExportModal extends ConfirmationModal {
   private readonly plugin: FirstLineIsTitlePlugin;
 
   constructor(app: App, plugin: FirstLineIsTitlePlugin) {
     super(app);
+    addFlitModalClass(this);
     this.plugin = plugin;
   }
 
@@ -97,26 +78,42 @@ export class SettingsExportModal extends Modal {
       value: createSettingsTransferJson(this.plugin.settings),
     });
 
-    const buttonRow = createButtonRow(contentEl);
+    // Copy and the save button return true to keep the dialog open, so the payload can be taken both ways
+    this.addButton((btn) =>
+      btn
+        .setButtonText(t('modals.settingsTransfer.export.copy'))
+        .onClick(() => {
+          void this.copyToClipboard(editorEl.value);
+          return true;
+        })
+    );
+    // Mobile saves to the vault root instead: Obsidian's Android app has no navigator.share and ignores a click on a blob download link (measured on 1.14.4), and Notebook Navigator treats iOS the same way
+    if (Platform.isMobileApp) {
+      this.addButton((btn) =>
+        btn
+          .setButtonText(t('modals.settingsTransfer.export.saveToVault'))
+          .setCta()
+          .onClick(() => {
+            void this.saveToVault(editorEl.value);
+            return true;
+          })
+      );
+    } else {
+      this.addButton((btn) =>
+        btn
+          .setButtonText(t('modals.settingsTransfer.export.download'))
+          .setCta()
+          .onClick(() => {
+            this.downloadTransfer(editorEl.value);
+            return true;
+          })
+      );
+    }
+    // Done in place of Obsidian's own Cancel label, the only dialog that relabels it: Copy and the save button keep the dialog open, so this closes it after either, and it is the only way to close the phone sheet, where Obsidian hides the ✕ of a confirmation dialog
+    this.addCancelButton(t('modals.buttons.done'));
 
-    const copyButton = buttonRow.createEl('button', {
-      text: t('modals.settingsTransfer.export.copy'),
-    });
-    copyButton.onclick = () => {
-      void this.copyToClipboard(editorEl.value);
-    };
-
-    const downloadButton = buttonRow.createEl('button', {
-      text: t('modals.settingsTransfer.export.download'),
-    });
-    downloadButton.addClass('mod-cta');
-    downloadButton.onclick = () => {
-      void this.downloadTransfer(editorEl.value);
-    };
-
-    // Deferred because Modal moves focus to the first focusable child after onOpen();
-    // selecting the payload makes a manual copy a single keystroke.
-    window.setTimeout(() => editorEl.select(), 0);
+    // Deferred because Modal moves focus to the first focusable child after onOpen(); selecting the payload makes a manual copy a single keystroke. On the dialog's own window, which is the Settings window when Settings opens in a window of its own.
+    this.modalEl.win.setTimeout(() => editorEl.select(), 0);
   }
 
   onClose(): void {
@@ -126,43 +123,38 @@ export class SettingsExportModal extends Modal {
   private async copyToClipboard(contents: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(contents);
-      showSuccessNotice(t('modals.settingsTransfer.export.copied'));
+      showNotice(t('modals.settingsTransfer.export.copied'), 'success');
     } catch (error) {
-      showWarningNotice(
+      showNotice(
         t('modals.settingsTransfer.export.errors.copyFailed', {
           message: describeError(error),
-        })
+        }),
+        'warning'
       );
     }
   }
 
-  /**
-   * Shares the payload as a file where the platform supports it, falling back to an
-   * object-URL download.
-   *
-   * The share path is kept for mobile: blob-anchor downloads are unreliable in Capacitor
-   * webviews. The anchor is created on `activeDocument`, never the bare `document` — with
-   * settings open in a popout window the two are different documents, and an anchor in the
-   * wrong one is what broke the old file picker.
-   */
-  private async downloadTransfer(contents: string): Promise<void> {
-    const fileName = createSettingsTransferFilename(new Date());
-
-    if (navigator.share && navigator.canShare) {
-      try {
-        const file = new File([contents], fileName, { type: JSON_MIME_TYPE });
-        if (navigator.canShare({ files: [file] })) {
-          await navigator.share({
-            files: [file],
-            title: t('modals.settingsTransfer.export.title'),
-          });
-          return;
-        }
-      } catch (error) {
-        console.error('Settings export share failed:', error);
-      }
+  /** Writes the payload to a new timestamped file at the vault root and names it in a notice; the mobile save path. */
+  private async saveToVault(contents: string): Promise<void> {
+    try {
+      const path = await this.plugin.createSettingsFileAtVaultRoot(contents);
+      showNotice(
+        t('modals.settingsTransfer.export.saved', { path }),
+        'success'
+      );
+    } catch (error) {
+      showNotice(
+        t('modals.settingsTransfer.export.errors.saveFailed', {
+          message: describeError(error),
+        }),
+        'warning'
+      );
     }
+  }
 
+  /** Saves the payload as a file through an object-URL download; desktop only, since mobile saves to the vault root instead (see `onOpen`). The anchor is created on `activeDocument`, never the bare `document` — with settings open in a popout window the two are different documents, and an anchor in the wrong one is what broke the old file picker. */
+  private downloadTransfer(contents: string): void {
+    const fileName = createSettingsTransferFilename(new Date());
     const url = URL.createObjectURL(
       new Blob([contents], { type: JSON_MIME_TYPE })
     );
@@ -172,27 +164,23 @@ export class SettingsExportModal extends Modal {
     anchorEl.click();
     anchorEl.remove();
     // Revoking synchronously can cancel the download the click just started.
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    this.modalEl.win.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 }
 
-/**
- * Fills a JSON editor from a file or a paste, then applies it over the defaults.
- *
- * The file input is created on the modal's own `contentEl` and attached, so the picker
- * belongs to whichever window the settings are open in.
- */
-export class SettingsImportModal extends Modal {
+/** Fills a JSON editor from a file or a paste, then applies it over the defaults. The file input is created on the modal's own `contentEl` and attached, so the picker belongs to whichever window the settings are open in. */
+export class SettingsImportModal extends ConfirmationModal {
   private readonly plugin: FirstLineIsTitlePlugin;
   private readonly tab: PluginSettingTab;
 
   private fileInputEl: HTMLInputElement;
   private editorEl: HTMLTextAreaElement;
   private chooseFileButton?: ButtonComponent;
-  private importButtonEl?: HTMLButtonElement;
+  private importButton?: ConfirmationButton;
 
   constructor(app: App, plugin: FirstLineIsTitlePlugin, tab: PluginSettingTab) {
     super(app);
+    addFlitModalClass(this);
     this.plugin = plugin;
     this.tab = tab;
   }
@@ -203,8 +191,7 @@ export class SettingsImportModal extends Modal {
     this.modalEl.addClass('flit-settings-transfer');
     this.setTitle(t('modals.settingsTransfer.import.title'));
 
-    // Element-scoped and attached: the global `createEl` binds to the main window's
-    // document, so a detached input built there raises no picker from a settings popout.
+    // Element-scoped and attached: the global `createEl` binds to the main window's document, so a detached input built there raises no picker from a settings popout.
     this.fileInputEl = contentEl.createEl('input', {
       type: 'file',
       cls: 'flit-settings-transfer-file-input',
@@ -232,18 +219,17 @@ export class SettingsImportModal extends Modal {
       placeholder: t('modals.settingsTransfer.import.editor.placeholder'),
     });
 
-    const buttonRow = createButtonRow(contentEl);
-
-    this.importButtonEl = buttonRow.createEl('button', {
-      text: t('modals.settingsTransfer.import.button'),
+    this.addButton((btn) => {
+      this.importButton = btn
+        .setButtonText(t('modals.settingsTransfer.import.button'))
+        .setCta()
+        .onClick(() => {
+          this.confirmImport();
+          // Stays open on every path: valid JSON opens a nested confirmation, and applyTransfer closes this dialog only once the import is saved
+          return true;
+        });
     });
-    this.importButtonEl.addClass('mod-cta');
-    this.importButtonEl.onclick = () => this.confirmImport();
-
-    const cancelButtonEl = buttonRow.createEl('button', {
-      text: t('modals.buttons.cancel'),
-    });
-    cancelButtonEl.onclick = () => this.close();
+    this.addCancelButton();
   }
 
   onClose(): void {
@@ -253,7 +239,7 @@ export class SettingsImportModal extends Modal {
   /** Disables both entry points while a read or a save is in flight. */
   private setBusy(isBusy: boolean): void {
     this.chooseFileButton?.setDisabled(isBusy);
-    if (this.importButtonEl) this.importButtonEl.disabled = isBusy;
+    this.importButton?.setDisabled(isBusy);
   }
 
   private async loadSelectedFile(): Promise<void> {
@@ -264,15 +250,15 @@ export class SettingsImportModal extends Modal {
     try {
       this.editorEl.value = await selectedFile.text();
     } catch (error) {
-      showWarningNotice(
+      showNotice(
         t('modals.settingsTransfer.import.errors.readFailed', {
           message: describeError(error),
-        })
+        }),
+        'warning'
       );
     } finally {
       this.setBusy(false);
-      // Clearing the value lets the same file be picked again — `change` fires only when
-      // the selection differs from the last one.
+      // Clearing the value lets the same file be picked again — `change` fires only when the selection differs from the last one.
       this.fileInputEl.value = '';
     }
   }
@@ -281,12 +267,18 @@ export class SettingsImportModal extends Modal {
     const verdict = evaluateSettingsImport(this.editorEl.value);
 
     if (verdict.kind === 'unreadable') {
-      showWarningNotice(t('notifications.invalidImportFile'));
+      showNotice(
+        t('modals.settingsTransfer.import.errors.invalidFile'),
+        'warning'
+      );
       return;
     }
 
     if (verdict.kind === 'incompatible-schema') {
-      showWarningNotice(t('settings.errors.importIncompatible'));
+      showNotice(
+        t('modals.settingsTransfer.import.errors.incompatibleVersion'),
+        'warning'
+      );
       return;
     }
 
@@ -298,7 +290,7 @@ export class SettingsImportModal extends Modal {
       });
     });
 
-    new ConfirmationModal(this.app)
+    addFlitModalClass(new ConfirmationModal(this.app))
       .setTitle(t('modals.settingsTransfer.import.confirm.title'))
       .setContent(body)
       .addButton((btn) =>
@@ -316,26 +308,27 @@ export class SettingsImportModal extends Modal {
   private async applyTransfer(transfer: SettingsTransfer): Promise<void> {
     this.setBusy(true);
     try {
-      // Unconditional: an import replaces every setting, so the outgoing state is written
-      // out first whether or not the user thought to export it.
-      await this.plugin.writeSettingsBackup(
+      // Unconditional: an import replaces every setting, so the outgoing state is written out first whether or not the user thought to export it.
+      const backupPath = await this.plugin.writeSettingsBackup(
         createSettingsTransferJson(this.plugin.settings)
       );
-
-      // Snapshot rather than a reference: rollback must survive any in-place mutation of
-      // the live settings object between here and the save completing.
-      const previousSettings = structuredClone(this.plugin.settings);
-
-      this.plugin.settings = applySettingsTransfer(transfer);
-      try {
-        await this.plugin.saveSettings();
-      } catch {
-        this.plugin.settings = previousSettings;
-        showWarningNotice(t('settings.errors.saveFailed'));
+      // Nothing is imported without that copy: once replaced, the outgoing settings exist nowhere else.
+      if (backupPath === null) {
+        showNotice(
+          t('modals.settingsTransfer.import.errors.backupFailed'),
+          'warning'
+        );
         return;
       }
 
-      showSuccessNotice(t('notifications.settingsImported'));
+      // `replaceSettings` warns and rolls back by itself when the save fails
+      if (
+        !(await this.plugin.replaceSettings(applySettingsTransfer(transfer)))
+      ) {
+        return;
+      }
+
+      showNotice(t('notifications.settingsImported'), 'success');
       this.tab.update();
       this.close();
     } finally {

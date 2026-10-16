@@ -1,66 +1,21 @@
+import { normalizePath } from 'obsidian';
 import { verboseLog } from '../utils';
+import {
+  folderExclusionEntry,
+  hasExcludedFileEntry,
+} from '../utils/file-exclusions';
 import { FirstLineIsTitlePlugin } from '../settings/settings-base';
-import { FIRST_ENABLE_CHAR_KEYS } from '../types/char-replacement';
 
 /**
  * PluginInitializer
  *
- * Handles plugin initialization logic including:
- * - First-enable logic for settings
- *
- * Responsibilities:
- * - Initialize first-enable states for custom replacements, file name exclusions, forbidden chars
- * - Handle settings defaults
+ * Runs the one-time setup a fresh install gets: auto-detected exclusions for template folders and Excalidraw files.
  */
 export class PluginInitializer {
   constructor(private plugin: FirstLineIsTitlePlugin) {}
 
   get settings() {
     return this.plugin.settings;
-  }
-
-  /**
-   * Initialize first-enable logic for sections
-   * Ensures that when features are enabled for the first time, their items are enabled
-   */
-  async initializeFirstEnableLogic(): Promise<void> {
-    let settingsChanged = false;
-
-    // Custom replacements first-enable logic
-    if (
-      this.settings.customReplacements.enableCustomReplacements &&
-      !this.settings.core.hasEnabledCustomReplacements
-    ) {
-      this.settings.customReplacements.rules.forEach((replacement) => {
-        replacement.enabled = true;
-      });
-      this.settings.core.hasEnabledCustomReplacements = true;
-      settingsChanged = true;
-      verboseLog(
-        this.plugin,
-        'Initialized custom replacements on first enable'
-      );
-    }
-
-    // Forbidden chars first-enable logic
-    if (
-      this.settings.characterReplacements.enableForbiddenCharReplacements &&
-      !this.settings.core.hasEnabledForbiddenChars
-    ) {
-      FIRST_ENABLE_CHAR_KEYS.forEach((key) => {
-        this.settings.characterReplacements.charReplacements[key].enabled = true;
-      });
-      this.settings.core.hasEnabledForbiddenChars = true;
-      settingsChanged = true;
-      verboseLog(
-        this.plugin,
-        'Initialized forbidden char replacements on first enable'
-      );
-    }
-
-    if (settingsChanged) {
-      await this.plugin.saveSettings();
-    }
   }
 
   /**
@@ -215,34 +170,31 @@ export class PluginInitializer {
     );
     verboseLog(
       this.plugin,
-      'Current excluded folders before processing:',
-      this.settings.exclusions.excludedFolders
+      'Current excluded files before processing:',
+      this.settings.exclusions.excludedFiles
     );
 
     // Add folders if they don't already exist
     for (const folder of foldersToAdd) {
-      const hasFolderExcluded = this.settings.exclusions.excludedFolders.some(
-        (existingFolder) => existingFolder === folder
-      );
+      // The vault root has no entry of its own, as in Obsidian's Excluded files, where `//` matches nothing
+      if (normalizePath(folder) === '/') {
+        verboseLog(this.plugin, 'Template folder is the vault root, skipping');
+        continue;
+      }
+      // The form toggleFolderExclusion writes; normalizing first keeps a user-typed `Templates/` or `/Templates` from becoming `Templates//`
+      const folderEntry = folderExclusionEntry(folder);
 
-      if (!hasFolderExcluded) {
-        // Remove empty string if it's the only entry
-        if (
-          this.settings.exclusions.excludedFolders.length === 1 &&
-          this.settings.exclusions.excludedFolders[0].trim() === ''
-        ) {
-          this.settings.exclusions.excludedFolders = [];
-          verboseLog(
-            this.plugin,
-            'Removed default empty string entry from excluded folders'
-          );
-        }
-
-        this.settings.exclusions.excludedFolders.push(folder);
+      if (
+        !hasExcludedFileEntry(
+          this.settings.exclusions.excludedFiles,
+          folderEntry
+        )
+      ) {
+        this.settings.exclusions.excludedFiles.push(folderEntry);
         verboseLog(
           this.plugin,
           'Successfully added folder to exclusions:',
-          folder
+          folderEntry
         );
       } else {
         verboseLog(
@@ -265,8 +217,8 @@ export class PluginInitializer {
     }
     verboseLog(
       this.plugin,
-      'Final excluded folders after processing:',
-      this.settings.exclusions.excludedFolders
+      'Final excluded files after processing:',
+      this.settings.exclusions.excludedFiles
     );
 
     // Mark as setup complete

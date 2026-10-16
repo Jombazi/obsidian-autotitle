@@ -3,6 +3,8 @@
  * Handles tag extraction from different UI locations (tag pane, YAML, editor).
  */
 
+import type { EditorPosition, MarkdownView } from 'obsidian';
+
 /**
  * Result from tag detection
  */
@@ -54,28 +56,36 @@ export function detectTagFromDOM(
 }
 
 /**
- * Detect if editor cursor is on a tag and extract its name.
+ * Detect if the editor cursor is on a tag, reading the tags Obsidian indexed for the note so the tag matches what Obsidian itself counts as one.
  * Used for editor-menu event handler.
  *
- * @param line - The line content
- * @param cursorPos - Character position in line
- * @returns Tag name with # prefix if found, null otherwise
+ * The cache indexes the last saved text, so a tag typed since then shows no commands until the cache catches up.
+ *
+ * @param view - The Markdown view the menu opened in
+ * @param pos - Cursor position in the editor
+ * @returns Tag info if the cursor is on an indexed tag, null otherwise
  */
 export function detectTagFromEditor(
-  line: string,
-  cursorPos: number
-): string | null {
-  // Find all hashtags in the line
-  const tagRegex = /#[\w/-]+/g;
-  let match;
+  view: MarkdownView,
+  pos: EditorPosition
+): TagDetectionResult | null {
+  if (!view.file) return null;
 
-  while ((match = tagRegex.exec(line)) !== null) {
-    const tagStart = match.index;
-    const tagEnd = match.index + match[0].length;
+  const tags = view.app.metadataCache.getFileCache(view.file)?.tags;
+  if (!tags) return null;
 
-    if (cursorPos >= tagStart && cursorPos <= tagEnd) {
-      return match[0]; // Return with # prefix
+  const line = view.editor.getLine(pos.line);
+  for (const { tag, position } of tags) {
+    const { start, end } = position;
+    if (start.line !== pos.line || pos.ch < start.col || pos.ch > end.col) {
+      continue;
     }
+    // Unsaved edits above can shift an indexed position onto other text
+    if (line.slice(start.col, end.col) !== tag) continue;
+    return {
+      tagName: tag.startsWith('#') ? tag.slice(1) : tag,
+      location: 'editor',
+    };
   }
 
   return null;

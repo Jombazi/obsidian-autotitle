@@ -1,16 +1,8 @@
 import type {} from 'obsidian';
+import type { Text } from '@codemirror/state';
 import FirstLineIsTitlePlugin from '../../main';
 import { TIMING } from '../constants/timing';
 import { TitleRegionCache } from '../types';
-
-/**
- * Operation tracking data for a file
- */
-export interface OperationData {
-  count: number;
-  lastContent: string;
-  lastUpdate: number;
-}
 
 /**
  * Comprehensive per-file state tracking
@@ -19,34 +11,26 @@ export interface FileState {
   path: string;
 
   // Lifecycle timers
-  creationDelayTimer?: number;
   throttleTimer?: number; // checkInterval > 0 delayed processing
+  throttleTimerIsDelayed?: boolean; // The timer waits for typing in a linked note to pause, so each new first-line edit restarts it
 
   // Content tracking
-  lastEditorContent?: string;
+  lastEditorContent?: string | Text; // A CodeMirror document is kept as is, since it is immutable and shares structure with the live one, and converted to a string only when read
   lastEditorContentTimestamp?: number; // When editor content was last set (for staleness detection)
   lastSavedContent?: string; // Content after last save (for modify handler comparison)
   lastSavedContentTimestamp?: number;
   titleRegionCache?: TitleRegionCache;
   lastSelfRefNotice?: number; // timestamp
-  lastFileNameExclusionNotice?: number; // timestamp
 
   // Operation tracking
-  operationData?: OperationData;
   isLocked?: boolean;
   lockTimestamp?: number; // When lock was acquired (for stale lock cleanup)
-  pendingAliasRecheck?: boolean;
-  pendingAliasEditor?: unknown; // Stored editor reference for popover detection
-  lastAliasUpdateSucceeded?: boolean; // Whether last alias update succeeded (true) or was skipped (false)
-  lastAliasUpdateTimestamp?: number; // When the alias update status was set (for staleness detection)
+  pendingFirstLinePropertyRecheck?: boolean;
   isSyncingEditors?: boolean; // True when syncing background editors to prevent spurious rechecks
+  pendingMetadataUpdate?: boolean; // A first line property file write whose metadata update has not arrived yet; per path, so the rename move carries it
 
-  // Rename tracking - prevents processing stale content after rename
-  lastRenamedTime?: number; // Timestamp when file was renamed by plugin
-
-  // Cache staleness tracking - when editor sync skipped in popover
-  needsFreshRead?: boolean; // True when cache is stale, must read from disk not cache
-  needsFreshReadTimestamp?: number; // When flag was set, for cleanup in maintenance
+  // Rename tracking: the one record behind the stale-create guard and the disk-staleness skip, set only on the path a plugin rename moved a note into
+  lastRenamedTime?: number; // Timestamp when the plugin renamed a note into this path
 }
 
 /**
@@ -71,55 +55,26 @@ export class FileStateManager {
     return this.fileStates.get(path)!;
   }
 
-  /**
-   * Get file state (read-only)
-   */
-  getState(path: string): Readonly<FileState> | undefined {
-    return this.fileStates.get(path);
-  }
-
   // ============================================================================
   // LIFECYCLE TIMERS
   // ============================================================================
 
   /**
-   * Set creation delay timer for a file
-   */
-  setCreationDelayTimer(path: string, timer: number): void {
-    const state = this.getOrCreateState(path);
-    if (state.creationDelayTimer) {
-      window.clearTimeout(state.creationDelayTimer);
-    }
-    state.creationDelayTimer = timer;
-  }
-
-  /**
-   * Clear creation delay timer
-   */
-  clearCreationDelayTimer(path: string): void {
-    const state = this.fileStates.get(path);
-    if (state?.creationDelayTimer) {
-      window.clearTimeout(state.creationDelayTimer);
-      delete state.creationDelayTimer;
-    }
-  }
-
-  /**
-   * Check if file is in creation delay
-   */
-  isFileInCreationDelay(path: string): boolean {
-    return !!this.fileStates.get(path)?.creationDelayTimer;
-  }
-
-  /**
    * Set throttle timer for a file (checkInterval > 0 delayed processing)
+   * @param delayed - True when the timer waits out a linked note's typing pause
    */
-  setThrottleTimer(path: string, timer: number): void {
+  setThrottleTimer(path: string, timer: number, delayed = false): void {
     const state = this.getOrCreateState(path);
     if (state.throttleTimer) {
       window.clearTimeout(state.throttleTimer);
     }
     state.throttleTimer = timer;
+    if (delayed) {
+      state.throttleTimerIsDelayed = true;
+    } else {
+      // Deleted rather than set to false, so runMaintenance can still drop an otherwise empty state.
+      delete state.throttleTimerIsDelayed;
+    }
   }
 
   /**
@@ -130,6 +85,7 @@ export class FileStateManager {
     if (state?.throttleTimer) {
       window.clearTimeout(state.throttleTimer);
       delete state.throttleTimer;
+      delete state.throttleTimerIsDelayed;
     }
   }
 
@@ -141,6 +97,14 @@ export class FileStateManager {
   }
 
   /**
+   * Check if file has a throttle timer waiting out a linked note's typing pause
+   */
+  hasDelayedThrottleTimer(path: string): boolean {
+    const state = this.fileStates.get(path);
+    return !!state?.throttleTimer && state.throttleTimerIsDelayed === true;
+  }
+
+  /**
    * Clear all throttle timers (used on settings change)
    */
   clearAllThrottleTimers(): void {
@@ -148,6 +112,7 @@ export class FileStateManager {
       if (state.throttleTimer) {
         window.clearTimeout(state.throttleTimer);
         delete state.throttleTimer;
+        delete state.throttleTimerIsDelayed;
       }
     }
   }
@@ -158,18 +123,26 @@ export class FileStateManager {
 
   /**
    * Set last editor content with timestamp
+   * @param content - The text, or the editor's CodeMirror document, which is stored without converting it
    */
-  setLastEditorContent(path: string, content: string): void {
+  setLastEditorContent(path: string, content: string | Text): void {
     const state = this.getOrCreateState(path);
     state.lastEditorContent = content;
     state.lastEditorContentTimestamp = Date.now();
   }
 
   /**
-   * Get last editor content
+   * Get last editor content as a string, converting a stored CodeMirror document
    */
   getLastEditorContent(path: string): string | undefined {
-    return this.fileStates.get(path)?.lastEditorContent;
+    return this.fileStates.get(path)?.lastEditorContent?.toString();
+  }
+
+  /**
+   * Check whether a note has last editor content, without converting it
+   */
+  hasLastEditorContent(path: string): boolean {
+    return this.fileStates.get(path)?.lastEditorContent !== undefined;
   }
 
   /**
@@ -181,26 +154,6 @@ export class FileStateManager {
       delete state.lastEditorContent;
       delete state.lastEditorContentTimestamp;
     }
-  }
-
-  /**
-   * Check if last editor content is stale (older than specified TTL).
-   *
-   * Staleness thresholds are intentionally layered:
-   * - 5 minutes (default): Content considered stale for comparison purposes
-   * - 10 minutes: Content actually deleted from memory in runMaintenance()
-   *
-   * @param path - File path
-   * @param maxAgeMs - Maximum age in milliseconds (default: 5 minutes)
-   * @returns true if content is stale or doesn't exist
-   */
-  isEditorContentStale(
-    path: string,
-    maxAgeMs: number = 5 * 60 * 1000
-  ): boolean {
-    const state = this.fileStates.get(path);
-    if (!state?.lastEditorContentTimestamp) return true;
-    return Date.now() - state.lastEditorContentTimestamp > maxAgeMs;
   }
 
   /**
@@ -231,54 +184,6 @@ export class FileStateManager {
   }
 
   /**
-   * Check if last saved content is stale (older than specified TTL).
-   *
-   * Staleness thresholds are intentionally layered:
-   * - 5 minutes (default): Content considered stale for comparison purposes
-   * - 10 minutes: Content actually deleted from memory in runMaintenance()
-   *
-   * This allows graceful degradation where stale content still exists
-   * but is treated as unreliable for frontmatter-only detection.
-   *
-   * @param path - File path
-   * @param maxAgeMs - Maximum age in milliseconds (default: 5 minutes)
-   * @returns true if content is stale or doesn't exist
-   */
-  isSavedContentStale(path: string, maxAgeMs: number = 5 * 60 * 1000): boolean {
-    const state = this.fileStates.get(path);
-    if (!state?.lastSavedContentTimestamp) return true;
-    return Date.now() - state.lastSavedContentTimestamp > maxAgeMs;
-  }
-
-  /**
-   * Set last alias update status with timestamp
-   */
-  setLastAliasUpdateStatus(path: string, succeeded: boolean): void {
-    const state = this.getOrCreateState(path);
-    state.lastAliasUpdateSucceeded = succeeded;
-    state.lastAliasUpdateTimestamp = Date.now();
-  }
-
-  /**
-   * Get last alias update status
-   */
-  getLastAliasUpdateStatus(path: string): boolean | undefined {
-    return this.fileStates.get(path)?.lastAliasUpdateSucceeded;
-  }
-
-  /**
-   * Check if last alias update status is stale (older than specified TTL)
-   * @param path - File path
-   * @param maxAgeMs - Maximum age in milliseconds (default: 5 minutes)
-   * @returns true if status is stale or doesn't exist
-   */
-  isAliasStatusStale(path: string, maxAgeMs: number = 5 * 60 * 1000): boolean {
-    const state = this.fileStates.get(path);
-    if (!state?.lastAliasUpdateTimestamp) return true;
-    return Date.now() - state.lastAliasUpdateTimestamp > maxAgeMs;
-  }
-
-  /**
    * Set title region cache
    */
   setTitleRegionCache(path: string, cache: TitleRegionCache): void {
@@ -291,37 +196,6 @@ export class FileStateManager {
    */
   getTitleRegionCache(path: string): TitleRegionCache | undefined {
     return this.fileStates.get(path)?.titleRegionCache;
-  }
-
-  /**
-   * Delete title region cache
-   */
-  deleteTitleRegionCache(path: string): void {
-    const state = this.fileStates.get(path);
-    if (state) {
-      delete state.titleRegionCache;
-    }
-  }
-
-  /**
-   * Clear all title region caches (on settings change)
-   */
-  clearAllTitleRegionCaches(): void {
-    for (const state of this.fileStates.values()) {
-      delete state.titleRegionCache;
-    }
-  }
-
-  /**
-   * Update title region cache key on rename
-   */
-  updateTitleRegionCacheKey(oldPath: string, newPath: string): void {
-    const state = this.fileStates.get(oldPath);
-    if (state?.titleRegionCache) {
-      const cache = state.titleRegionCache;
-      delete state.titleRegionCache;
-      this.setTitleRegionCache(newPath, cache);
-    }
   }
 
   /**
@@ -341,62 +215,9 @@ export class FileStateManager {
     return Date.now() - state.lastSelfRefNotice > TIMING.SELF_REF_NOTICE_TTL_MS;
   }
 
-  /**
-   * Set last file name exclusion notice timestamp
-   */
-  setFileNameExclusionNotice(path: string): void {
-    const state = this.getOrCreateState(path);
-    state.lastFileNameExclusionNotice = Date.now();
-  }
-
-  /**
-   * Check if can show file name exclusion notice (rate limit)
-   */
-  canShowFileNameExclusionNotice(path: string): boolean {
-    const state = this.fileStates.get(path);
-    if (!state?.lastFileNameExclusionNotice) return true;
-    return (
-      Date.now() - state.lastFileNameExclusionNotice >
-      TIMING.SELF_REF_NOTICE_TTL_MS
-    );
-  }
-
   // ============================================================================
   // OPERATION TRACKING
   // ============================================================================
-
-  /**
-   * Get operation data
-   */
-  getOperationData(path: string): OperationData | undefined {
-    return this.fileStates.get(path)?.operationData;
-  }
-
-  /**
-   * Set operation data
-   */
-  setOperationData(path: string, data: OperationData): void {
-    const state = this.getOrCreateState(path);
-    state.operationData = data;
-  }
-
-  /**
-   * Update operation count
-   */
-  updateOperationCount(path: string, content: string): void {
-    const state = this.getOrCreateState(path);
-    if (!state.operationData) {
-      state.operationData = {
-        count: 1,
-        lastContent: content,
-        lastUpdate: Date.now(),
-      };
-    } else {
-      state.operationData.count++;
-      state.operationData.lastContent = content;
-      state.operationData.lastUpdate = Date.now();
-    }
-  }
 
   /**
    * Acquire file operation lock
@@ -417,7 +238,8 @@ export class FileStateManager {
   releaseLock(path: string): void {
     const state = this.fileStates.get(path);
     if (state) {
-      state.isLocked = false;
+      // Flags are deleted, never set to false, so runMaintenance can drop a state once nothing else is held
+      delete state.isLocked;
       delete state.lockTimestamp;
     }
   }
@@ -430,62 +252,28 @@ export class FileStateManager {
   }
 
   /**
-   * Clear all locks (on unload)
+   * Mark file for pending first line property recheck
    */
-  clearAllLocks(): void {
-    for (const state of this.fileStates.values()) {
-      state.isLocked = false;
-    }
-  }
-
-  /**
-   * Mark file for pending alias recheck
-   * @param editor - Optional editor reference for popover detection
-   */
-  markPendingAliasRecheck(path: string, editor?: unknown): void {
+  markPendingFirstLinePropertyRecheck(path: string): void {
     const state = this.getOrCreateState(path);
-    state.pendingAliasRecheck = true;
-    if (editor) {
-      state.pendingAliasEditor = editor;
-    }
+    state.pendingFirstLinePropertyRecheck = true;
   }
 
   /**
-   * Check if file has pending alias recheck
+   * Check if file has pending first line property recheck
    */
-  hasPendingAliasRecheck(path: string): boolean {
-    return this.fileStates.get(path)?.pendingAliasRecheck ?? false;
+  hasPendingFirstLinePropertyRecheck(path: string): boolean {
+    return this.fileStates.get(path)?.pendingFirstLinePropertyRecheck ?? false;
   }
 
   /**
-   * Get stored editor reference for pending alias recheck
+   * Clear pending first line property recheck
    */
-  getPendingAliasEditor(path: string): unknown {
-    return this.fileStates.get(path)?.pendingAliasEditor;
-  }
-
-  /**
-   * Clear pending alias recheck
-   */
-  clearPendingAliasRecheck(path: string): void {
+  clearPendingFirstLinePropertyRecheck(path: string): void {
     const state = this.fileStates.get(path);
     if (state) {
-      state.pendingAliasRecheck = false;
-      state.pendingAliasEditor = undefined;
+      delete state.pendingFirstLinePropertyRecheck;
     }
-  }
-
-  /**
-   * Get all file paths with pending alias recheck
-   */
-  getFilesWithPendingAliasRecheck(): string[] {
-    const files: string[] = [];
-    for (const [path, state] of this.fileStates.entries()) {
-      if (state.pendingAliasRecheck) {
-        files.push(path);
-      }
-    }
-    return files;
   }
 
   /**
@@ -511,58 +299,58 @@ export class FileStateManager {
   clearEditorSyncing(path: string): void {
     const state = this.fileStates.get(path);
     if (state) {
-      state.isSyncingEditors = false;
+      delete state.isSyncingEditors;
     }
   }
 
   /**
-   * Mark file as needing fresh read from disk (not cache)
-   * Used when editor sync skipped in popover - cache is stale, must read from disk
+   * Mark the path a plugin rename just moved a note into
+   * Read by the stale-create guard and by processFile's skip of disk content that can trail the rename, each with its own window
+   * @param path - The rename's new path; the path it vacated takes no record, since a note found there afterwards is a different note
    */
-  markNeedsFreshRead(path: string): void {
-    const state = this.getOrCreateState(path);
-    state.needsFreshRead = true;
-    state.needsFreshReadTimestamp = Date.now();
-  }
-
-  /**
-   * Check if file needs fresh read from disk (cache is stale)
-   */
-  needsFreshRead(path: string): boolean {
-    return this.fileStates.get(path)?.needsFreshRead ?? false;
-  }
-
-  /**
-   * Clear needs fresh read flag
-   */
-  clearNeedsFreshRead(path: string): void {
-    const state = this.fileStates.get(path);
-    if (state) {
-      state.needsFreshRead = false;
-      delete state.needsFreshReadTimestamp;
-    }
-  }
-
-  /**
-   * Mark file as recently renamed by plugin
-   * Used to prevent processFile from running with stale content immediately after rename
-   */
-  markRecentlyRenamed(path: string): void {
+  markRecentlyRenamedInto(path: string): void {
     const state = this.getOrCreateState(path);
     state.lastRenamedTime = Date.now();
   }
 
   /**
-   * Check if file was recently renamed by plugin
-   * Returns true if renamed within the specified time window
+   * Check if a plugin rename moved a note into this path within the time window
+   * A path a rename vacated never matches
    *
    * @param path - File path to check
    * @param withinMs - Time window in milliseconds (default 100ms)
    */
-  wasRecentlyRenamed(path: string, withinMs: number = 100): boolean {
+  wasRecentlyRenamedInto(
+    path: string,
+    withinMs: number = TIMING.RENAME_RECENTLY_WINDOW_MS
+  ): boolean {
     const state = this.fileStates.get(path);
     if (!state?.lastRenamedTime) return false;
     return Date.now() - state.lastRenamedTime < withinMs;
+  }
+
+  /**
+   * Mark a note's first line property file write as waiting for its metadata update
+   */
+  markPendingMetadataUpdate(path: string): void {
+    this.getOrCreateState(path).pendingMetadataUpdate = true;
+  }
+
+  /**
+   * Check if a note's first line property file write still waits for its metadata update
+   */
+  hasPendingMetadataUpdate(path: string): boolean {
+    return this.fileStates.get(path)?.pendingMetadataUpdate ?? false;
+  }
+
+  /**
+   * Clear a note's pending metadata update flag
+   */
+  clearPendingMetadataUpdate(path: string): void {
+    const state = this.fileStates.get(path);
+    if (state) {
+      delete state.pendingMetadataUpdate;
+    }
   }
 
   // ============================================================================
@@ -587,8 +375,6 @@ export class FileStateManager {
   notifyFileDeleted(path: string): void {
     const state = this.fileStates.get(path);
     if (state) {
-      if (state.creationDelayTimer)
-        window.clearTimeout(state.creationDelayTimer);
       if (state.throttleTimer) window.clearTimeout(state.throttleTimer);
       this.fileStates.delete(path);
     }
@@ -596,35 +382,17 @@ export class FileStateManager {
 
   /**
    * Maintenance: cleanup stale entries
-   * Called periodically to remove old operation data, flags, and timestamps
+   * Called periodically to remove old content, flags, and timestamps
    */
   runMaintenance(): void {
     const now = Date.now();
     const staleThreshold = 10 * 60 * 1000; // 10 minutes
 
     for (const [path, state] of this.fileStates.entries()) {
-      // Clean up stale operation data
-      if (state.operationData) {
-        const age = now - state.operationData.lastUpdate;
-        if (age > staleThreshold) {
-          delete state.operationData;
-        }
-      }
-
-      // Clean up stale needsFreshRead flags (5 minutes)
-      if (state.needsFreshReadTimestamp) {
-        const age = now - state.needsFreshReadTimestamp;
-        if (age > 5 * 60 * 1000) {
-          delete state.needsFreshRead;
-          delete state.needsFreshReadTimestamp;
-        }
-      }
-
       // Clean up stale lastRenamedTime (prevents memory leak)
-      // Cleanup after 1 second (wasRecentlyRenamed checks 100ms window)
       if (state.lastRenamedTime) {
         const age = now - state.lastRenamedTime;
-        if (age > 1000) {
+        if (age > TIMING.RECENTLY_RENAMED_RECORD_TTL_MS) {
           delete state.lastRenamedTime;
         }
       }
@@ -633,13 +401,13 @@ export class FileStateManager {
       if (state.isLocked && state.lockTimestamp) {
         const age = now - state.lockTimestamp;
         if (age > TIMING.FILE_LOCK_STALE_THRESHOLD_MS) {
-          state.isLocked = false;
+          delete state.isLocked;
           delete state.lockTimestamp;
         }
       }
 
       // Clean up stale lastEditorContent (prevents memory leak from large notes)
-      // Cleanup after 10 minutes (staleThreshold) - staleness check uses 5 min default
+      // Cleanup after 10 minutes (staleThreshold)
       if (state.lastEditorContentTimestamp) {
         const age = now - state.lastEditorContentTimestamp;
         if (age > staleThreshold) {
@@ -649,7 +417,7 @@ export class FileStateManager {
       }
 
       // Clean up stale lastSavedContent (prevents memory leak from large notes)
-      // Cleanup after 10 minutes (staleThreshold) - staleness check uses 5 min default
+      // Cleanup after 10 minutes (staleThreshold)
       if (state.lastSavedContentTimestamp) {
         const age = now - state.lastSavedContentTimestamp;
         if (age > staleThreshold) {
@@ -658,27 +426,19 @@ export class FileStateManager {
         }
       }
 
-      // Clean up stale lastAliasUpdateStatus (prevents stale status affecting logic)
-      // Cleanup after 5 minutes - status is only relevant shortly after update
-      if (state.lastAliasUpdateTimestamp) {
-        const age = now - state.lastAliasUpdateTimestamp;
-        if (age > 5 * 60 * 1000) {
-          delete state.lastAliasUpdateSucceeded;
-          delete state.lastAliasUpdateTimestamp;
+      // Clean up a stale title region cache, which would otherwise keep a state alive for every path a title passed through
+      if (state.titleRegionCache) {
+        const age = now - state.titleRegionCache.lastUpdated;
+        if (age > staleThreshold) {
+          delete state.titleRegionCache;
         }
       }
 
-      // Clean up stale self-ref and file name exclusion notice timestamps
+      // Clean up stale self-ref notice timestamps
       if (state.lastSelfRefNotice) {
         const age = now - state.lastSelfRefNotice;
         if (age > staleThreshold) {
           delete state.lastSelfRefNotice;
-        }
-      }
-      if (state.lastFileNameExclusionNotice) {
-        const age = now - state.lastFileNameExclusionNotice;
-        if (age > staleThreshold) {
-          delete state.lastFileNameExclusionNotice;
         }
       }
 
@@ -697,8 +457,6 @@ export class FileStateManager {
    */
   dispose(): void {
     for (const state of this.fileStates.values()) {
-      if (state.creationDelayTimer)
-        window.clearTimeout(state.creationDelayTimer);
       if (state.throttleTimer) window.clearTimeout(state.throttleTimer);
     }
     this.fileStates.clear();

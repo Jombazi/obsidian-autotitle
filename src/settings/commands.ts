@@ -1,10 +1,11 @@
 import { SettingDefinitionPage } from 'obsidian';
+import { SettingPath } from './settings-paths';
 import { FirstLineIsTitlePlugin } from './settings-base';
 import { t } from '../i18n';
 
 export function buildCommandsPage(
   plugin: FirstLineIsTitlePlugin
-): SettingDefinitionPage {
+): SettingDefinitionPage<SettingPath> {
   return {
     type: 'page',
     name: t('settings.sections.commands'),

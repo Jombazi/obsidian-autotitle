@@ -1,0 +1,172 @@
+/* First Line is Title */
+
+/* ── Modals ── */
+
+.flit-link-input-full {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.flit-input-container {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* On phones the slide-up's inline transitions are cleared at its end, and over a long list Android then paints one frame without the dim and with part of the sheet missing; a separate layer for the dim prevents it. */
+.is-phone .flit-modal .modal-bg {
+  will-change: opacity;
+}
+
+/* Obsidian hides header buttons in confirmation sheets, and FLIT's form sheets put their close and submit buttons there like Obsidian's own form sheets. */
+.is-mobile .modal.flit-header-actions .modal-header .modal-header-button {
+  display: flex;
+}
+
+/* Keeps the centered title clear of the close and submit buttons, restoring Obsidian's phone title width that confirmation sheets lift. */
+.is-phone .modal.flit-header-actions .modal-title {
+  max-width: 70vw;
+}
+
+/* Obsidian lifts a sheet above the on-screen keyboard through its button row's bottom margin, since Android sets the bottom safe-area inset to the keyboard height; without the row, the content takes that margin. */
+.is-phone
+  .modal-container.mod-confirmation
+  .modal.flit-header-actions
+  .modal-content {
+  margin-bottom: var(--safe-area-inset-bottom, 0px);
+}
+
+/* Obsidian's disabled submit button has no style, so one that cannot save would look tappable. */
+.modal.flit-header-actions .modal-header-button.mod-cta.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Settings import and export ── */
+
+/* Import and export behavior and styles are ported from Notebook Navigator and aim to match it as closely as possible, so users of both plugins get the same familiar experience. */
+
+/* Wider than the 560px dialog default, which wraps a settings payload into noise. Obsidian's own --dialog-max-width still caps this, so the mobile safe-area calc it carries there keeps applying. */
+.flit-settings-transfer {
+  width: var(--modal-max-width-narrow, 800px);
+}
+
+.flit-settings-transfer-editor {
+  width: 100%;
+  box-sizing: border-box;
+  /* Roughly twelve lines: enough to read a payload without scrolling, and the handle is there when it is not. */
+  min-height: 16em;
+  resize: vertical;
+  font-family: var(--font-monospace, monospace);
+  font-size: var(--font-ui-smaller, 12px);
+}
+
+/* Raised by the adjacent button instead, so the picker belongs to the modal's own document rather than the main window's. */
+.flit-settings-transfer-file-input {
+  display: none;
+}
+
+/* ── Hidden first line property ── */
+
+/* Scoped to the element the class is actually applied to, so it outranks `.metadata-property { display: flex }` (0,1,0) outright rather than relying on stylesheet order — which a theme could otherwise win. */
+.metadata-property.flit-property-hidden {
+  display: none;
+}
+
+.metadata-properties.flit-container-hidden {
+  display: none;
+}
+
+/* REQUIRES !important: Obsidian shows the editor's property container via `.markdown-source-view.is-live-preview.show-properties .metadata-container:not(.mod-error)`, which is (0,5,0). Beating that by specificity means chaining Obsidian's own state classes, so the override would silently fail — leaving the first line property visible — the moment any of them is renamed. */
+.metadata-container.flit-container-hidden {
+  display: none !important;
+}
+
+/* Fix multi-select wrapping ONLY when plugin has visible properties */
+.metadata-container:not(.cm-editor .metadata-container)
+  .metadata-property.flit-property-visible {
+  display: flex;
+  flex-wrap: nowrap;
+}
+
+.metadata-container:not(.cm-editor .metadata-container)
+  .metadata-property.flit-property-visible
+  .metadata-property-key {
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.metadata-container:not(.cm-editor .metadata-container)
+  .metadata-property.flit-property-visible
+  .metadata-property-value {
+  flex-shrink: 1;
+  min-width: 0;
+  flex-grow: 1;
+}
+
+.metadata-container:not(.cm-editor .metadata-container)
+  .metadata-property.flit-property-visible
+  .multi-select-container,
+.metadata-container:not(.cm-editor .metadata-container)
+  .metadata-property.flit-property-visible
+  .metadata-input-longtext {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* ── Rule summaries ── */
+
+/* A setting name or description collapses runs of spaces, so a rule such as `a  b` would read as `a b` */
+.flit-rule-text {
+  white-space: pre;
+}
+
+/* ── Notes ── */
+
+/* A note at the top of a box is generated content on the rows container, not a row: a list note (the custom replacements rule order, the exclusion lists' caveats; see `withListNote`) or a description-only row's note (see `buildDescRow`), whose row hides so keyboard navigation skips it */
+/* The attribute outlives a list's last row because the container is reused for the empty state, so a list note is skipped while that state shows */
+/* A `visible` predicate hides a description-only row with an inline `display: none`, and its note goes with it */
+/* Spacing, color and type copy a row's description, with the row padding of the box it sits in; a multi-line note breaks at its newlines */
+.flit-list-note
+  > .setting-items[data-flit-note]:not(:has(> .mod-empty-state))::before,
+.setting-items[data-flit-note]:has(
+    > .flit-desc-row:not([style*='display: none'])
+  )::before {
+  content: attr(data-flit-note);
+  display: block;
+  white-space: pre-line;
+  padding: calc(var(--setting-items-padding-y, 8px) + var(--size-4-1))
+    var(--setting-items-padding-x, 16px) var(--setting-items-padding-y, 8px);
+  color: var(--text-muted, #5c5c5c);
+  font-size: var(--font-ui-smaller, 12px);
+  line-height: var(--line-height-tight, 1.3);
+}
+
+/* Obsidian omits the first row's divider, which here separates the note from the first row */
+.flit-list-note
+  > .setting-items[data-flit-note]:not(:has(> .mod-empty-state))
+  > .setting-item:not(.setting-item-heading):first-child::before {
+  content: '';
+}
+
+/* Settings' keyboard navigation steps through shown rows only */
+.setting-item.flit-desc-row {
+  display: none;
+}
+
+/* Outside a list, a row's text stops short of the row's end padding by its info column's end margin */
+.setting-group:not(.mod-list)
+  > .setting-items[data-flit-note]:has(> .flit-desc-row)::before {
+  padding-inline-end: calc(
+    var(--setting-items-padding-x, 20px) + var(--size-4-4)
+  );
+}
+
+/* Obsidian drops that margin in a narrow pane, under the same container query */
+@container (max-width: 400px) {
+  .setting-group:not(.mod-list)
+    > .setting-items[data-flit-note]:has(> .flit-desc-row)::before {
+    padding-inline-end: var(--setting-items-padding-x, 20px);
+  }
+}

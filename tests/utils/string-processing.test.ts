@@ -1,12 +1,19 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   filterNonEmpty,
+  normalizeLineBreaks,
   processForbiddenChars,
   generateSafeLinkTarget,
   reverseSafeLinkTarget,
+  truncateWithEllipsis,
+  resolveFileNameChar,
 } from '../../src/utils/string-processing';
 import { createTestSettings } from '../testUtils';
 import { PluginSettings } from '../../src/types';
+import {
+  UNIVERSAL_FORBIDDEN_CHARS,
+  WINDOWS_ANDROID_CHARS,
+} from '../../src/constants';
 
 describe('string-processing', () => {
   describe('filterNonEmpty', () => {
@@ -40,6 +47,16 @@ describe('string-processing', () => {
     });
   });
 
+  describe('normalizeLineBreaks', () => {
+    it('turns CRLF and lone CR line breaks into LF', () => {
+      expect(normalizeLineBreaks('a\r\nb\rc\nd')).toBe('a\nb\nc\nd');
+    });
+
+    it('leaves LF text unchanged', () => {
+      expect(normalizeLineBreaks('---\na: b\n---\n')).toBe('---\na: b\n---\n');
+    });
+  });
+
   describe('processForbiddenChars', () => {
     let settings: PluginSettings;
 
@@ -47,7 +64,6 @@ describe('string-processing', () => {
       settings = createTestSettings({
         characterReplacements: {
           enableForbiddenCharReplacements: true,
-          osPreset: 'macOS',
           charReplacements: {
             slash: {
               enabled: true,
@@ -190,6 +206,11 @@ describe('string-processing', () => {
       expect(result).toBe('hello');
     });
 
+    // The leading whitespace is trimmed afterwards, which would leave the dot first
+    it('should strip a dot that only whitespace precedes', () => {
+      expect(processForbiddenChars('  .hello', settings)).toBe('hello');
+    });
+
     it('should keep dots in middle when dot replacement disabled', () => {
       const result = processForbiddenChars('hello.world', settings);
       expect(result).toBe('hello.world');
@@ -199,6 +220,14 @@ describe('string-processing', () => {
       settings.characterReplacements.charReplacements.dot.enabled = true;
       settings.characterReplacements.charReplacements.dot.replacement = '-';
       const result = processForbiddenChars('hello.world', settings);
+      expect(result).toBe('hello-world');
+    });
+
+    it('should trim spaces before a replaced dot when its trimLeft is on', () => {
+      settings.characterReplacements.charReplacements.dot.enabled = true;
+      settings.characterReplacements.charReplacements.dot.replacement = '-';
+      settings.characterReplacements.charReplacements.dot.trimLeft = true;
+      const result = processForbiddenChars('hello .world', settings);
       expect(result).toBe('hello-world');
     });
 
@@ -226,16 +255,39 @@ describe('string-processing', () => {
       expect(result).toContain('…');
     });
 
+    it('should keep a title exactly maxLength long', () => {
+      expect(
+        processForbiddenChars('0123456789', settings, { maxLength: 10 })
+      ).toBe('0123456789');
+    });
+
+    it('should truncate a title one past maxLength to maxLength', () => {
+      const result = processForbiddenChars('0123456789A', settings, {
+        maxLength: 10,
+      });
+
+      expect(result).toBe('012345678…');
+      expect(result).toHaveLength(10);
+    });
+
+    it('should count the length after collapsing whitespace', () => {
+      expect(
+        processForbiddenChars('01234   56789', settings, { maxLength: 11 })
+      ).toBe('01234 56789');
+    });
+
     it('should replace Windows/Android characters unconditionally', () => {
       settings.characterReplacements.charReplacements.asterisk.enabled = true;
-      settings.characterReplacements.charReplacements.asterisk.replacement = '-';
+      settings.characterReplacements.charReplacements.asterisk.replacement =
+        '-';
       const result = processForbiddenChars('hello*world', settings);
       expect(result).toBe('hello-world');
     });
 
     it('should not replace Windows/Android character when its individual toggle is off', () => {
       settings.characterReplacements.charReplacements.asterisk.enabled = false;
-      settings.characterReplacements.charReplacements.asterisk.replacement = '-';
+      settings.characterReplacements.charReplacements.asterisk.replacement =
+        '-';
       const result = processForbiddenChars('hello*world', settings);
       expect(result).toBe('helloworld'); // Strips asterisk instead of replacing
     });
@@ -259,6 +311,70 @@ describe('string-processing', () => {
     });
   });
 
+  describe('forbidden character sets', () => {
+    it('should list the characters forbidden on every OS, without the dot', () => {
+      expect([...UNIVERSAL_FORBIDDEN_CHARS].sort()).toEqual(
+        ['/', ':', '|', '\\', '#', '[', ']', '^'].sort()
+      );
+    });
+
+    it('should list the characters forbidden only on Windows and Android', () => {
+      expect([...WINDOWS_ANDROID_CHARS].sort()).toEqual(
+        ['*', '?', '<', '>', '"'].sort()
+      );
+    });
+  });
+
+  describe('resolveFileNameChar', () => {
+    it('should drop every forbidden character without replacement settings', () => {
+      for (const char of [
+        ...UNIVERSAL_FORBIDDEN_CHARS,
+        ...WINDOWS_ANDROID_CHARS,
+      ]) {
+        expect(resolveFileNameChar(char, false, null)).toEqual({
+          kind: 'drop',
+        });
+      }
+    });
+
+    it('should drop a dot only at the start of a name without replacement settings', () => {
+      expect(resolveFileNameChar('.', true, null)).toEqual({ kind: 'drop' });
+      expect(resolveFileNameChar('.', false, null)).toEqual({ kind: 'keep' });
+    });
+
+    it('should keep a character that is not forbidden', () => {
+      expect(resolveFileNameChar('a', true, null)).toEqual({ kind: 'keep' });
+    });
+  });
+
+  describe('truncateWithEllipsis', () => {
+    it('should keep text exactly maxLength long', () => {
+      expect(truncateWithEllipsis('abcde', 5)).toBe('abcde');
+    });
+
+    it('should truncate text one past maxLength to maxLength', () => {
+      const result = truncateWithEllipsis('abcdef', 5);
+
+      expect(result).toBe('abcd…');
+      expect(result).toHaveLength(5);
+    });
+
+    it('should trim whitespace before the ellipsis', () => {
+      expect(truncateWithEllipsis('abc def', 5)).toBe('abc…');
+    });
+
+    it('should not split an emoji at the cut', () => {
+      // The cut at 3 code units falls between the two halves of the rocket's surrogate pair.
+      const result = truncateWithEllipsis('ab\u{1F680}cd', 4);
+
+      expect(result).toBe('ab…');
+    });
+
+    it('should keep an emoji that ends before the cut', () => {
+      expect(truncateWithEllipsis('\u{1F680}abcd', 4)).toBe('\u{1F680}a…');
+    });
+  });
+
   describe('generateSafeLinkTarget', () => {
     let settings: PluginSettings;
 
@@ -266,7 +382,6 @@ describe('string-processing', () => {
       settings = createTestSettings({
         characterReplacements: {
           enableForbiddenCharReplacements: true,
-          osPreset: 'macOS',
           charReplacements: {
             slash: {
               enabled: true,
@@ -378,7 +493,6 @@ describe('string-processing', () => {
       settings = createTestSettings({
         characterReplacements: {
           enableForbiddenCharReplacements: true,
-          osPreset: 'macOS',
           charReplacements: {
             slash: {
               enabled: true,
@@ -479,13 +593,33 @@ describe('string-processing', () => {
       expect(result).toBe('Meeting Notes: 2024');
     });
 
-    it('should handle multiple replacements', () => {
-      // When multiple chars map to same replacement, reverse uses the first mapping
+    // Nothing tells which character a shared string stood for, so link targets leave it as title insertion does
+    it('should leave a replacement shared by two characters as it is', () => {
       settings.characterReplacements.charReplacements.colon.replacement = '-';
-      const safe = 'Title-With-Multiple-Separators';
-      const result = reverseSafeLinkTarget(safe, settings);
-      // Both slash and colon map to '-', so dashes get reversed to '/' (first mapping)
-      expect(result).toContain('/');
+      const result = reverseSafeLinkTarget('Title-With-Dashes', settings);
+      expect(result).toBe('Title-With-Dashes');
+    });
+
+    it('should count the dot toward a shared replacement', () => {
+      settings.characterReplacements.charReplacements.dot = {
+        enabled: true,
+        replacement: '-',
+        trimLeft: false,
+        trimRight: false,
+      };
+      const result = reverseSafeLinkTarget('Title-With-Dashes', settings);
+      expect(result).toBe('Title-With-Dashes');
+    });
+
+    it('should not reverse the dot replacement', () => {
+      settings.characterReplacements.charReplacements.dot = {
+        enabled: true,
+        replacement: '․',
+        trimLeft: false,
+        trimRight: false,
+      };
+      const result = reverseSafeLinkTarget('v1․2', settings);
+      expect(result).toBe('v1․2');
     });
 
     it('should not reverse when master toggle is off', () => {
@@ -501,14 +635,16 @@ describe('string-processing', () => {
     });
 
     it('should reverse Windows/Android characters unconditionally', () => {
-      settings.characterReplacements.charReplacements.asterisk.replacement = 'STAR';
+      settings.characterReplacements.charReplacements.asterisk.replacement =
+        'STAR';
       const result = reverseSafeLinkTarget('TitleSTARBold', settings);
       expect(result).toBe('Title*Bold');
     });
 
     it('should not reverse Windows/Android character when its individual toggle is off', () => {
       settings.characterReplacements.charReplacements.asterisk.enabled = false;
-      settings.characterReplacements.charReplacements.asterisk.replacement = 'STAR';
+      settings.characterReplacements.charReplacements.asterisk.replacement =
+        'STAR';
       const result = reverseSafeLinkTarget('TitleSTARBold', settings);
       expect(result).toBe('TitleSTARBold');
     });

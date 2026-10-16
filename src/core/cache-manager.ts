@@ -1,211 +1,38 @@
-import type FirstLineIsTitlePlugin from '../../main';
-
-export interface CacheConfig {
-  maxContentEntries: number;
-  maxOperationEntries: number;
-}
-
-export const DEFAULT_CACHE_CONFIG: CacheConfig = {
-  maxContentEntries: 1000,
-  maxOperationEntries: 500,
-};
-
-class LRUCache<K, V> {
-  private maxSize: number;
-  private cache: Map<K, V>;
-  private accessOrder: Map<K, number>; // Track access order with counter
-  private accessCounter: number = 0;
-
-  constructor(maxSize: number) {
-    this.maxSize = maxSize;
-    this.cache = new Map();
-    this.accessOrder = new Map();
-  }
-
-  set(key: K, value: V): void {
-    if (this.cache.has(key)) {
-      // Update existing entry
-      this.cache.delete(key);
-      this.cache.set(key, value);
-      this.accessOrder.set(key, ++this.accessCounter);
-    } else {
-      // Add new entry, evict LRU if at capacity
-      if (this.cache.size >= this.maxSize) {
-        // Find key with minimum access counter (least recently used)
-        let lruKey: K | undefined;
-        let minAccess = Infinity;
-
-        for (const [k, accessTime] of this.accessOrder) {
-          if (accessTime < minAccess) {
-            minAccess = accessTime;
-            lruKey = k;
-          }
-        }
-
-        if (lruKey !== undefined) {
-          this.cache.delete(lruKey);
-          this.accessOrder.delete(lruKey);
-        }
-      }
-
-      this.cache.set(key, value);
-      this.accessOrder.set(key, ++this.accessCounter);
-    }
-  }
-
-  get(key: K): V | undefined {
-    const value = this.cache.get(key);
-    if (value !== undefined) {
-      // Update access order
-      this.accessOrder.set(key, ++this.accessCounter);
-    }
-    return value;
-  }
-
-  has(key: K): boolean {
-    return this.cache.has(key);
-  }
-
-  delete(key: K): boolean {
-    this.accessOrder.delete(key);
-    return this.cache.delete(key);
-  }
-
-  clear(): void {
-    this.cache.clear();
-    this.accessOrder.clear();
-    this.accessCounter = 0;
-  }
-
-  size(): number {
-    return this.cache.size;
-  }
-
-  keys(): IterableIterator<K> {
-    return this.cache.keys();
-  }
-}
-
-class FileExistenceCache {
-  private pathCache: Set<string> = new Set();
-  private lastUpdate: number = 0;
-  private readonly cacheTTL: number = 5000;
-  private plugin: FirstLineIsTitlePlugin;
-
-  constructor(plugin: FirstLineIsTitlePlugin) {
-    this.plugin = plugin;
-  }
-
-  exists(path: string): boolean {
-    const now = Date.now();
-    if (now - this.lastUpdate > this.cacheTTL) {
-      this.rebuildCache();
-      this.lastUpdate = now;
-    }
-
-    return (
-      this.pathCache.has(path.toLowerCase()) ||
-      this.plugin.app.vault.getAbstractFileByPath(path) !== null
-    );
-  }
-
-  private rebuildCache(): void {
-    this.pathCache.clear();
-    const files = this.plugin.app.vault.getAllLoadedFiles();
-    for (const file of files) {
-      this.pathCache.add(file.path.toLowerCase());
-    }
-  }
-
-  addPath(path: string): void {
-    this.pathCache.add(path.toLowerCase());
-  }
-
-  removePath(path: string): void {
-    this.pathCache.delete(path.toLowerCase());
-  }
-
-  clear(): void {
-    this.pathCache.clear();
-    this.lastUpdate = 0;
-  }
-}
-
-interface OperationData {
-  count: number;
-  lastContent: string;
-  lastUpdate: number;
-}
-
 export class CacheManager {
-  private plugin: FirstLineIsTitlePlugin;
+  /** Whether each note's body held a non-empty line at its last rename pass, which tells a body just deleted (renamed Untitled) from one that never had any; a flag rather than the text, so a bulk rename keeps no note text in memory */
+  private hadBodyByPath = new Map<string, boolean>();
+  private tempPaths = new Set<string>();
 
-  // Optimized data structures
-  private contentCache: LRUCache<string, string>;
-  private tempPaths: Set<string>;
-  private fileExistence: FileExistenceCache;
-
-  private isDisposed: boolean = false;
-
-  constructor(
-    plugin: FirstLineIsTitlePlugin,
-    config: CacheConfig = DEFAULT_CACHE_CONFIG
-  ) {
-    this.plugin = plugin;
-
-    // Initialize optimized caches
-    this.contentCache = new LRUCache(config.maxContentEntries);
-    this.tempPaths = new Set();
-    this.fileExistence = new FileExistenceCache(plugin);
-  }
-
-  // ==================== CONTENT CACHE ====================
+  // ==================== BODY PRESENCE ====================
 
   /**
-   * Get cached content for a file - O(1) operation
+   * Record whether a note's body held a non-empty line at this rename pass
    */
-  getContent(filePath: string): string | undefined {
-    return this.contentCache.get(filePath);
+  setHadBody(filePath: string, hadBody: boolean): void {
+    this.hadBodyByPath.set(filePath, hadBody);
   }
 
   /**
-   * Store content in cache - O(1) operation with LRU eviction
+   * Whether a note's body held a non-empty line at its last recorded rename pass; false when none was recorded
    */
-  setContent(filePath: string, content: string): void {
-    this.contentCache.set(filePath, content);
-  }
-
-  /**
-   * Check if content has changed - O(1) operation
-   */
-  hasContentChanged(filePath: string, currentContent: string): boolean {
-    const cachedContent = this.contentCache.get(filePath);
-    return cachedContent !== currentContent;
+  hadBody(filePath: string): boolean {
+    return this.hadBodyByPath.get(filePath) ?? false;
   }
 
   // ==================== TEMP PATHS (CONFLICT PREVENTION) ====================
 
   /**
-   * Reserve a path to prevent conflicts - O(1) operation (vs O(n) with array)
+   * Reserve a path to prevent conflicts
    */
   reservePath(path: string): void {
     this.tempPaths.add(path.toLowerCase());
   }
 
   /**
-   * Release a reserved path - O(1) operation
+   * Release a reserved path
    */
   releasePath(path: string): void {
     this.tempPaths.delete(path.toLowerCase());
-  }
-
-  /**
-   * Release multiple paths at once (for batch operations)
-   */
-  releasePathsBatch(paths: string[]): void {
-    for (const path of paths) {
-      this.tempPaths.delete(path.toLowerCase());
-    }
   }
 
   /**
@@ -216,41 +43,19 @@ export class CacheManager {
   }
 
   /**
-   * Check if path is reserved - O(1) operation (vs O(n) with array.some())
+   * Check if path is reserved
    */
   isPathReserved(path: string): boolean {
     return this.tempPaths.has(path.toLowerCase());
   }
 
-  /**
-   * Check for path conflicts - O(1) operation combining existence + reservation
-   */
-  hasPathConflict(path: string): boolean {
-    return this.fileExistence.exists(path) || this.isPathReserved(path);
-  }
-
-  // ==================== FILE EXISTENCE CACHE ====================
-
-  /**
-   * Check if file exists - O(1) with TTL cache
-   */
-  fileExists(path: string): boolean {
-    return this.fileExistence.exists(path);
-  }
-
-  /**
-   * Notify cache of new file creation
-   */
-  notifyFileCreated(path: string): void {
-    this.fileExistence.addPath(path);
-  }
+  // ==================== FILE LIFECYCLE ====================
 
   /**
    * Notify cache of file deletion
    */
   notifyFileDeleted(path: string): void {
-    this.fileExistence.removePath(path);
-    this.contentCache.delete(path);
+    this.hadBodyByPath.delete(path);
     this.releasePath(path);
   }
 
@@ -258,114 +63,22 @@ export class CacheManager {
    * Update cache when file is renamed
    */
   notifyFileRenamed(oldPath: string, newPath: string): void {
-    // Move content cache entry
-    const content = this.contentCache.get(oldPath);
-    if (content !== undefined) {
-      this.contentCache.delete(oldPath);
-      this.contentCache.set(newPath, content);
+    const hadBody = this.hadBodyByPath.get(oldPath);
+    if (hadBody !== undefined) {
+      this.hadBodyByPath.delete(oldPath);
+      this.hadBodyByPath.set(newPath, hadBody);
     }
-
-    // Update file existence cache
-    this.fileExistence.removePath(oldPath);
-    this.fileExistence.addPath(newPath);
 
     // Release old path, reserve new path temporarily
     this.releasePath(oldPath);
     this.reservePath(newPath);
   }
 
-  // ==================== OPERATION TRACKING ====================
-
-  /**
-   * Track operation for rate limiting and conflict prevention
-   */
-  trackOperation(filePath: string, content: string): void {
-    this.plugin.fileStateManager.updateOperationCount(filePath, content);
-  }
-
-  /**
-   * Get operation data for a file
-   */
-  getOperationData(filePath: string): OperationData | undefined {
-    return this.plugin.fileStateManager.getOperationData(filePath);
-  }
-
-  // ==================== FILE OPERATION LOCK (CONSOLIDATED) ====================
-
-  /**
-   * Acquire lock for file operation (rename, alias update, etc.)
-   * Prevents concurrent operations on same file
-   */
-  acquireLock(filePath: string): boolean {
-    return this.plugin.fileStateManager.acquireLock(filePath);
-  }
-
-  /**
-   * Release lock for file operation
-   */
-  releaseLock(filePath: string): void {
-    this.plugin.fileStateManager.releaseLock(filePath);
-  }
-
-  /**
-   * Check if file operation is locked
-   */
-  isLocked(filePath: string): boolean {
-    return this.plugin.fileStateManager.isLocked(filePath);
-  }
-
-  /**
-   * Clear all locks (used during plugin unload)
-   */
-  clearAllLocks(): void {
-    this.plugin.fileStateManager.clearAllLocks();
-  }
-
-  /**
-   * Mark file as needing alias recheck after current operation completes
-   */
-  markPendingAliasRecheck(filePath: string): void {
-    this.plugin.fileStateManager.markPendingAliasRecheck(filePath);
-  }
-
-  /**
-   * Check if file has pending alias recheck
-   */
-  hasPendingAliasRecheck(filePath: string): boolean {
-    return this.plugin.fileStateManager.hasPendingAliasRecheck(filePath);
-  }
-
-  /**
-   * Clear pending alias recheck flag
-   */
-  clearPendingAliasRecheck(filePath: string): void {
-    this.plugin.fileStateManager.clearPendingAliasRecheck(filePath);
-  }
-
-  // ==================== MONITORING ====================
-
-  /**
-   * Get cache statistics for monitoring
-   */
-  getStats(): {
-    contentCacheSize: number;
-    tempPathsCount: number;
-  } {
-    return {
-      contentCacheSize: this.contentCache.size(),
-      tempPathsCount: this.tempPaths.size,
-    };
-  }
-
   /**
    * Dispose of cache manager and clean up all resources
    */
   dispose(): void {
-    this.isDisposed = true;
-
-    // Clear all caches
-    this.contentCache.clear();
+    this.hadBodyByPath.clear();
     this.tempPaths.clear();
-    this.fileExistence.clear();
   }
 }

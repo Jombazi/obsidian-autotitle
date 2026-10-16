@@ -3,35 +3,34 @@
  * These extend the official API with unofficial/undocumented properties
  */
 
-import {
-  Command,
-  TFile,
-  Editor,
-  EventRef,
-  Menu,
-  View,
-  Setting,
-} from 'obsidian';
+import { CachedMetadata, Command, TFile, EventRef, Menu, View } from 'obsidian';
+import type { EditorView } from '@codemirror/view';
+import type { EmbeddedEditor } from './utils/embedded-editors';
 
 declare module 'obsidian' {
-  export class SettingGroup {
-    settingEl: HTMLElement;
-    constructor(containerEl: HTMLElement);
-    setHeading(text: string | DocumentFragment): this;
-    addClass(cls: string): this;
-    addSetting(cb: (setting: Setting) => void): this;
+  interface SettingDefinitionBase {
+    /**
+     * Row key for re-render reconciliation, read before `control.key` and `name` (`SettingDefinitionItem#id`, added in 1.14.0 per its changelog; the published typings do not declare it yet)
+     */
+    id?: string;
   }
+
   interface MetadataCache {
     /**
      * Get all tags in the vault (undocumented)
      */
     getTags(): Record<string, number>;
+    /**
+     * Parse UTF-8 text with Obsidian's metadata worker, no note needed; the buffer is transferred, so it is detached afterwards, and a worker error resolves undefined (undocumented)
+     */
+    computeMetadataAsync(
+      data: ArrayBuffer
+    ): Promise<CachedMetadata | undefined>;
   }
 
   interface App {
     commands: {
       commands: Record<string, Command>;
-      executeCommandById(id: string): boolean;
     };
     plugins: {
       enabledPlugins: Set<string>;
@@ -59,6 +58,27 @@ declare module 'obsidian' {
     id?: string;
   }
 
+  interface Editor {
+    /**
+     * CodeMirror view behind the editor (undocumented)
+     */
+    cm?: EditorView;
+  }
+
+  interface TextFileView {
+    /**
+     * True while the view holds changes it has not saved yet (undocumented)
+     */
+    dirty: boolean;
+  }
+
+  interface MarkdownFileInfo {
+    /**
+     * Heading or block a page preview or Canvas card embed shows, empty for the whole note (undocumented)
+     */
+    subpath?: string;
+  }
+
   interface Event {
     /**
      * Obsidian context menu cache (undocumented)
@@ -73,17 +93,15 @@ declare module 'obsidian' {
   type ViewWithFileEditor = View & {
     file?: TFile | null;
     editor?: Editor | null;
-    hoverPopover?: {
-      targetEl?: HTMLElement;
-      editor?: Editor;
-      file?: TFile;
-    } | null;
+    hoverPopover?: { targetEl?: HTMLElement; embed?: EmbeddedEditor } | null;
+    /** Absent on a canvas leaf that is still deferred */
+    canvas?: {
+      nodes?: Map<
+        string,
+        { file?: TFile | null; child?: EmbeddedEditor | null }
+      >;
+    };
   };
-}
-
-// Error type extensions
-export interface NodeError extends Error {
-  code?: string;
 }
 
 // Global Window interface extensions

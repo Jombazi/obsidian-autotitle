@@ -1,24 +1,20 @@
-import { normalizePath } from 'obsidian';
 import { verboseLog } from '../utils';
+import { parsePropertyValue } from '../utils/property-value';
 import FirstLineIsTitle from '../../main';
 
-interface TypesJson {
-  types: Record<string, string>;
+/** The two members of Obsidian's undocumented property type registry this class calls, both matching the key ignoring case (Obsidian 1.14.4) */
+interface MetadataTypeManager {
+  getAssignedWidget(propertyName: string): string | null;
+  setType(propertyName: string, widget: string): Promise<void>;
 }
 
 /**
  * PropertyManager
  *
- * Manages property type registration for frontmatter properties.
- *
- * Responsibilities:
- * - Handle frontmatter property operations
- * - Manage property types in types.json
+ * Registers the rename-blocking property as a checkbox in Obsidian's property types.
  */
 export class PropertyManager {
   private plugin: FirstLineIsTitle;
-  private propertyTypeCache: Map<string, 'checkbox' | 'text' | null> =
-    new Map();
 
   constructor(plugin: FirstLineIsTitle) {
     this.plugin = plugin;
@@ -32,86 +28,14 @@ export class PropertyManager {
     return this.plugin.settings;
   }
 
-  /**
-   * Get path to types.json in vault's .obsidian folder
-   */
-  private getTypesJsonPath(): string {
-    return normalizePath(`${this.app.vault.configDir}/types.json`);
+  /** Cast once here: the published typings omit the registry, and `src/obsidian-ex.d.ts` does not declare it either. */
+  private get metadataTypeManager(): MetadataTypeManager {
+    return (this.app as unknown as { metadataTypeManager: MetadataTypeManager })
+      .metadataTypeManager;
   }
 
   /**
-   * Read types.json file
-   *
-   * NOTE: Uses Adapter API as necessary exception - types.json is in .obsidian/ config directory
-   * and is not a TFile tracked by vault. Vault API only works with indexed vault files.
-   */
-  private async readTypesJson(): Promise<TypesJson> {
-    const path = this.getTypesJsonPath();
-    try {
-      const content = await this.app.vault.adapter.read(path);
-      return JSON.parse(content) as TypesJson;
-    } catch {
-      // If file doesn't exist or is invalid, return empty structure
-      verboseLog(
-        this.plugin,
-        `types.json not found or invalid, creating new structure`
-      );
-      return { types: {} };
-    }
-  }
-
-  /**
-   * Write types.json file
-   *
-   * NOTE: Uses Adapter API as necessary exception - types.json is in .obsidian/ config directory
-   * and is not a TFile tracked by vault. Vault API only works with indexed vault files.
-   */
-  private async writeTypesJson(data: TypesJson): Promise<void> {
-    const path = this.getTypesJsonPath();
-    try {
-      const content = JSON.stringify(data, null, 2);
-      await this.app.vault.adapter.write(path, content);
-      verboseLog(this.plugin, `Updated types.json`);
-    } catch (error) {
-      console.error('Failed to write types.json:', error);
-    }
-  }
-
-  /**
-   * Normalize property values to their actual types
-   * Converts string representations to boolean, null, or number as appropriate
-   */
-  static normalizePropertyValue(value: unknown): unknown {
-    if (typeof value !== 'string') return value;
-    if (value === 'true') return true;
-    if (value === 'false') return false;
-    if (value === 'null') return null;
-    if (value !== '' && !isNaN(Number(value))) {
-      return Number(value);
-    }
-    return value;
-  }
-
-  /**
-   * Check if value is boolean (true or false)
-   */
-  private isBooleanValue(value: unknown): boolean {
-    return (
-      value === true || value === false || value === 'true' || value === 'false'
-    );
-  }
-
-  /**
-   * Normalize boolean values to actual boolean type
-   */
-  private normalizeBooleanValue(value: unknown): boolean {
-    if (value === 'true') return true;
-    if (value === 'false') return false;
-    return value as boolean;
-  }
-
-  /**
-   * Ensure property type is set to checkbox in types.json
+   * Ensure property type is set to checkbox in Obsidian's property types
    * Call this when "Disable renaming" commands are executed
    *
    * This ensures the property type is always checkbox when the property value is boolean,
@@ -123,11 +47,8 @@ export class PropertyManager {
 
     if (!propertyKey) return;
 
-    // Only set to checkbox if the value is boolean
-    const normalizedValue = this.normalizeBooleanValue(propertyValue);
-    const isBoolean = this.isBooleanValue(normalizedValue);
-
-    if (!isBoolean) {
+    // Judged as the write coerces it, so a value such as `True`, stored as a boolean, gets the checkbox too
+    if (typeof parsePropertyValue(propertyValue) !== 'boolean') {
       verboseLog(
         this.plugin,
         `Property "${propertyKey}" value is not boolean (${propertyValue}), skipping type update`
@@ -135,21 +56,22 @@ export class PropertyManager {
       return;
     }
 
-    // Read current types.json
-    const typesData = await this.readTypesJson();
-    const currentType = typesData.types[propertyKey];
+    if (
+      this.metadataTypeManager.getAssignedWidget(propertyKey) === 'checkbox'
+    ) {
+      return;
+    }
 
-    // Set as checkbox if not already
-    if (currentType !== 'checkbox') {
-      typesData.types[propertyKey] = 'checkbox';
-      await this.writeTypesJson(typesData);
+    // Through Obsidian's registry, which updates its in-memory map and types.json together: a read-modify-write of the file loses a type Obsidian saves in between, and replaces a malformed file with this one entry.
+    try {
+      await this.metadataTypeManager.setType(propertyKey, 'checkbox');
       verboseLog(
         this.plugin,
         `Property "${propertyKey}" set to checkbox for disable renaming command`
       );
+    } catch (error) {
+      // The property write that follows does not depend on its type, so a failed save only loses the checkbox display
+      console.error('Failed to set the property type to checkbox:', error);
     }
-
-    // Update cache
-    this.propertyTypeCache.set(propertyKey, 'checkbox');
   }
 }

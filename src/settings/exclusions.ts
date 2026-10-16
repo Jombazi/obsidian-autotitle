@@ -1,731 +1,594 @@
 import {
-  Notice,
   PluginSettingTab,
-  Setting,
   SettingDefinitionAddItem,
   SettingDefinitionList,
   SettingDefinitionPage,
   SettingDefinitionRender,
-  setIcon,
 } from 'obsidian';
+import { SettingPath } from './settings-paths';
 import {
-  updateDisabledRowsAccessibility,
-  addForbiddenCharProtection,
+  addRestoreDefaultButton,
   appendLines,
   FirstLineIsTitlePlugin,
-  mountLegacyHost,
   buildDescRow,
-  appendEmphasis,
+  buildExclusionEntryFragment,
+  buildSummaryRow,
+  createRowIdRegistry,
+  LIST_NOTE_CLASS,
+  quoteLabel,
+  saveSettingsOrWarn,
+  withListNote,
 } from './settings-base';
 import {
   EXCLUSION_STRATEGY,
   ExcludedProperty,
-  FileNameExclusion,
+  ExclusionStrategy,
+  TagMatchingMode,
 } from '../types';
 import { FolderSuggest, TagSuggest } from '../suggests';
 import { t, tp } from '../i18n';
 import { DEFAULT_SETTINGS } from '../constants';
 import { TIMING } from '../constants/timing';
+import { ExclusionEntryModal } from '../modals/exclusion-entry-modal';
+import { isKeyboardFocused } from '../modals/focus-restore';
+import {
+  folderExclusionEntry,
+  hasExcludedFileEntry,
+  stripExcludedFileLeadingSlashes,
+} from '../utils/file-exclusions';
+import { excludedPropertyEntryKey } from '../utils/exclusion-pattern';
+import { hasDuplicateTagEntry, isBlankTagEntry } from '../utils/tag-utils';
 
-async function persistSettings(plugin: FirstLineIsTitlePlugin): Promise<void> {
-  try {
-    await plugin.saveSettings();
-  } catch {
-    const notice = new Notice(t('settings.errors.saveFailed'));
-    notice.containerEl.addClass('mod-warning');
-  }
+/** Notes drawn above the first entry of each list, as on the replacement pages; see `withListNote`. */
+function buildFilesListNote(): string {
+  return t('settings.exclusions.files.renamedWarning');
 }
 
-/** The "any rule can exclude, none can re-include" caveat. */
-function buildPageIntro(): DocumentFragment {
-  return createFragment((frag) => {
-    frag.appendText(t('settings.exclusions.note'));
+/** An "Exclusion mode" desc whose second line notes what "Exclude all except listed" also excludes; there rather than in the group intro, because the note only applies to that option. Takes whole keys so the locale tests can resolve them. */
+function buildExclusionModeDesc(
+  descKey: string,
+  excludeAllNoteKey: string
+): DocumentFragment {
+  const excludeAllNote = t(excludeAllNoteKey, {
+    // The option's own label, which all three Exclusion mode dropdowns share
+    option: quoteLabel(
+      t('settings.exclusions.files.exclusionMode.excludeAllExcept')
+    ),
   });
-}
-
-function buildFoldersIntro(): DocumentFragment {
-  return createFragment((frag) => {
-    frag.appendText(t('settings.exclusions.folders.renamedWarning'));
-  });
-}
-
-function buildTagsIntro(): DocumentFragment {
-  return createFragment((frag) => {
-    frag.appendText(t('settings.exclusions.tags.tagWranglerWarning'));
-  });
-}
-
-/** Second line of the "Exclusion mode" desc, not the group intro — the note only applies to that setting's "Exclude all except..." option. */
-function buildTagsExclusionModeDesc(): DocumentFragment {
   return createFragment((frag) => {
     appendLines(frag, [
-      (target) =>
-        target.appendText(t('settings.exclusions.tags.exclusionMode.desc')),
-      (target) => {
-        appendEmphasis(
-          target,
-          'settings.exclusions.tags.excludeAllNote.excludeAllExcept'
-        );
-        target.appendText(t('settings.exclusions.tags.excludeAllNote.part2'));
-      },
+      (target) => target.appendText(t(descKey)),
+      (target) => target.appendText(excludeAllNote),
     ]);
   });
 }
 
-/**
- * The "renamed elsewhere" warning sorts first; case-sensitivity sorts last,
- * after the other behavioural notes.
- */
-function buildPropertiesIntro(): DocumentFragment {
+/** The "renamed elsewhere" warning alone: case is not mentioned, since a pattern can turn case-sensitive with an inline `(?-i:…)` group, so the claim would not always hold. */
+function buildPropertiesListNote(): string {
+  return t('settings.exclusions.properties.renamedWarning');
+}
+
+/** The disable property's caveats, one per line: what the property does before what changing it leaves behind; case-insensitivity is noted on the dialog's two fields instead, where the name and value are typed. */
+function buildDisablePropertyIntro(): string {
+  return [
+    t('settings.exclusions.disableProperty.alwaysRespected'),
+    t('settings.exclusions.disableProperty.updateWarning'),
+  ].join('\n');
+}
+
+/** One side of the disable property as its row shows it: the text, or the muted "Empty" label as a custom replacement's summary draws a blank side. No `Regex` badge: the property is matched literally. */
+function buildDisablePropertySide(text: string): DocumentFragment {
   return createFragment((frag) => {
-    appendLines(frag, [
-      (target) =>
-        target.appendText(t('settings.exclusions.properties.renamedWarning')),
-      (target) => {
-        target.appendText(t('settings.exclusions.properties.leaveBlank.part1'));
-        appendEmphasis(
-          target,
-          'settings.exclusions.properties.leaveBlank.value'
-        );
-        target.appendText(t('settings.exclusions.properties.leaveBlank.part2'));
-      },
-      (target) =>
-        target.appendText(t('settings.exclusions.properties.caseInsensitive')),
-    ]);
+    if (text === '') {
+      frag.createSpan({
+        cls: 'u-muted',
+        text: t('settings.common.emptyPlaceholder'),
+      });
+      return;
+    }
+    frag.appendText(text);
   });
 }
 
-/** Second line of the "Exclusion mode" desc, not the group intro — the note only applies to that setting's "Exclude all except..." option. */
-function buildPropertiesExclusionModeDesc(): DocumentFragment {
-  return createFragment((frag) => {
-    appendLines(frag, [
-      (target) =>
-        target.appendText(
-          t('settings.exclusions.properties.exclusionMode.desc')
-        ),
-      (target) => {
-        appendEmphasis(
-          target,
-          'settings.exclusions.properties.excludeAllNote.excludeAllExcept'
-        );
-        target.appendText(
-          t('settings.exclusions.properties.excludeAllNote.part2')
-        );
-      },
-    ]);
-  });
-}
-
-/**
- * The "renamed elsewhere" warning sorts first; case-sensitivity sorts last,
- * after the other behavioural notes.
- */
-function buildDisablePropertyIntro(): DocumentFragment {
-  return createFragment((frag) => {
-    appendLines(frag, [
-      (target) =>
-        target.appendText(
-          t('settings.exclusions.disableProperty.updateWarning')
-        ),
-      (target) =>
-        target.appendText(
-          t('settings.exclusions.disableProperty.alwaysRespected')
-        ),
-      (target) =>
-        target.appendText(
-          t('settings.exclusions.disableProperty.caseInsensitive')
-        ),
-    ]);
-  });
-}
-
-type SuggestFactory = (
-  input: HTMLInputElement,
-  onSelect: (value: string) => void,
-  otherItems: string[]
-) => void;
-
-interface StringExclusionListOptions {
-  plugin: FirstLineIsTitlePlugin;
-  getItems: () => string[];
-  placeholder: string;
-  debugLabel: string;
-  createSuggest: SuggestFactory;
-}
-
-/**
- * Builds one folder/tag row. Entries are plain strings with no stable
- * identity, so handlers address them by index — safe because these lists have
- * no reordering and every deletion triggers `tab.update()`.
- */
-function buildStringExclusionRow(
-  options: StringExclusionListOptions,
-  index: number
-): SettingDefinitionRender {
-  const { plugin, getItems, placeholder, debugLabel, createSuggest } = options;
-
-  const writeValue = async (value: string): Promise<void> => {
-    const items = getItems();
-    items[index] = value;
-    plugin.debugLog(debugLabel, items);
-    await persistSettings(plugin);
-  };
-
-  return {
-    // The row label is user data, so it is excluded from the settings search
-    // index; the section heading carries the searchable name.
-    name: getItems()[index] || placeholder,
-    searchable: false,
-    render: (setting) => {
-      setting.settingEl.addClass('flit-exclusion-item-setting');
-      setting.addText((text) => {
-        text
-          .setPlaceholder(placeholder)
-          .setValue(getItems()[index] ?? '')
-          .onChange(async (value) => {
-            await writeValue(value);
-          });
-        text.inputEl.classList.add('flit-width-100');
-
-        try {
-          const otherItems = getItems().filter((_, i) => i !== index);
-          createSuggest(
-            text.inputEl,
-            (selectedValue: string) => {
-              void writeValue(selectedValue);
-            },
-            otherItems
-          );
-        } catch (error) {
-          console.error('FLIT: Failed to create suggest:', error);
-        }
-      });
-    },
-  };
-}
-
-interface KeyValueRowOptions {
-  plugin: FirstLineIsTitlePlugin;
-  name: string;
-  searchable: boolean;
-  aliases?: string[];
-  getKey: () => string;
-  setKey: (value: string) => void;
-  getValue: () => string;
-  setValue: (value: string) => void;
-  debugLabel: string;
-  /** Opts the row into a restore button; omitted for rows with no fixed default. */
-  restoreDefault?: { key: string; value: string };
-}
-
-/** Renders a single key:value pair as two side-by-side text inputs. */
-function buildKeyValueRow(
-  options: KeyValueRowOptions
-): SettingDefinitionRender {
-  const {
-    plugin,
-    name,
-    searchable,
-    aliases,
-    getKey,
-    setKey,
-    getValue,
-    setValue,
-    debugLabel,
-    restoreDefault,
-  } = options;
-
-  return {
-    name,
-    searchable,
-    aliases,
-    render: (setting) => {
-      setting.settingEl.addClass('flit-exclusion-item-setting');
-
-      const inputContainer = setting.controlEl.createDiv({
-        cls: 'flit-property-container flit-display-flex flit-gap-10 flit-align-items-center',
-      });
-
-      // Created before the inputs so it sits to their left. Obsidian builds a
-      // restore control automatically for `slider` and `color` controls only,
-      // so a text pair has to mount its own.
-      const restoreButton = restoreDefault
-        ? inputContainer.createDiv({
-            cls: 'clickable-icon extra-setting-button',
-            attr: { 'aria-label': t('settings.common.restoreDefault') },
-          })
-        : null;
-      if (restoreButton) setIcon(restoreButton, 'rotate-ccw');
-
-      const keyInput = inputContainer.createEl('input', {
-        type: 'text',
-        cls: 'flit-property-key-input',
-      });
-      keyInput.placeholder = t('settings.exclusions.properties.keyPlaceholder');
-      keyInput.value = getKey();
-      keyInput.tabIndex = 0;
-
-      inputContainer.createSpan({
-        text: t('settings.exclusions.properties.separator'),
-        cls: 'flit-colon-separator',
-      });
-
-      const valueInput = inputContainer.createEl('input', {
-        type: 'text',
-        cls: 'flit-property-value-input',
-      });
-      valueInput.placeholder = t(
-        'settings.exclusions.properties.valuePlaceholder'
-      );
-      valueInput.value = getValue();
-      valueInput.tabIndex = 0;
-
-      // Matches native, which dims a restore control through `aria-disabled`
-      // while the value already equals its default and leaves it clickable —
-      // restoring to the current value does nothing.
-      const syncRestoreState = () => {
-        if (!restoreButton || !restoreDefault) return;
-        restoreButton.setAttribute(
-          'aria-disabled',
-          String(
-            getKey() === restoreDefault.key &&
-              getValue() === restoreDefault.value
-          )
-        );
-      };
-      syncRestoreState();
-
-      restoreButton?.addEventListener('click', () => {
-        void (async () => {
-          if (!restoreDefault) return;
-          setKey(restoreDefault.key);
-          setValue(restoreDefault.value);
-          keyInput.value = restoreDefault.key;
-          valueInput.value = restoreDefault.value;
-          syncRestoreState();
-          await persistSettings(plugin);
-        })();
-      });
-
-      // Tab moves between the key and value halves of the same pair rather
-      // than jumping to the next row's control.
-      keyInput.addEventListener(
-        'keydown',
-        (e: KeyboardEvent) => {
-          if (e.key === 'Tab' && !e.shiftKey) {
-            e.preventDefault();
-            e.stopPropagation();
-            window.setTimeout(() => {
-              valueInput.focus();
-            }, TIMING.NEXT_TICK_MS);
-          }
-        },
-        true
-      );
-
-      valueInput.addEventListener(
-        'keydown',
-        (e: KeyboardEvent) => {
-          if (e.key === 'Tab' && e.shiftKey) {
-            e.preventDefault();
-            e.stopPropagation();
-            window.setTimeout(() => {
-              keyInput.focus();
-            }, TIMING.NEXT_TICK_MS);
-          }
-        },
-        true
-      );
-
-      keyInput.addEventListener('input', (e: Event) => {
-        void (async () => {
-          setKey((e.target as HTMLInputElement).value);
-          syncRestoreState();
-          plugin.debugLog(debugLabel, getKey());
-          await persistSettings(plugin);
-        })();
-      });
-
-      valueInput.addEventListener('input', (e: Event) => {
-        void (async () => {
-          setValue((e.target as HTMLInputElement).value);
-          syncRestoreState();
-          plugin.debugLog(debugLabel, getValue());
-          await persistSettings(plugin);
-        })();
-      });
-    },
-  };
-}
-
-/**
- * Builds one excluded-property row. Handlers close over the property object
- * rather than its index so they cannot write to the wrong entry after a
- * deletion.
- */
-function buildPropertyRow(
+/** Writes both halves of the disable property, then saves. */
+async function writeDisableProperty(
   plugin: FirstLineIsTitlePlugin,
-  property: ExcludedProperty
-): SettingDefinitionRender {
-  return buildKeyValueRow({
-    plugin,
-    name: property.key || t('settings.exclusions.properties.keyPlaceholder'),
-    searchable: false,
-    getKey: () => property.key,
-    setKey: (value) => {
-      property.key = value;
-    },
-    getValue: () => property.value,
-    setValue: (value) => {
-      property.value = value;
-    },
-    debugLabel: 'excludedProperties',
-  });
+  key: string,
+  value: string
+): Promise<void> {
+  const { exclusions } = plugin.settings;
+  exclusions.disableRenamingKey = key;
+  exclusions.disableRenamingValue = value;
+  plugin.debugLog('disableRenaming', { key, value });
+  await saveSettingsOrWarn(plugin);
 }
 
-/**
- * Builds the "property to disable renaming" row: a single scalar key:value
- * pair rendered the same way as an excluded-property row, not the two
- * separate full-width rows a generic `control` binding would produce.
- */
+/** Opens the disable property's dialog, both fields prefilled; `onSaved` runs once it has closed on a submit. Each field's help line says only that matching ignores case: the property is matched literally, so the regex hints of the Excluded properties dialog do not apply. */
+function openDisablePropertyDialog(
+  plugin: FirstLineIsTitlePlugin,
+  onSaved: () => void
+): void {
+  const { disableRenamingKey, disableRenamingValue } =
+    plugin.settings.exclusions;
+  new ExclusionEntryModal(plugin.app, {
+    title: t('settings.exclusions.disableProperty.title'),
+    fields: [
+      {
+        label: t('settings.exclusions.properties.keyPlaceholder'),
+        help: t('settings.exclusions.disableProperty.caseInsensitive'),
+        initialValue: disableRenamingKey,
+      },
+      {
+        label: t('settings.exclusions.properties.valuePlaceholder'),
+        help: t('settings.exclusions.disableProperty.caseInsensitive'),
+        initialValue: disableRenamingValue,
+      },
+    ],
+    submitEntry: async ([key, value]) => {
+      // The disable and enable commands write this property into notes, so a blank name would have them write an empty key
+      if (key === '') return t('modals.excludedProperty.emptyName');
+      await writeDisableProperty(plugin, key, value);
+      return null;
+    },
+    onSubmitted: onSaved,
+  }).open();
+}
+
+/** Builds the "property to disable renaming" row: the key over its value, with a restore button and Edit, edited through the exclusion entry dialog. No Delete: it is a single setting, not a list entry. */
 function buildDisablePropertyRow(
-  plugin: FirstLineIsTitlePlugin
+  plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab
 ): SettingDefinitionRender {
   const exclusions = () => plugin.settings.exclusions;
+  const restoreDefault = {
+    key: DEFAULT_SETTINGS.exclusions.disableRenamingKey,
+    value: DEFAULT_SETTINGS.exclusions.disableRenamingValue,
+  };
+  const isAtDefault = () =>
+    exclusions().disableRenamingKey === restoreDefault.key &&
+    exclusions().disableRenamingValue === restoreDefault.value;
 
-  return buildKeyValueRow({
-    plugin,
+  const summaryRow = buildSummaryRow({
+    // The static title keeps the row findable in settings search; the name fragment shows the key in its place
     name: t('settings.exclusions.disableProperty.title'),
+    buildNameFragment: () =>
+      buildDisablePropertySide(exclusions().disableRenamingKey),
+    buildDesc: () =>
+      buildDisablePropertySide(exclusions().disableRenamingValue),
     searchable: true,
+    editEntry: () => {
+      openDisablePropertyDialog(plugin, () => tab.update());
+    },
+  });
+
+  return {
+    ...summaryRow,
     aliases: [
       t('settings.exclusions.properties.keyPlaceholder'),
       t('settings.exclusions.properties.valuePlaceholder'),
     ],
-    getKey: () => exclusions().disableRenamingKey,
-    setKey: (value) => {
-      exclusions().disableRenamingKey = value;
-    },
-    getValue: () => exclusions().disableRenamingValue,
-    setValue: (value) => {
-      exclusions().disableRenamingValue = value;
-    },
-    debugLabel: 'disableRenaming',
-    restoreDefault: {
-      key: DEFAULT_SETTINGS.exclusions.disableRenamingKey,
-      value: DEFAULT_SETTINGS.exclusions.disableRenamingValue,
-    },
-  });
-}
-
-/**
- * Builds one file-name exclusion row. Handlers close over the exclusion object
- * rather than its index so drag-reordering (which mutates the array without
- * re-rendering) cannot make them write to the wrong entry.
- */
-function buildFileNameExclusionRow(
-  plugin: FirstLineIsTitlePlugin,
-  tab: PluginSettingTab,
-  exclusion: FileNameExclusion
-): SettingDefinitionRender {
-  const exclusionIndex = () =>
-    plugin.settings.exclusions.excludedFileNames.indexOf(exclusion);
-
-  return {
-    name:
-      exclusion.text || t('settings.characterReplacements.emptyPlaceholder'),
-    searchable: false,
-    render: (setting) => {
-      const host = mountLegacyHost(setting.settingEl);
-
-      const enableSetting = new Setting(host).setName(
-        t('settings.exclusions.fileNames.headers.enable')
-      );
-      const textSetting = new Setting(host).setName(
-        t('settings.exclusions.fileNames.headers.text')
-      );
-      const onlyAtStartSetting = new Setting(host).setName(
-        t('settings.exclusions.fileNames.headers.onlyMatchStart')
-      );
-      const onlyWholeLineSetting = new Setting(host).setName(
-        t('settings.exclusions.fileNames.headers.onlyMatchWhole')
-      );
-      const caseSensitiveSetting = new Setting(host).setName(
-        t('settings.exclusions.fileNames.headers.caseSensitive')
-      );
-
-      /** The per-entry enable toggle gates the entry's own fields, not itself. */
-      const applyRowEnabledState = () => {
-        [
-          textSetting,
-          onlyAtStartSetting,
-          onlyWholeLineSetting,
-          caseSensitiveSetting,
-        ].forEach((dependent) => {
-          dependent.setDisabled(!exclusion.enabled);
-          dependent.settingEl.classList.toggle(
-            'flit-row-disabled',
-            !exclusion.enabled
-          );
-        });
-        updateDisabledRowsAccessibility(host);
-      };
-
-      enableSetting.addToggle((toggle) => {
-        toggle.setValue(exclusion.enabled).onChange(async (value) => {
-          exclusion.enabled = value;
-          plugin.debugLog(
-            `excludedFileNames[${exclusionIndex()}].enabled`,
-            value
-          );
-          await persistSettings(plugin);
-          applyRowEnabledState();
-        });
-      });
-
-      textSetting.addText((text) => {
-        text
-          .setPlaceholder(t('settings.characterReplacements.emptyPlaceholder'))
-          .setValue(exclusion.text)
-          .onChange(async (value) => {
-            exclusion.text = value;
-            plugin.debugLog(
-              `excludedFileNames[${exclusionIndex()}].text`,
-              value
+    render: (setting, group) => {
+      // Mounted before the summary row adds Edit, so the button sits to Edit's left
+      const setRestoreDimmed = addRestoreDefaultButton(
+        setting.controlEl,
+        () => {
+          // Nothing to write when the pair already holds the default
+          if (isAtDefault()) return;
+          void (async () => {
+            await writeDisableProperty(
+              plugin,
+              restoreDefault.key,
+              restoreDefault.value
             );
-            await persistSettings(plugin);
-          });
-        addForbiddenCharProtection(text.inputEl);
-      });
-
-      onlyAtStartSetting.addToggle((toggle) => {
-        toggle.setValue(exclusion.onlyAtStart).onChange(async (value) => {
-          exclusion.onlyAtStart = value;
-          plugin.debugLog(
-            `excludedFileNames[${exclusionIndex()}].onlyAtStart`,
-            value
-          );
-          // The two match modes are mutually exclusive.
-          if (value) exclusion.onlyWholeLine = false;
-          await persistSettings(plugin);
-          tab.update();
-        });
-      });
-
-      onlyWholeLineSetting.addToggle((toggle) => {
-        toggle.setValue(exclusion.onlyWholeLine).onChange(async (value) => {
-          exclusion.onlyWholeLine = value;
-          plugin.debugLog(
-            `excludedFileNames[${exclusionIndex()}].onlyWholeLine`,
-            value
-          );
-          // The two match modes are mutually exclusive.
-          if (value) exclusion.onlyAtStart = false;
-          await persistSettings(plugin);
-          tab.update();
-        });
-      });
-
-      caseSensitiveSetting.addToggle((toggle) => {
-        toggle.setValue(exclusion.caseSensitive).onChange(async (value) => {
-          exclusion.caseSensitive = value;
-          plugin.debugLog(
-            `excludedFileNames[${exclusionIndex()}].caseSensitive`,
-            value
-          );
-          await persistSettings(plugin);
-        });
-      });
-
-      applyRowEnabledState();
+            tab.update();
+          })();
+        }
+      );
+      setRestoreDimmed(isAtDefault());
+      return summaryRow.render(setting, group);
     },
   };
 }
 
-/**
- * Focuses the last input matching `inputSelector` inside `listGroup`. All four
- * lists share the page and the folder and tag rows share a selector, so the
- * query is scoped to one list's group rather than the whole document.
- */
-function focusLastListInput(
-  listGroup: Element | null,
-  inputSelector: string
-): void {
-  if (!listGroup) return;
-  const inputs = listGroup.querySelectorAll<HTMLInputElement>(inputSelector);
-  if (inputs.length === 0) return;
-  inputs[inputs.length - 1].focus();
+/** Focuses a list's row at `index` as Obsidian focuses the row its own dialog adds: the row itself, scrolled into view only as far as needed. Called only after a keyboard-made add. */
+function focusListRow(listGroup: Element | null, index: number): void {
+  const rowEl = listGroup?.querySelectorAll<HTMLElement>(
+    '.setting-items > .setting-item:not(.mod-empty-state):not(.mod-add-item)'
+  )[index];
+  if (!rowEl) return;
+  rowEl.focus({ preventScroll: true });
+  rowEl.scrollIntoView({ block: 'nearest' });
 }
 
-/**
- * Builds a list's native `addItem` affordance, keeping the two behaviours the
- * hand-rolled add button carried: it refuses to stack a second blank entry, and
- * it focuses the entry it just created.
- *
- * `focusInputSelector` is null for lists whose rows have no single unambiguous
- * text field; those get the blank-entry guard without the focus follow-up.
- */
-function buildAddItem(
+/** Builds the native `addItem` affordance of a list whose entries are added through a dialog: `openAddDialog` opens it, and the `onAdded` it receives re-renders the list and, when the add was made from the keyboard, focuses the row the dialog added. */
+function buildDialogAddItem(
   name: string,
-  isBottomEntryEmpty: () => boolean,
-  focusInputSelector: string | null,
-  onAdd: () => Promise<void>
+  tab: PluginSettingTab,
+  openAddDialog: (onAdded: (addedIndex: number) => void) => void
 ): SettingDefinitionAddItem {
   return {
     name,
     action: (affordanceEl) => {
-      // The affordance is a `+` button in the list's header row on desktop but
-      // a row inside the list itself on mobile, so its group is found by
-      // walking up rather than assumed. Resolved before the add because the
-      // framework reuses the group element across renders, so this reference
-      // outlives `tab.update()` even where the affordance itself would not.
+      // Read before the dialog opens and takes focus
+      const addedByKeyboard = isKeyboardFocused();
+      // The affordance is a `+` button in the list's header row on desktop but a row inside the list itself on mobile, so its group is found by walking up rather than assumed. Resolved before the add because the framework reuses the group element across renders, so this reference outlives `tab.update()` even where the affordance itself would not.
       const listGroup = affordanceEl.closest('.setting-group');
-
-      const focusBottomEntry = () => {
-        if (focusInputSelector === null) return;
-        focusLastListInput(listGroup, focusInputSelector);
-      };
-
-      // A blank bottom entry is exactly what the affordance would create, so
-      // hand it focus instead of stacking another empty row onto it.
-      if (isBottomEntryEmpty()) {
-        focusBottomEntry();
-        return;
-      }
-
-      void (async () => {
-        await onAdd();
-        // The new row only exists once `tab.update()` has re-rendered.
-        window.setTimeout(focusBottomEntry, TIMING.NEXT_TICK_MS);
-      })();
+      openAddDialog((addedIndex) => {
+        tab.update();
+        // Focusing a tap- or click-added row by script draws iOS's focus ring, so unlike Obsidian's own Excluded files dialog the row is focused only for keyboard users
+        if (!addedByKeyboard) return;
+        // The new row only exists once `tab.update()` has re-rendered; on the affordance's own window, which is the Settings window when Settings opens in a window of its own
+        affordanceEl.win.setTimeout(
+          () => focusListRow(listGroup, addedIndex),
+          TIMING.NEXT_TICK_MS
+        );
+      });
     },
   };
 }
 
-/** Folder and tag lists share every affordance except their suggester. */
-function buildStringExclusionList(
-  options: StringExclusionListOptions,
-  tab: PluginSettingTab,
-  addButtonText: string,
-  emptyState: string
-): SettingDefinitionList {
-  const { plugin, getItems } = options;
+interface StringEntryListSpec {
+  getEntries: () => string[];
+  debugLabel: string;
+  emptyState: string;
+  addButtonText: string;
+  listNote: string;
+  dialogTitle: string;
+  dialogEditTitle: string;
+  dialogHelp: string;
+  /** Rewrites the trimmed entry before every other check and the save. */
+  normalizeEntry?: (trimmedEntry: string) => string;
+  /** Takes the trimmed, normalized entry. */
+  isBlank: (entry: string) => boolean;
+  blankError: string;
+  hasEntry: (entries: string[], entry: string) => boolean;
+  attachSuggest: (
+    inputEl: HTMLInputElement,
+    otherEntries: string[],
+    submitPick: (value: string) => void
+  ) => void;
+}
 
+/** Opens a string list's dialog; `entryToEdit` undefined adds an entry. `onSaved` runs once the dialog has closed on a submit, with the entry's index, or -1 when the entry being edited was gone. */
+function openStringEntryDialog(
+  plugin: FirstLineIsTitlePlugin,
+  spec: StringEntryListSpec,
+  entryToEdit: string | undefined,
+  onSaved: (index: number) => void
+): void {
+  const findEditedIndex = (entries: string[]) =>
+    entryToEdit === undefined ? -1 : entries.indexOf(entryToEdit);
+  let savedIndex = -1;
+
+  new ExclusionEntryModal(plugin.app, {
+    title: entryToEdit === undefined ? spec.dialogTitle : spec.dialogEditTitle,
+    fields: [
+      {
+        label: '',
+        help: spec.dialogHelp,
+        initialValue: entryToEdit,
+        attachSuggest: (inputEl, submitPick) => {
+          const entries = spec.getEntries();
+          const editedIndex = findEditedIndex(entries);
+          spec.attachSuggest(
+            inputEl,
+            entries.filter((_, index) => index !== editedIndex),
+            submitPick
+          );
+        },
+      },
+    ],
+    submitEntry: async ([trimmedEntry]) => {
+      const entry = spec.normalizeEntry?.(trimmedEntry) ?? trimmedEntry;
+      if (spec.isBlank(entry)) return spec.blankError;
+      const entries = spec.getEntries();
+      const editedIndex = findEditedIndex(entries);
+      // Gone since the dialog opened, so there is nothing left to edit and the dialog just closes
+      if (entryToEdit !== undefined && editedIndex === -1) return null;
+      // Checked against the others only, so a case-only change or an unchanged Done is not mistaken for a duplicate of itself
+      const otherEntries = entries.filter((_, index) => index !== editedIndex);
+      if (spec.hasEntry(otherEntries, entry)) {
+        return t('modals.exclusionEntry.duplicate');
+      }
+      if (editedIndex === -1) {
+        savedIndex = entries.push(entry) - 1;
+      } else {
+        entries[editedIndex] = entry;
+        savedIndex = editedIndex;
+      }
+      plugin.debugLog(spec.debugLabel, entries);
+      await saveSettingsOrWarn(plugin);
+      return null;
+    },
+    onSubmitted: () => onSaved(savedIndex),
+  }).open();
+}
+
+/** One string list row with Edit and Delete; Edit departs from Obsidian's own list, which offers Delete only, because a regex entry is tedious to retype. Handlers look the entry up when clicked rather than capturing its index, because a file or tag menu action can drop entries while this page is open. */
+function buildStringEntryRow(
+  plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab,
+  spec: StringEntryListSpec,
+  entry: string
+): SettingDefinitionRender {
+  return withListNote(
+    buildSummaryRow({
+      name: entry,
+      buildNameFragment: () => buildExclusionEntryFragment(entry),
+      // User data, so it stays out of the settings search index
+      searchable: false,
+      editEntry: () => {
+        openStringEntryDialog(plugin, spec, entry, () => tab.update());
+      },
+      deleteEntry: () => {
+        void (async () => {
+          const entries = spec.getEntries();
+          const index = entries.indexOf(entry);
+          if (index === -1) return;
+          entries.splice(index, 1);
+          plugin.debugLog(spec.debugLabel, entries);
+          await saveSettingsOrWarn(plugin);
+          tab.update();
+        })();
+      },
+    }),
+    spec.listNote
+  );
+}
+
+/** A list of plain-string entries shaped like Obsidian's own Excluded files list: no reorder, and entries are added and edited through a dialog rather than typed into a blank row. */
+function buildStringEntryList(
+  plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab,
+  spec: StringEntryListSpec
+): SettingDefinitionList<SettingPath> {
   return {
     type: 'list',
-    emptyState,
-    items: getItems().map((_, index) =>
-      buildStringExclusionRow(options, index)
-    ),
-    onDelete: (index) => {
-      void (async () => {
-        getItems().splice(index, 1);
-        await persistSettings(plugin);
-        tab.update();
-      })();
-    },
-    addItem: buildAddItem(
-      addButtonText,
-      () => {
-        const items = getItems();
-        return items.length > 0 && items[items.length - 1].trim() === '';
-      },
-      '.flit-exclusion-item-setting input[type="text"]',
-      async () => {
-        getItems().push('');
-        await persistSettings(plugin);
-        tab.update();
-      }
+    cls: LIST_NOTE_CLASS,
+    emptyState: spec.emptyState,
+    items: spec
+      .getEntries()
+      .map((entry) => buildStringEntryRow(plugin, tab, spec, entry)),
+    addItem: buildDialogAddItem(spec.addButtonText, tab, (onAdded) =>
+      openStringEntryDialog(plugin, spec, undefined, onAdded)
     ),
   };
 }
 
-/**
- * Exclusions sub-page.
- *
- * Four collections use the native list type, so add / delete / reorder
- * affordances come from the framework. List `items` are captured when the
- * definitions are built, so every mutation that changes the row set calls
- * `tab.update()`.
- */
+function buildExcludedFilesSpec(
+  plugin: FirstLineIsTitlePlugin
+): StringEntryListSpec {
+  return {
+    getEntries: () => plugin.settings.exclusions.excludedFiles,
+    debugLabel: 'excludedFiles',
+    emptyState: t('settings.exclusions.files.emptyState'),
+    addButtonText: t('settings.exclusions.files.addButton'),
+    listNote: buildFilesListNote(),
+    dialogTitle: t('modals.excludedFile.title'),
+    dialogEditTitle: t('modals.excludedFile.editTitle'),
+    dialogHelp: t('modals.excludedFile.help'),
+    normalizeEntry: stripExcludedFileLeadingSlashes,
+    isBlank: (entry) => entry === '',
+    blankError: t('modals.excludedFile.emptyFilter'),
+    hasEntry: hasExcludedFileEntry,
+    attachSuggest: (inputEl, otherEntries, submitPick) => {
+      new FolderSuggest(plugin.app, inputEl, (folderPath) => {
+        // The `+ <typed>` row: while suggestions show, Obsidian's keymap takes Enter before the input's keydown listener, so this row is how the typed text is submitted
+        submitPick(
+          folderPath === null ? inputEl.value : folderExclusionEntry(folderPath)
+        );
+      });
+    },
+  };
+}
+
+function buildExcludedTagsSpec(
+  plugin: FirstLineIsTitlePlugin
+): StringEntryListSpec {
+  return {
+    getEntries: () => plugin.settings.exclusions.excludedTags,
+    debugLabel: 'excludedTags',
+    emptyState: t('settings.exclusions.tags.emptyState'),
+    addButtonText: t('settings.exclusions.tags.addButton'),
+    listNote: t('settings.exclusions.tags.tagWranglerWarning'),
+    dialogTitle: t('modals.excludedTag.title'),
+    dialogEditTitle: t('modals.excludedTag.editTitle'),
+    dialogHelp: t('modals.excludedTag.help'),
+    isBlank: isBlankTagEntry,
+    blankError: t('modals.excludedTag.emptyTag'),
+    hasEntry: hasDuplicateTagEntry,
+    attachSuggest: (inputEl, otherEntries, submitPick) => {
+      new TagSuggest(
+        plugin.app,
+        inputEl,
+        (tag) => {
+          // The `+ <typed>` row, as in the files dialog
+          submitPick(tag === null ? inputEl.value : tag);
+        },
+        otherEntries
+      );
+    },
+  };
+}
+
+const getPropertyRowId =
+  createRowIdRegistry<ExcludedProperty>('excluded-property');
+
+/** Opens the property dialog; `propertyToEdit` null adds a rule. `onSaved` runs once the dialog has closed on a submit, with the rule's index, or -1 when the rule being edited was gone. */
+function openExcludedPropertyDialog(
+  plugin: FirstLineIsTitlePlugin,
+  propertyToEdit: ExcludedProperty | null,
+  onSaved: (index: number) => void
+): void {
+  let savedIndex = -1;
+
+  new ExclusionEntryModal(plugin.app, {
+    title: propertyToEdit
+      ? t('modals.excludedProperty.editTitle')
+      : t('modals.excludedProperty.title'),
+    fields: [
+      {
+        label: t('settings.exclusions.properties.keyPlaceholder'),
+        help: t('modals.excludedProperty.nameHelp'),
+        initialValue: propertyToEdit?.key,
+      },
+      {
+        label: t('settings.exclusions.properties.valuePlaceholder'),
+        help: t('modals.excludedProperty.valueHelp'),
+        initialValue: propertyToEdit?.value,
+      },
+    ],
+    submitEntry: async ([key, value]) => {
+      if (key === '') return t('modals.excludedProperty.emptyName');
+      const properties = plugin.settings.exclusions.excludedProperties;
+      const editedIndex = propertyToEdit
+        ? properties.indexOf(propertyToEdit)
+        : -1;
+      // Gone since the dialog opened, so there is nothing left to edit and the dialog just closes
+      if (propertyToEdit && editedIndex === -1) return null;
+      // Checked against the others only, so a case-only change or an unchanged Done is not mistaken for a duplicate of itself
+      const entryKey = excludedPropertyEntryKey({ key, value });
+      const isDuplicate = properties.some(
+        (other) =>
+          other !== propertyToEdit &&
+          excludedPropertyEntryKey(other) === entryKey
+      );
+      if (isDuplicate) return t('modals.exclusionEntry.duplicate');
+      if (propertyToEdit) {
+        Object.assign(propertyToEdit, { key, value });
+        savedIndex = editedIndex;
+      } else {
+        savedIndex = properties.push({ key, value }) - 1;
+      }
+      plugin.debugLog('excludedProperties', properties);
+      await saveSettingsOrWarn(plugin);
+      return null;
+    },
+    onSubmitted: () => onSaved(savedIndex),
+  }).open();
+}
+
+/** One Excluded properties row: the name, then the value or "Any value", each side with its `Regex` badge when a pattern. Handlers close over the property object rather than its index so they cannot act on the wrong entry after a deletion. */
+function buildExcludedPropertyRow(
+  plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab,
+  property: ExcludedProperty
+): SettingDefinitionRender {
+  const summaryRow = buildSummaryRow({
+    name: property.key,
+    buildNameFragment: () => buildExclusionEntryFragment(property.key),
+    buildDesc: () =>
+      property.value === ''
+        ? t('settings.exclusions.properties.anyValue')
+        : buildExclusionEntryFragment(property.value),
+    // User data, so it stays out of the settings search index
+    searchable: false,
+    editEntry: () => {
+      openExcludedPropertyDialog(plugin, property, () => tab.update());
+    },
+    deleteEntry: () => {
+      void (async () => {
+        const properties = plugin.settings.exclusions.excludedProperties;
+        const index = properties.indexOf(property);
+        if (index === -1) return;
+        properties.splice(index, 1);
+        plugin.debugLog('excludedProperties', properties);
+        await saveSettingsOrWarn(plugin);
+        tab.update();
+      })();
+    },
+  });
+  return withListNote(
+    // Obsidian keys a row by `id` before its name, and two rules can share a name, so the name cannot be the key
+    { ...summaryRow, id: getPropertyRowId(property) },
+    buildPropertiesListNote()
+  );
+}
+
+function buildExcludedPropertiesList(
+  plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab
+): SettingDefinitionList<SettingPath> {
+  return {
+    type: 'list',
+    cls: LIST_NOTE_CLASS,
+    emptyState: t('settings.exclusions.properties.emptyState'),
+    items: plugin.settings.exclusions.excludedProperties.map((property) =>
+      buildExcludedPropertyRow(plugin, tab, property)
+    ),
+    addItem: buildDialogAddItem(
+      t('settings.exclusions.properties.addButton'),
+      tab,
+      (onAdded) => openExcludedPropertyDialog(plugin, null, onAdded)
+    ),
+  };
+}
+
+/** Exclusions sub-page. Three collections use the native list type for its add affordance; each row draws its own Edit and Delete, and entries are added and edited through a dialog. List `items` are captured when the definitions are built, so every mutation that changes the row set calls `tab.update()`. */
 export function buildExclusionsPage(
   plugin: FirstLineIsTitlePlugin,
   tab: PluginSettingTab
-): SettingDefinitionPage {
-  const exclusions = () => plugin.settings.exclusions;
+): SettingDefinitionPage<SettingPath> {
   const exclusionModeOptions = {
     [EXCLUSION_STRATEGY.ONLY_EXCLUDE]: t(
-      'settings.exclusions.folders.exclusionMode.onlyExclude'
+      'settings.exclusions.files.exclusionMode.onlyExclude'
     ),
     [EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT]: t(
-      'settings.exclusions.folders.exclusionMode.excludeAllExcept'
+      'settings.exclusions.files.exclusionMode.excludeAllExcept'
     ),
-  };
+  } satisfies Record<ExclusionStrategy, string>;
 
   return {
     type: 'page',
     name: t('settings.sections.exclusions'),
     desc: t('settings.exclusions.desc'),
-    // Summed across all four lists, skipping blank rows — those are half-typed
-    // entries that cannot match anything. Shows nothing at zero rather than
-    // "0 rules", matching the Custom replacements row.
+    // Summed across all three lists, with no blank filter: load, Import and every writer keep blank entries out. Shows nothing at zero rather than "0 rules", matching the Custom replacements row.
     displayValue: () => {
       const { exclusions } = plugin.settings;
       const count =
-        exclusions.excludedFolders.filter((folder) => folder.trim()).length +
-        exclusions.excludedTags.filter((tag) => tag.trim()).length +
-        exclusions.excludedProperties.filter((property) => property.key.trim())
-          .length +
-        exclusions.excludedFileNames.filter((match) => match.text.trim())
-          .length;
+        exclusions.excludedFiles.length +
+        exclusions.excludedTags.length +
+        exclusions.excludedProperties.length;
       return count ? tp('settings.ruleCount', count) : '';
     },
     items: [
-      buildDescRow(buildPageIntro()),
+      // The "any rule can exclude, none can re-include" caveat
+      buildDescRow(t('settings.exclusions.note')),
 
       {
         type: 'group',
-        heading: t('settings.exclusions.folders.title'),
+        heading: t('settings.exclusions.files.title'),
         items: [
-          buildDescRow(buildFoldersIntro()),
           {
-            name: t('settings.exclusions.folders.matchSubfolders.name'),
-            desc: t('settings.exclusions.folders.matchSubfolders.desc'),
-            control: {
-              type: 'toggle',
-              key: 'exclusions.matchSubfolders',
-            },
-          },
-          {
-            name: t('settings.exclusions.folders.exclusionMode.name'),
-            desc: t('settings.exclusions.folders.exclusionMode.desc'),
+            name: t('settings.exclusions.files.exclusionMode.name'),
+            desc: t('settings.exclusions.files.exclusionMode.desc'),
             control: {
               type: 'dropdown',
-              key: 'exclusions.folderScopeStrategy',
+              key: 'exclusions.fileScopeStrategy',
               options: exclusionModeOptions,
             },
           },
         ],
       },
-      buildStringExclusionList(
-        {
-          plugin,
-          getItems: () => exclusions().excludedFolders,
-          placeholder: t('settings.exclusions.folders.placeholder'),
-          debugLabel: 'excludedFolders',
-          createSuggest: (input, onSelect, otherItems) => {
-            new FolderSuggest(plugin.app, input, onSelect, otherItems);
-          },
-        },
-        tab,
-        t('settings.exclusions.folders.addButton'),
-        t('settings.exclusions.folders.emptyState')
-      ),
+      buildStringEntryList(plugin, tab, buildExcludedFilesSpec(plugin)),
 
       {
         type: 'group',
         heading: t('settings.exclusions.tags.title'),
+        // Exclusion mode leads, as in the files and properties groups, since it decides what the rest of the group means
         items: [
-          buildDescRow(buildTagsIntro()),
+          {
+            name: t('settings.exclusions.tags.exclusionMode.name'),
+            desc: buildExclusionModeDesc(
+              'settings.exclusions.tags.exclusionMode.desc',
+              'settings.exclusions.tags.excludeAllNote'
+            ),
+            control: {
+              type: 'dropdown',
+              key: 'exclusions.tagScopeStrategy',
+              options: exclusionModeOptions,
+            },
+          },
           {
             name: t('settings.exclusions.tags.matchTags.name'),
             desc: t('settings.exclusions.tags.matchTags.desc'),
@@ -742,7 +605,7 @@ export function buildExclusionsPage(
                 'In note body only': t(
                   'settings.exclusions.tags.matchTags.inBodyOnly'
                 ),
-              },
+              } satisfies Record<TagMatchingMode, string>,
             },
           },
           {
@@ -753,40 +616,20 @@ export function buildExclusionsPage(
               key: 'exclusions.matchSubtags',
             },
           },
-          {
-            name: t('settings.exclusions.tags.exclusionMode.name'),
-            desc: buildTagsExclusionModeDesc(),
-            control: {
-              type: 'dropdown',
-              key: 'exclusions.tagScopeStrategy',
-              options: exclusionModeOptions,
-            },
-          },
         ],
       },
-      buildStringExclusionList(
-        {
-          plugin,
-          getItems: () => exclusions().excludedTags,
-          placeholder: t('settings.exclusions.tags.placeholder'),
-          debugLabel: 'excludedTags',
-          createSuggest: (input, onSelect, otherItems) => {
-            new TagSuggest(plugin.app, input, onSelect, otherItems);
-          },
-        },
-        tab,
-        t('settings.exclusions.tags.addButton'),
-        t('settings.exclusions.tags.emptyState')
-      ),
+      buildStringEntryList(plugin, tab, buildExcludedTagsSpec(plugin)),
 
       {
         type: 'group',
         heading: t('settings.exclusions.properties.title'),
         items: [
-          buildDescRow(buildPropertiesIntro()),
           {
             name: t('settings.exclusions.properties.exclusionMode.name'),
-            desc: buildPropertiesExclusionModeDesc(),
+            desc: buildExclusionModeDesc(
+              'settings.exclusions.properties.exclusionMode.desc',
+              'settings.exclusions.properties.excludeAllNote'
+            ),
             control: {
               type: 'dropdown',
               key: 'exclusions.propertyScopeStrategy',
@@ -795,99 +638,15 @@ export function buildExclusionsPage(
           },
         ],
       },
-      {
-        type: 'list',
-        emptyState: t('settings.exclusions.properties.emptyState'),
-        items: exclusions().excludedProperties.map((property) =>
-          buildPropertyRow(plugin, property)
-        ),
-        onDelete: (index) => {
-          void (async () => {
-            exclusions().excludedProperties.splice(index, 1);
-            await persistSettings(plugin);
-            tab.update();
-          })();
-        },
-        addItem: buildAddItem(
-          t('settings.exclusions.properties.addButton'),
-          () => {
-            const props = exclusions().excludedProperties;
-            if (props.length === 0) return false;
-            const last = props[props.length - 1];
-            return last.key.trim() === '' && last.value.trim() === '';
-          },
-          '.flit-property-key-input',
-          async () => {
-            exclusions().excludedProperties.push({ key: '', value: '' });
-            await persistSettings(plugin);
-            tab.update();
-          }
-        ),
-      },
+      buildExcludedPropertiesList(plugin, tab),
 
       {
-        type: 'group',
-        heading: t('settings.exclusions.fileNames.title'),
-        items: [
-          {
-            name: t('settings.exclusions.fileNames.exclusionMode.name'),
-            desc: t('settings.exclusions.fileNames.exclusionMode.desc'),
-            control: {
-              type: 'dropdown',
-              key: 'exclusions.fileNameScopeStrategy',
-              options: exclusionModeOptions,
-            },
-          },
-        ],
-      },
-      {
+        // A list, not a plain group, though nothing is added, deleted or dragged: on phones Obsidian stacks a plain group's controls under the row text, and only list rows keep the Restore default and Edit buttons to the right
         type: 'list',
-        emptyState: t('settings.exclusions.fileNames.emptyState'),
-        items: exclusions().excludedFileNames.map((exclusion) =>
-          buildFileNameExclusionRow(plugin, tab, exclusion)
-        ),
-        onDelete: (index) => {
-          void (async () => {
-            exclusions().excludedFileNames.splice(index, 1);
-            await persistSettings(plugin);
-            tab.update();
-          })();
-        },
-        onReorder: (oldIndex, newIndex) => {
-          void (async () => {
-            const [moved] = exclusions().excludedFileNames.splice(oldIndex, 1);
-            exclusions().excludedFileNames.splice(newIndex, 0, moved);
-            await persistSettings(plugin);
-          })();
-        },
-        addItem: buildAddItem(
-          t('settings.exclusions.fileNames.addButton'),
-          () => {
-            const list = exclusions().excludedFileNames;
-            return list.length > 0 && list[list.length - 1].text.trim() === '';
-          },
-          // Rows are multi-field cards with no single obvious text field to focus.
-          null,
-          async () => {
-            exclusions().excludedFileNames.push({
-              text: '',
-              onlyAtStart: false,
-              onlyWholeLine: false,
-              enabled: true,
-              caseSensitive: false,
-            });
-            await persistSettings(plugin);
-            tab.update();
-          }
-        ),
-      },
-
-      {
-        type: 'group',
         heading: t('settings.exclusions.disableProperty.title'),
         items: [
           buildDescRow(buildDisablePropertyIntro()),
-          buildDisablePropertyRow(plugin),
+          buildDisablePropertyRow(plugin, tab),
         ],
       },
     ],

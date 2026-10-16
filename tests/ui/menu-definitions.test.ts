@@ -15,6 +15,7 @@ import { ContextMenuManager } from '../../src/ui/context-menus';
 import {
   DeepPartial,
   EXCLUSION_STRATEGY,
+  ExclusionStrategy,
   PluginSettings,
 } from '../../src/types';
 import { captureMenuItems, createTestSettings } from '../testUtils';
@@ -33,26 +34,31 @@ const ICON_FOR_OFFER = {
 // Folders and tags share this table: the strategy decides whether being on the
 // exclusion list means "renaming is off here" or "renaming is on here", which
 // flips which half of the disable/enable pair the menu offers.
+// `renames` is false where the rules spare nothing under the folder or tag, which hides the rename command too.
 const PAIR_CASES = [
   {
     strategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
     listed: false,
     offer: 'disable',
+    renames: true,
   },
   {
     strategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
     listed: true,
     offer: 'enable',
+    renames: false,
   },
   {
     strategy: EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT,
     listed: false,
     offer: 'enable',
+    renames: false,
   },
   {
     strategy: EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT,
     listed: true,
     offer: 'disable',
+    renames: true,
   },
 ] as const;
 
@@ -61,18 +67,24 @@ function createMockPlugin(settingsOverrides: DeepPartial<PluginSettings> = {}) {
     app: {
       metadataCache: {
         getFileCache: vi.fn(() => null),
+        getTags: vi.fn(() => ({})),
       },
     },
     settings: createTestSettings(settingsOverrides),
   };
-  // The real manager, not a stub: the folder and tag predicates delegate the
-  // strategy-dependent half of their decision to it.
-  plugin.contextMenuManager = new ContextMenuManager(plugin);
   return plugin;
 }
 
+/** The plugin's menu definitions, with the real manager's visibility checks rather than a stub: the folder and tag predicates delegate the strategy-dependent half of their decision to them. */
+function definitionsFor(plugin: any): MenuDefinitions {
+  return new MenuDefinitions(plugin, new ContextMenuManager(plugin));
+}
+
 /** The icons of the items this config renders for this context, in menu order. */
-function renderedIcons(config: MenuConfig, context: unknown): string[] {
+function renderedIcons<TContext>(
+  config: MenuConfig<TContext>,
+  context: TContext
+): string[] {
   const menu = new Menu();
   new MenuRenderer().render(menu as unknown as ObsidianMenu, config, context);
   return captureMenuItems(menu.addItem).map((item) => item.icon);
@@ -83,13 +95,13 @@ describe('MenuDefinitions', () => {
     const file = new TFile('Notes/note.md');
 
     function iconsFor(plugin: any): string[] {
-      return renderedIcons(new MenuDefinitions(plugin).getFileMenuConfig(), {
+      return renderedIcons(definitionsFor(plugin).getFileMenuConfig(), {
         file,
       });
     }
 
-    /** Puts the disable-renaming property at `value`, or removes it entirely. */
-    function setDisableRenamingProperty(plugin: any, value: unknown): void {
+    /** Stubs the metadata cache so the note carries the disable-renaming property at `value`, or none. */
+    function stubDisableRenamingProperty(plugin: any, value: unknown): void {
       plugin.app.metadataCache.getFileCache.mockReturnValue({
         frontmatter:
           value === undefined
@@ -100,7 +112,7 @@ describe('MenuDefinitions', () => {
 
     it('should render nothing when note commands are off', () => {
       const plugin = createMockPlugin({ core: { enableFileCommands: false } });
-      setDisableRenamingProperty(plugin, undefined);
+      stubDisableRenamingProperty(plugin, undefined);
 
       expect(iconsFor(plugin)).toEqual([]);
     });
@@ -117,7 +129,7 @@ describe('MenuDefinitions', () => {
 
     it('should offer disable when the properties lack the key', () => {
       const plugin = createMockPlugin();
-      setDisableRenamingProperty(plugin, undefined);
+      stubDisableRenamingProperty(plugin, undefined);
 
       expect(iconsFor(plugin)).toEqual([
         PUT_FIRST_LINE_IN_TITLE,
@@ -129,7 +141,7 @@ describe('MenuDefinitions', () => {
       const plugin = createMockPlugin({
         exclusions: { disableRenamingValue: 'true' },
       });
-      setDisableRenamingProperty(plugin, 'TRUE');
+      stubDisableRenamingProperty(plugin, 'TRUE');
 
       expect(iconsFor(plugin)).toEqual([
         PUT_FIRST_LINE_IN_TITLE,
@@ -141,7 +153,7 @@ describe('MenuDefinitions', () => {
       const plugin = createMockPlugin({
         exclusions: { disableRenamingValue: 'true' },
       });
-      setDisableRenamingProperty(plugin, 'false');
+      stubDisableRenamingProperty(plugin, 'false');
 
       expect(iconsFor(plugin)).toEqual([
         PUT_FIRST_LINE_IN_TITLE,
@@ -177,11 +189,37 @@ describe('MenuDefinitions', () => {
     );
   });
 
+  describe('file menu disable and enable', () => {
+    it.each([
+      [DISABLE_RENAMING, true],
+      [ENABLE_RENAMING, false],
+    ])(
+      'hands the note to the shared toggle from the %s item',
+      async (icon, disabled) => {
+        const plugin = createMockPlugin();
+        plugin.setRenamingDisabledForNote = vi
+          .fn()
+          .mockResolvedValue(undefined);
+        const file = new TFile('Notes/note.md');
+
+        const item = definitionsFor(plugin)
+          .getFileMenuConfig()
+          .items.find((candidate) => candidate.icon === icon);
+        await item?.onClick({ file });
+
+        expect(plugin.setRenamingDisabledForNote).toHaveBeenCalledWith(
+          file,
+          disabled
+        );
+      }
+    );
+  });
+
   describe('getFolderMenuConfig', () => {
     const folder = new TFolder('Notes');
 
     function iconsFor(plugin: any): string[] {
-      return renderedIcons(new MenuDefinitions(plugin).getFolderMenuConfig(), {
+      return renderedIcons(definitionsFor(plugin).getFolderMenuConfig(), {
         folder,
       });
     }
@@ -198,27 +236,89 @@ describe('MenuDefinitions', () => {
     // other half of the pair stayed hidden.
     it.each(PAIR_CASES)(
       'should offer only the $offer command under $strategy when the folder is listed: $listed',
-      ({ strategy, listed, offer }) => {
+      ({ strategy, listed, offer, renames }) => {
         const plugin = createMockPlugin({
           exclusions: {
-            folderScopeStrategy: strategy,
-            excludedFolders: listed ? [folder.path] : [],
+            fileScopeStrategy: strategy,
+            excludedFiles: listed ? [`${folder.path}/`] : [],
           },
         });
 
         expect(iconsFor(plugin)).toEqual([
-          PUT_FIRST_LINE_IN_TITLE,
+          ...(renames ? [PUT_FIRST_LINE_IN_TITLE] : []),
           ICON_FOR_OFFER[offer],
         ]);
       }
     );
+
+    it('should keep the rename command for an unlisted folder whose subfolder the rules spare', () => {
+      const plugin = createMockPlugin({
+        exclusions: {
+          fileScopeStrategy: EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT,
+          excludedFiles: ['Notes/Work/'],
+        },
+      });
+
+      expect(iconsFor(plugin)).toEqual([
+        PUT_FIRST_LINE_IN_TITLE,
+        ENABLE_RENAMING,
+      ]);
+    });
+
+    // Obsidian's explorer hands the vault root to the folder menu on a blank-area right-click
+    it.each([
+      EXCLUSION_STRATEGY.ONLY_EXCLUDE,
+      EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT,
+    ])(
+      'should offer neither half of the pair for the vault root under %s',
+      (strategy) => {
+        const plugin = createMockPlugin({
+          exclusions: { fileScopeStrategy: strategy, excludedFiles: ['/'] },
+        });
+
+        const icons = renderedIcons(
+          definitionsFor(plugin).getFolderMenuConfig(),
+          { folder: new TFolder('/') }
+        );
+
+        expect(icons).toEqual([PUT_FIRST_LINE_IN_TITLE]);
+      }
+    );
+  });
+
+  describe('shouldShowDisableMenuForFolder', () => {
+    function showsDisable(
+      excludedFiles: string[],
+      strategy: ExclusionStrategy = EXCLUSION_STRATEGY.ONLY_EXCLUDE
+    ): boolean {
+      const plugin = createMockPlugin({
+        exclusions: { fileScopeStrategy: strategy, excludedFiles },
+      });
+      return new ContextMenuManager(plugin).shouldShowDisableMenuForFolder(
+        'Notes'
+      );
+    }
+
+    it("matches the folder's own entry regardless of case", () => {
+      expect(showsDisable(['notes/'])).toBe(false);
+      expect(
+        showsDisable(['NOTES/'], EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT)
+      ).toBe(true);
+    });
+
+    it("does not count a slash-less prefix entry as the folder's own", () => {
+      expect(showsDisable(['Notes'])).toBe(true);
+      expect(
+        showsDisable(['Notes'], EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT)
+      ).toBe(false);
+    });
   });
 
   describe('getTagMenuConfig', () => {
     const tagName = 'project';
 
     function iconsFor(plugin: any): string[] {
-      return renderedIcons(new MenuDefinitions(plugin).getTagMenuConfig(), {
+      return renderedIcons(definitionsFor(plugin).getTagMenuConfig(), {
         tagName,
       });
     }
@@ -231,7 +331,7 @@ describe('MenuDefinitions', () => {
 
     it.each(PAIR_CASES)(
       'should offer only the $offer command under $strategy when the tag is listed: $listed',
-      ({ strategy, listed, offer }) => {
+      ({ strategy, listed, offer, renames }) => {
         // The stored list carries the leading '#'; the context does not.
         const plugin = createMockPlugin({
           exclusions: {
@@ -241,10 +341,29 @@ describe('MenuDefinitions', () => {
         });
 
         expect(iconsFor(plugin)).toEqual([
-          PUT_FIRST_LINE_IN_TITLE,
+          ...(renames ? [PUT_FIRST_LINE_IN_TITLE] : []),
           ICON_FOR_OFFER[offer],
         ]);
       }
     );
+
+    it('should keep the rename command for an excluded tag whose subtag the rules spare', () => {
+      const plugin = createMockPlugin({
+        exclusions: {
+          tagScopeStrategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
+          excludedTags: [`#${tagName}`],
+          matchSubtags: false,
+        },
+      });
+      plugin.app.metadataCache.getTags.mockReturnValue({
+        [`#${tagName}`]: 2,
+        [`#${tagName}/alpha`]: 1,
+      });
+
+      expect(iconsFor(plugin)).toEqual([
+        PUT_FIRST_LINE_IN_TITLE,
+        ENABLE_RENAMING,
+      ]);
+    });
   });
 });

@@ -2,14 +2,17 @@ import {
   PluginSettingTab,
   App,
   Plugin,
-  Notice,
   SettingDefinitionItem,
+  debounce,
 } from 'obsidian';
-import { FirstLineIsTitlePlugin } from './settings-base';
-import { t } from '../i18n';
-import { normalizeExclusionLists } from '../utils';
-import { getPath, setPath } from './settings-paths';
-import { FIRST_ENABLE_CHAR_KEYS } from '../types/char-replacement';
+import {
+  FirstLineIsTitlePlugin,
+  saveSettingsOrWarn,
+  TYPED_SETTING_DEBOUNCE_MS,
+} from './settings-base';
+import { getCurrentLocale, t } from '../i18n';
+import { getPath, setPath, SettingPath } from './settings-paths';
+import { PluginSettings } from '../types';
 
 import {
   buildGeneralDefinitions,
@@ -21,86 +24,65 @@ import { buildExclusionsPage } from './exclusions';
 import { buildCharacterReplacementsPage } from './character-replacements';
 import { buildCustomReplacementsPage } from './custom-replacements';
 import { buildMarkupStrippingPage } from './markup-stripping';
-import { buildAliasPage } from './alias';
+import { buildFirstLinePropertyPage } from './first-line-property';
 import { buildCommandsPage } from './commands';
 import { buildOtherPage } from './other';
 
-/**
- * Side effects that must run when a `control` writes a given key.
- *
- * The declarative API has no per-control onChange hook, but every `control`
- * write is routed through `setControlValue`, making it the one place these can
- * live. Cascades mutate settings directly and never re-enter `setControlValue`,
- * so there is no recursion and exactly one save per user action.
- */
-const CASCADES: Record<string, (plugin: FirstLineIsTitlePlugin) => void> = {
-  'characterReplacements.enableForbiddenCharReplacements': (plugin) => {
-    const { settings } = plugin;
-    if (!settings.characterReplacements.enableForbiddenCharReplacements) return;
-    if (settings.core.hasEnabledForbiddenChars) return;
+type Cascade = (plugin: FirstLineIsTitlePlugin) => void;
 
-    for (const key of FIRST_ENABLE_CHAR_KEYS) {
-      settings.characterReplacements.charReplacements[key].enabled = true;
-    }
-    settings.core.hasEnabledForbiddenChars = true;
-  },
+// One function shared by every key it serves, so `runChangedCascades` runs it once however many of them changed
+const refreshPropertyVisibility: Cascade = (plugin) =>
+  plugin.updatePropertyVisibility();
 
-  'customReplacements.enableCustomReplacements': (plugin) => {
-    const { settings } = plugin;
-    if (!settings.customReplacements.enableCustomReplacements) {
-      settings.markupStripping.applyCustomReplacementsInAlias = false;
-      return;
-    }
-    if (settings.core.hasEnabledCustomReplacements) return;
-    for (const replacement of settings.customReplacements.rules) {
-      replacement.enabled = true;
-    }
-    settings.core.hasEnabledCustomReplacements = true;
-  },
-
-  'aliases.enableAliases': (plugin) => {
-    const { settings } = plugin;
-    if (!settings.aliases.enableAliases || settings.core.hasEnabledAliases) {
-      return;
-    }
-    settings.aliases.keepEmptyAliasProperty = true;
-    settings.markupStripping.stripMarkupInAlias = true;
-    if (settings.customReplacements.enableCustomReplacements) {
-      settings.markupStripping.applyCustomReplacementsInAlias = true;
-    }
-    settings.core.hasEnabledAliases = true;
-  },
-
-  'aliases.hideAliasProperty': (plugin) => plugin.updatePropertyVisibility?.(),
-  'aliases.hideAliasInSidebar': (plugin) => plugin.updatePropertyVisibility?.(),
-  'core.checkInterval': (plugin) =>
-    plugin.editorLifecycle?.initializeCheckingSystem(),
-
-  'core.debug': (plugin) => {
-    const enabled = plugin.settings.core.debug;
-    // Stamps when debugging was switched on so log output is attributable.
-    plugin.settings.core.debugEnabledTimestamp = enabled
-      ? (plugin.getCurrentTimestamp?.() ?? '')
-      : '';
-    if (enabled) plugin.outputAllSettings?.();
-  },
+// Stamps when debugging was switched on so log output is attributable
+const stampDebugEnabled: Cascade = (plugin) => {
+  const enabled = plugin.settings.core.debug;
+  plugin.settings.core.debugEnabledTimestamp = enabled
+    ? plugin.getCurrentTimestamp()
+    : '';
+  if (enabled) plugin.outputAllSettings();
 };
 
-/**
- * Keys whose cascade force-writes a value on another control.
- *
- * `refreshDomState()` only re-evaluates visible/disabled predicates — it never
- * re-reads control values, so a force-written sibling would keep rendering its
- * stale value. These need a full `update()` instead.
- */
-const VALUE_MUTATING_KEYS = new Set([
-  'characterReplacements.enableForbiddenCharReplacements',
-  'customReplacements.enableCustomReplacements',
-  'aliases.enableAliases',
-]);
+/** Side effects that must run when a given key changes. The declarative API has no per-control onChange hook, but every `control` write is routed through `setControlValue`, which runs the key's entry; a wholesale replacement runs every entry whose key changed through `runChangedCascades`. Cascades mutate settings directly and never re-enter either, so there is no recursion and exactly one save per user action. */
+const CASCADES: Partial<Record<SettingPath, Cascade>> = {
+  'firstLineProperty.hideProperty': refreshPropertyVisibility,
+  'firstLineProperty.hideInSidebar': refreshPropertyVisibility,
+  // No control writes this key: the property name row runs it through the tab's debouncer, and a replacement through `runChangedCascades`
+  'firstLineProperty.propertyKey': refreshPropertyVisibility,
+
+  'core.debug': stampDebugEnabled,
+};
+
+/** Runs the cascade of every key whose value differs between `previous` and the plugin's current settings, after the settings were replaced wholesale. Every cascade key is a primitive leaf, so `!==` is a complete comparison. */
+export function runChangedCascades(
+  plugin: FirstLineIsTitlePlugin,
+  previous: PluginSettings
+): void {
+  const pending = new Set<Cascade>();
+  // `Object.keys` types its result as plain strings; every key is one CASCADES was declared with
+  for (const key of Object.keys(CASCADES) as SettingPath[]) {
+    const cascade = CASCADES[key];
+    if (cascade && getPath(previous, key) !== getPath(plugin.settings, key)) {
+      pending.add(cascade);
+    }
+  }
+  // A hand-trimmed import can turn debug on without its timestamp, which would leave the 24-hour auto-disable in `onload` nothing to measure from
+  const { core } = plugin.settings;
+  if (core.debug && !core.debugEnabledTimestamp) {
+    pending.add(stampDebugEnabled);
+  }
+  for (const cascade of pending) cascade(plugin);
+}
 
 export class FirstLineIsTitleSettings extends PluginSettingTab {
   plugin: FirstLineIsTitlePlugin;
+
+  /** Applies a typed property name once typing pauses, so property hiding is not rebuilt for every partial name. Obsidian's `debounce` schedules on `activeWindow`, which is the Settings window while it is open, and a timer pending there dies when that window closes (measured), so `hide()` runs it first. */
+  private readonly requestPropertyKeyCascade = debounce(
+    () => refreshPropertyVisibility(this.plugin),
+    TYPED_SETTING_DEBOUNCE_MS,
+    true
+  );
 
   constructor(app: App, plugin: FirstLineIsTitlePlugin) {
     // PluginSettingTab expects Plugin, but we use minimal interface for flexibility
@@ -109,39 +91,24 @@ export class FirstLineIsTitleSettings extends PluginSettingTab {
     this.icon = 'file-type-corner';
   }
 
-  getControlValue(key: string): unknown {
-    return getPath(
-      this.plugin.settings as unknown as Record<string, unknown>,
-      key
-    );
+  // Narrower than Obsidian's `string`: every control on this tab is declared with a SettingPath key, and Obsidian passes back the key it was given
+  getControlValue(key: SettingPath): unknown {
+    return getPath(this.plugin.settings, key);
   }
 
-  async setControlValue(key: string, value: unknown): Promise<void> {
-    setPath(
-      this.plugin.settings as unknown as Record<string, unknown>,
-      key,
-      value
-    );
+  async setControlValue(key: SettingPath, value: unknown): Promise<void> {
+    setPath(this.plugin.settings, key, value);
     CASCADES[key]?.(this.plugin);
 
-    try {
-      await this.plugin.saveSettings();
-    } catch {
-      const notice = new Notice(t('settings.errors.saveFailed'));
-      notice.containerEl.addClass('mod-warning');
-    }
+    // Not awaited: the settings object already holds the value, so the control's refresh need not wait on the disk
+    void saveSettingsOrWarn(this.plugin);
 
-    if (VALUE_MUTATING_KEYS.has(key)) {
-      this.update();
-    } else {
-      this.refreshDomState();
-    }
+    // No `refreshDomState()` here: Obsidian's control binding awaits this method and then calls it itself (app.js 1.14.4, `getControlBinding`). No cascade writes a value another row shows, so nothing needs a full `update()` either
   }
 
-  getSettingDefinitions(): SettingDefinitionItem[] {
+  getSettingDefinitions(): SettingDefinitionItem<SettingPath>[] {
     return [
-      // General settings stay at the top level with no heading, per Obsidian's
-      // convention that a tab's primary section is unlabelled.
+      // General settings stay at the top level with no heading, per Obsidian's convention that a tab's primary section is unlabeled.
       ...buildGeneralDefinitions(this.plugin),
       // Page-level action closes out the everyday settings, above the Exclusions row.
       ...buildFooterDefinitions(this.plugin),
@@ -151,11 +118,19 @@ export class FirstLineIsTitleSettings extends PluginSettingTab {
         type: 'group',
         heading: t('settings.sections.advancedGroup'),
         items: [
-          buildAliasPage(this.plugin),
-          buildCharacterReplacementsPage(this.plugin),
-          buildCommandsPage(this.plugin),
-          buildCustomReplacementsPage(this.plugin, this),
-          buildMarkupStrippingPage(this.plugin),
+          // Sorted by displayed name so the order is alphabetical in every locale.
+          ...[
+            buildFirstLinePropertyPage(
+              this.plugin,
+              this,
+              this.requestPropertyKeyCascade
+            ),
+            buildCharacterReplacementsPage(this.plugin, this),
+            buildCommandsPage(this.plugin),
+            buildCustomReplacementsPage(this.plugin, this),
+            buildMarkupStrippingPage(this.plugin),
+          ].sort((a, b) => a.name.localeCompare(b.name, getCurrentLocale())),
+          // Last whatever its name: it holds what fits no other page.
           buildOtherPage(this.plugin, this),
         ],
       },
@@ -164,16 +139,10 @@ export class FirstLineIsTitleSettings extends PluginSettingTab {
   }
 
   hide(): void {
-    // Deferred to close so half-finished rows are left alone while the modal is open
-    if (normalizeExclusionLists(this.plugin.settings)) {
-      this.plugin.saveSettings().catch(() => {
-        const notice = new Notice(t('settings.errors.saveFailed'));
-        notice.containerEl.addClass('mod-warning');
-      });
-      // List definitions map their items at definition time, so the pruned
-      // arrays only reach the DOM after the definitions are rebuilt.
-      this.update();
-    }
+    // Before the Settings window can close and take the pending timer with it
+    this.requestPropertyKeyCascade.run();
+    // A save typing left pending would die with the Settings window's timers, like the cascade above
+    this.plugin.flushSettingsSave();
     super.hide();
   }
 }

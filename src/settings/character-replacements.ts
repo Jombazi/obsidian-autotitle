@@ -1,301 +1,160 @@
-import { Notice, Setting, SettingDefinitionPage, setIcon } from 'obsidian';
 import {
-  addForbiddenCharProtection,
+  PluginSettingTab,
+  SettingDefinitionPage,
+  SettingDefinitionRender,
+} from 'obsidian';
+import { SettingPath } from './settings-paths';
+import {
   buildDescRow,
+  buildReplacedWithSummary,
+  buildSummaryRow,
   FirstLineIsTitlePlugin,
-  mountLegacyHost,
-  quoteLabel,
+  saveSettingsOrWarn,
 } from './settings-base';
 import { DEFAULT_SETTINGS } from '../constants';
 import { t } from '../i18n';
 import {
   CharKey,
+  CharReplacementConfig,
   PRIMARY_CHAR_KEYS,
   WINDOWS_ANDROID_CHAR_KEYS,
 } from '../types/char-replacement';
+import { EntryEditModal, EntryField } from '../modals/entry-edit-modal';
 
-/**
- * Sub-key under `settings.characterReplacements.characters` holding each
- * character's display label. Two keys differ from the setting key itself.
- */
-const CHAR_LABEL_KEYS: Record<CharKey, string> = {
-  leftBracket: 'leftBracket',
-  rightBracket: 'rightBracket',
-  hash: 'hash',
-  caret: 'caret',
-  pipe: 'pipe',
-  backslash: 'backslash',
-  slash: 'forwardSlash',
-  colon: 'colon',
-  dot: 'dot',
-  asterisk: 'asterisk',
-  quote: 'quote',
-  lessThan: 'lessThan',
-  greaterThan: 'greaterThan',
-  question: 'questionMark',
-};
-
-/** Characters that carry a clarifying note beneath their label. */
+/** Characters whose dialog explains them in the Replace toggle's description. */
 const CHAR_NOTE_KEYS: Partial<Record<CharKey, string>> = {
+  backslash: 'backslashNote',
   dot: 'dotNote',
 };
 
-interface CharTableConfig {
-  wrapper: HTMLElement;
-  chars: CharKey[];
-  /** Masks stored per-character values until the section has been enabled once. */
-  isEnabled: () => boolean;
-  isWindowsAndroid: boolean;
+/** The character's display label, keyed in the locale files by the setting key itself. */
+function charLabel(key: CharKey): string {
+  return t(`settings.characterReplacements.characters.${key}`);
 }
 
-async function persistSettings(plugin: FirstLineIsTitlePlugin): Promise<void> {
-  try {
-    await plugin.saveSettings();
-  } catch {
-    const notice = new Notice(t('settings.errors.saveFailed'));
-    notice.containerEl.addClass('mod-warning');
+/** What `processForbiddenChars` does with the character under this config, in the row's own words. */
+function buildCharSummary(
+  key: CharKey,
+  config: CharReplacementConfig
+): string | DocumentFragment {
+  if (!config.enabled) {
+    // An unreplaced dot is kept unless it leads the file name
+    return key === 'dot'
+      ? t('settings.characterReplacements.summary.keptExceptAtStart')
+      : t('settings.common.summary.removed');
   }
+  // Trims apply only alongside a non-empty replacement
+  if (config.replacement === '') {
+    return t('settings.common.summary.removed');
+  }
+  let trims = '';
+  if (config.trimLeft && config.trimRight) {
+    trims = t('settings.characterReplacements.summary.trimsBoth');
+  } else if (config.trimLeft) {
+    trims = t('settings.characterReplacements.summary.trimsLeft');
+  } else if (config.trimRight) {
+    trims = t('settings.characterReplacements.summary.trimsRight');
+  }
+  return buildReplacedWithSummary(config.replacement, trims);
 }
 
-function renderTableHeader(wrapper: HTMLElement): void {
-  const headerRow = wrapper.createDiv({
-    cls: 'flit-char-replacement-header',
-  });
+type CharValues = Pick<
+  CharReplacementConfig,
+  'enabled' | 'replacement' | 'trimLeft' | 'trimRight'
+>;
 
-  const enableHeader = headerRow.createDiv({ cls: 'flit-enable-column' });
-  enableHeader.textContent = t('settings.characterReplacements.headers.enable');
-
-  const charNameHeader = headerRow.createDiv({ cls: 'flit-char-name-column' });
-  charNameHeader.textContent = t(
-    'settings.characterReplacements.headers.character'
-  );
-
-  const inputHeader = headerRow.createDiv({
-    cls: 'flit-char-text-input-container',
-  });
-  inputHeader.textContent = t(
-    'settings.characterReplacements.headers.replaceWith'
-  );
-
-  const trimLeftHeader = headerRow.createDiv({
-    cls: 'flit-toggle-column center',
-  });
-  const trimLeftLine1 = trimLeftHeader.createDiv();
-  trimLeftLine1.textContent = t(
-    'settings.characterReplacements.headers.trimLeft'
-  );
-
-  const trimRightHeader = headerRow.createDiv({
-    cls: 'flit-toggle-column center',
-  });
-  const trimRightLine1 = trimRightHeader.createDiv();
-  trimRightLine1.textContent = t(
-    'settings.characterReplacements.headers.trimRight'
-  );
-}
-
-function renderCharacterRows(
+function openCharDialog(
   plugin: FirstLineIsTitlePlugin,
-  config: CharTableConfig
+  tab: PluginSettingTab,
+  key: CharKey
 ): void {
-  config.chars.forEach((key) => {
-    const charConfig =
-      plugin.settings.characterReplacements.charReplacements[key];
-    const rowEl = config.wrapper.createDiv({
-      cls: 'flit-char-replacement-setting',
-    });
-
-    const updateRowAppearance = () => {
-      rowEl.classList.toggle('flit-row-disabled', !charConfig.enabled);
-    };
-
-    const toggleContainer = rowEl.createDiv({ cls: 'flit-enable-column' });
-    const toggleSetting = new Setting(createDiv());
-    toggleSetting.addToggle((toggle) => {
-      toggle
-        .setValue(config.isEnabled() ? charConfig.enabled : false)
-        .onChange(async (value) => {
-          charConfig.enabled = value;
-          plugin.debugLog(`charReplacements.${String(key)}.enabled`, value);
-          await persistSettings(plugin);
-          updateRowAppearance();
-        });
-      toggle.toggleEl.classList.add('flit-margin-0');
-      toggleContainer.appendChild(toggle.toggleEl);
-    });
-
-    const nameContainer = rowEl.createDiv({
-      cls: 'flit-char-name-column',
-    });
-    nameContainer.createDiv({
-      text: t(
-        `settings.characterReplacements.characters.${CHAR_LABEL_KEYS[key]}`
-      ),
-      cls: 'setting-item-name',
-    });
-    const noteKey = CHAR_NOTE_KEYS[key];
-    if (noteKey) {
-      const descEl = nameContainer.createDiv({
-        cls: 'setting-item-description',
-      });
-      descEl.textContent = t(
-        `settings.characterReplacements.characters.${noteKey}`
-      );
-    }
-
-    const inputContainer = rowEl.createDiv({
-      cls: 'flit-char-text-input-container',
-    });
-
-    const defaultReplacement =
-      DEFAULT_SETTINGS.characterReplacements.charReplacements[key].replacement;
-
-    const restoreButton = inputContainer.createDiv({
-      cls: 'clickable-icon extra-setting-button',
-      attr: {
-        'aria-label': t('settings.common.restoreDefault'),
-      },
-    });
-    setIcon(restoreButton, 'rotate-ccw');
-
-    // Mirrors Obsidian's own restore controls, which mark the button
-    // `aria-disabled` while the value already equals its default. The dimming
-    // comes from Obsidian's `.clickable-icon[aria-disabled='true']` rule, which
-    // sets no `pointer-events` — native deliberately leaves the button
-    // clickable, since restoring a value to what it already is does nothing.
-    const syncRestoreButtonState = () => {
-      restoreButton.setAttribute(
-        'aria-disabled',
-        String(charConfig.replacement === defaultReplacement)
-      );
-    };
-    syncRestoreButtonState();
-
-    restoreButton.addEventListener('click', () => {
-      void (async () => {
-        charConfig.replacement = defaultReplacement;
-        textInput.value = defaultReplacement;
-        syncRestoreButtonState();
-        await persistSettings(plugin);
-      })();
-    });
-
-    const textInput = inputContainer.createEl('input', {
+  const config = plugin.settings.characterReplacements.charReplacements[key];
+  const noteKey = CHAR_NOTE_KEYS[key];
+  const fields: EntryField<keyof CharValues>[] = [
+    {
+      type: 'toggle',
+      key: 'enabled',
+      name: t('settings.characterReplacements.dialog.replace'),
+      desc: noteKey
+        ? t(`settings.characterReplacements.characters.${noteKey}`)
+        : undefined,
+    },
+    {
       type: 'text',
-      cls: 'flit-char-text-input flit-width-120',
-    });
-    textInput.placeholder = t(
-      'settings.characterReplacements.emptyPlaceholder'
-    );
-    textInput.value = charConfig.replacement;
-    textInput.addEventListener('input', (e) => {
-      void (async () => {
-        charConfig.replacement = (e.target as HTMLInputElement).value;
-        syncRestoreButtonState();
-        plugin.debugLog(
-          `charReplacements.${String(key)}.replacement`,
-          charConfig.replacement
-        );
-        await persistSettings(plugin);
-      })();
-    });
+      key: 'replacement',
+      name: t('settings.characterReplacements.headers.replaceWith'),
+      placeholder: t('settings.common.emptyPlaceholder'),
+      restoreDefault:
+        DEFAULT_SETTINGS.characterReplacements.charReplacements[key]
+          .replacement,
+      stripForbiddenChars: true,
+    },
+    {
+      type: 'toggle',
+      key: 'trimLeft',
+      name: t('settings.characterReplacements.headers.trimLeft'),
+      desc: t('settings.characterReplacements.dialog.trimLeftDesc'),
+    },
+    {
+      type: 'toggle',
+      key: 'trimRight',
+      name: t('settings.characterReplacements.headers.trimRight'),
+      desc: t('settings.characterReplacements.dialog.trimRightDesc'),
+    },
+  ];
 
-    addForbiddenCharProtection(textInput, config.isWindowsAndroid);
-
-    const trimLeftContainer = rowEl.createDiv({
-      cls: 'flit-toggle-column center',
-    });
-    const trimLeftSetting = new Setting(createDiv());
-    trimLeftSetting.addToggle((toggle) => {
-      toggle
-        .setValue(config.isEnabled() ? charConfig.trimLeft : false)
-        .onChange(async (value) => {
-          charConfig.trimLeft = value;
-          plugin.debugLog(`charReplacements.${String(key)}.trimLeft`, value);
-          await persistSettings(plugin);
-        });
-      toggle.toggleEl.classList.add('flit-margin-0');
-      trimLeftContainer.appendChild(toggle.toggleEl);
-    });
-
-    const trimRightContainer = rowEl.createDiv({
-      cls: 'flit-toggle-column center',
-    });
-    const trimRightSetting = new Setting(createDiv());
-    trimRightSetting.addToggle((toggle) => {
-      toggle
-        .setValue(config.isEnabled() ? charConfig.trimRight : false)
-        .onChange(async (value) => {
-          charConfig.trimRight = value;
-          plugin.debugLog(`charReplacements.${String(key)}.trimRight`, value);
-          await persistSettings(plugin);
-        });
-      toggle.toggleEl.classList.add('flit-margin-0');
-      trimRightContainer.appendChild(toggle.toggleEl);
-    });
-
-    updateRowAppearance();
-  });
+  new EntryEditModal<CharValues>(plugin.app, {
+    title: charLabel(key),
+    fields,
+    initialValues: {
+      enabled: config.enabled,
+      replacement: config.replacement,
+      trimLeft: config.trimLeft,
+      trimRight: config.trimRight,
+    },
+    onSave: async (values) => {
+      config.enabled = values.enabled;
+      config.replacement = values.replacement;
+      config.trimLeft = values.trimLeft;
+      config.trimRight = values.trimRight;
+      plugin.debugLog(`charReplacements.${key}`, config);
+      await saveSettingsOrWarn(plugin);
+      tab.update();
+    },
+  }).open();
 }
 
-/**
- * Explains the Trim left/right columns. Both character tables have them, so
- * this is its own row below the master toggle rather than inside either
- * table's group.
- */
-function appendTrimNote(parent: HTMLElement | DocumentFragment): void {
-  const appendEmphasis = (localeKey: string) => {
-    parent.appendText(quoteLabel(t(localeKey)));
-  };
-
-  parent.appendText(t('settings.characterReplacements.trimNote.part1'));
-  appendEmphasis('settings.characterReplacements.trimNote.trimLeft');
-  parent.appendText(t('settings.characterReplacements.trimNote.part2'));
-  appendEmphasis('settings.characterReplacements.trimNote.trimRight');
-  parent.appendText(t('settings.characterReplacements.trimNote.part3'));
+/** One summary row per fixed character: no Add, Delete or drag, because the set never changes. */
+function buildCharRows(
+  plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab,
+  chars: CharKey[]
+): SettingDefinitionRender[] {
+  return chars.map((key) =>
+    buildSummaryRow({
+      name: charLabel(key),
+      // Reads the stored config directly, matching what the engine applies
+      buildDesc: () =>
+        buildCharSummary(
+          key,
+          plugin.settings.characterReplacements.charReplacements[key]
+        ),
+      searchable: true,
+      editEntry: () => openCharDialog(plugin, tab, key),
+    })
+  );
 }
 
-/**
- * Character replacements sub-page.
- *
- * The two character tables stay imperative: they are fixed-size grids with
- * per-row restore buttons that the declarative control types cannot express.
- * Both mount into a `.flit-settings-page` host (variant C) so the existing
- * table CSS keeps applying without capturing Obsidian's own row chrome.
- */
+/** Character replacements sub-page. Each group lists its fixed characters as summary rows; a row's Edit opens a dialog holding that character's switch, replacement and trims. */
 export function buildCharacterReplacementsPage(
-  plugin: FirstLineIsTitlePlugin
-): SettingDefinitionPage {
-  const mountTable = (
-    setting: Setting,
-    chars: CharKey[],
-    isEnabled: () => boolean,
-    isWindowsAndroid: boolean
-  ) => {
-    const host = mountLegacyHost(setting.settingEl);
-    const tableContainer = host.createDiv({
-      cls: isWindowsAndroid
-        ? 'flit-table-container flit-windows-android-table'
-        : 'flit-table-container',
-    });
-    const tableWrapper = tableContainer.createDiv({
-      cls: 'flit-table-wrapper',
-    });
-
-    renderTableHeader(tableWrapper);
-    renderCharacterRows(plugin, {
-      wrapper: tableWrapper,
-      chars,
-      isEnabled,
-      isWindowsAndroid,
-    });
-  };
-
+  plugin: FirstLineIsTitlePlugin,
+  tab: PluginSettingTab
+): SettingDefinitionPage<SettingPath> {
   return {
     type: 'page',
     name: t('settings.sections.characterReplacements'),
     desc: t('settings.characterReplacements.desc'),
-    // Blank rather than "Disabled" when off — see the note on the Alias page.
+    // Blank rather than "Disabled" when off — see the note on the First line property page.
     displayValue: () =>
       plugin.settings.characterReplacements.enableForbiddenCharReplacements
         ? t('settings.common.enabled')
@@ -303,60 +162,32 @@ export function buildCharacterReplacementsPage(
     items: [
       {
         name: t('settings.characterReplacements.name'),
-        // Deliberately not the section desc: the section summarises what the
-        // page is for, the toggle explains what each position does.
+        // Deliberately not the section desc: the section summarizes what the page is for, the toggle explains what each position does.
         desc: t('settings.characterReplacements.toggleDesc'),
         control: {
           type: 'toggle',
           key: 'characterReplacements.enableForbiddenCharReplacements',
         },
       },
-      buildDescRow(
-        createFragment((frag) => appendTrimNote(frag)),
-        {
-          visible: () =>
-            plugin.settings.characterReplacements
-              .enableForbiddenCharReplacements,
-        }
-      ),
       {
-        type: 'group',
+        // A list, not a plain group, though nothing is added, deleted or dragged: on phones Obsidian stacks a plain group's control under the row text at full width, and only list rows keep the Edit button to the right
+        type: 'list',
         heading: t('settings.characterReplacements.allOSes.title'),
         visible: () =>
           plugin.settings.characterReplacements.enableForbiddenCharReplacements,
         items: [
-          {
-            name: '',
-            desc: t('settings.characterReplacements.allOSes.desc'),
-            render: (setting) => {
-              mountTable(
-                setting,
-                PRIMARY_CHAR_KEYS,
-                () => plugin.settings.core.hasEnabledForbiddenChars,
-                false
-              );
-            },
-          },
+          buildDescRow(t('settings.characterReplacements.allOSes.desc')),
+          ...buildCharRows(plugin, tab, PRIMARY_CHAR_KEYS),
         ],
       },
       {
-        type: 'group',
+        type: 'list',
         heading: t('settings.characterReplacements.windowsAndroid.title'),
         visible: () =>
           plugin.settings.characterReplacements.enableForbiddenCharReplacements,
         items: [
-          {
-            name: '',
-            desc: t('settings.characterReplacements.windowsAndroid.desc'),
-            render: (setting) => {
-              mountTable(
-                setting,
-                WINDOWS_ANDROID_CHAR_KEYS,
-                () => plugin.settings.core.hasEnabledForbiddenChars,
-                true
-              );
-            },
-          },
+          buildDescRow(t('settings.characterReplacements.windowsAndroid.desc')),
+          ...buildCharRows(plugin, tab, WINDOWS_ANDROID_CHAR_KEYS),
         ],
       },
     ],

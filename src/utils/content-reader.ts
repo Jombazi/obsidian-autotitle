@@ -1,15 +1,18 @@
-import { App, TFile, Editor, MarkdownView, ViewWithFileEditor } from 'obsidian';
+import { App, TFile, Editor, MarkdownView } from 'obsidian';
 import FirstLineIsTitlePlugin from '../../main';
+import { verboseLog } from '../utils';
+import { findEmbeddedEditors } from './embedded-editors';
+import { findMarkdownViewOfEditor } from './editor-checks';
 
 /**
  * Options for reading file content
  */
 export interface ContentReaderOptions {
-  /** Already have content (from editor.getValue()) */
+  /** Already have content (the text an editor or view holds) */
   providedContent?: string;
   /** Already have editor instance */
   providedEditor?: Editor;
-  /** Search workspace for matching editor */
+  /** Search open editors for this note, page previews and Canvas cards included */
   searchWorkspace?: boolean;
   /** Use vault.read instead of vault.cachedRead when falling back */
   preferFresh?: boolean;
@@ -46,91 +49,67 @@ export async function readFileContent(
     // Accept any string including empty (user may have deleted all content)
     if (providedContent !== undefined) {
       content = providedContent;
-      if (settings.core.debug) {
-        console.debug(
-          `Using provided content for ${file.path} (${content.length} chars)`
-        );
-      }
+      verboseLog(
+        plugin,
+        `Using provided content for ${file.path} (${content.length} chars)`
+      );
       return content;
     }
 
     // Strategy 2: Use provided editor if available
     if (providedEditor) {
-      content = providedEditor.getValue();
-      if (settings.core.debug) {
-        console.debug(
-          `Using provided editor content for ${file.path} (${content.length} chars)`
-        );
-      }
+      // A tab's view text rather than its editor's: a Reading view's hidden editor keeps the text it loaded while properties edited in the view or outside changes reach only the view (measured, Obsidian 1.14.4)
+      content =
+        findMarkdownViewOfEditor(app, providedEditor)?.getViewData() ??
+        providedEditor.getValue();
+      verboseLog(
+        plugin,
+        `Using provided editor content for ${file.path} (${content.length} chars)`
+      );
       return content;
     }
 
-    // Strategy 3: Search workspace for matching editor if requested
+    // Strategy 3: Search open editors for this note, page previews and Canvas cards included, if requested
     if (searchWorkspace) {
       const editorContent = findEditorContent(app, file);
       if (editorContent !== null) {
-        if (settings.core.debug) {
-          console.debug(
-            `Found editor in workspace for ${file.path} (${editorContent.length} chars)`
-          );
-        }
+        verboseLog(
+          plugin,
+          `Found editor in workspace for ${file.path} (${editorContent.length} chars)`
+        );
         return editorContent;
       }
     }
 
     // Strategy 4: Use contentReadMethod setting
     if (settings.core.contentReadMethod === 'Editor') {
-      // Editor method with no editor available - fallback based on preferFresh or file state
-      const needsFresh =
-        preferFresh || plugin.fileStateManager?.needsFreshRead(file.path);
-      if (needsFresh) {
+      // Editor method with no editor available - fallback based on preferFresh
+      if (preferFresh) {
         content = await app.vault.read(file);
-        // Clear needsFreshRead flag after using it
-        plugin.fileStateManager?.clearNeedsFreshRead(file.path);
-        if (settings.core.debug) {
-          console.debug(
-            `Editor method using fresh read for ${file.path} (${content.length} chars)`
-          );
-        }
+        verboseLog(
+          plugin,
+          `Editor method using fresh read for ${file.path} (${content.length} chars)`
+        );
       } else {
         content = await app.vault.cachedRead(file);
-        if (settings.core.debug) {
-          console.debug(
-            `Editor method fallback to cached read for ${file.path} (${content.length} chars)`
-          );
-        }
+        verboseLog(
+          plugin,
+          `Editor method fallback to cached read for ${file.path} (${content.length} chars)`
+        );
       }
     } else if (settings.core.contentReadMethod === 'Cache') {
       content = await app.vault.cachedRead(file);
-      if (settings.core.debug) {
-        console.debug(
-          `Cached read content from ${file.path} (${content.length} chars)`
-        );
-      }
-    } else if (settings.core.contentReadMethod === 'File') {
-      content = await app.vault.read(file);
-      if (settings.core.debug) {
-        console.debug(
-          `Direct read content from ${file.path} (${content.length} chars)`
-        );
-      }
+      verboseLog(
+        plugin,
+        `Cached read content from ${file.path} (${content.length} chars)`
+      );
     } else {
-      // Unknown method - use preferFresh or fallback to cache
-      if (preferFresh) {
-        content = await app.vault.read(file);
-        if (settings.core.debug) {
-          console.debug(
-            `Unknown method, using fresh read for ${file.path} (${content.length} chars)`
-          );
-        }
-      } else {
-        content = await app.vault.cachedRead(file);
-        if (settings.core.debug) {
-          console.debug(
-            `Unknown method, fallback to cached read for ${file.path} (${content.length} chars)`
-          );
-        }
-      }
+      // 'File', the last of the three read methods the settings validation allows
+      content = await app.vault.read(file);
+      verboseLog(
+        plugin,
+        `Direct read content from ${file.path} (${content.length} chars)`
+      );
     }
 
     return content;
@@ -143,55 +122,25 @@ export async function readFileContent(
 }
 
 /**
- * Search workspace for an editor matching the given file
- * Checks hover popovers first (most likely fresh during active editing), then main workspace
+ * Search workspace for an editor or Markdown view showing the given file
+ * Checks page previews and Canvas cards editing the note first, then the active view, then open Markdown leaves
  * @param app - Obsidian App instance
  * @param file - File to find editor for
- * @returns Editor content if found, null otherwise
+ * @returns The text it holds if found, null otherwise
  */
 function findEditorContent(app: App, file: TFile): string | null {
-  const leaves = app.workspace.getLeavesOfType('markdown');
-
-  // Track popover editors for single-popover fallback logic
-  let singlePopoverContent: string | null = null;
-  let popoverCount = 0;
-
-  // Check hover popovers FIRST - most likely to have fresh content during active editing
-  // Popovers are ephemeral and only exist when actively being used
-  for (const leaf of leaves) {
-    // Cast to ViewWithFileEditor to access MarkdownView properties
-    const view = leaf.view as ViewWithFileEditor;
-
-    if (view?.hoverPopover?.targetEl && view.hoverPopover.editor) {
-      const content = view.hoverPopover.editor.getValue();
-
-      // Don't trust empty content - likely transient state after file operations
-      if (content) {
-        popoverCount++;
-        singlePopoverContent = content;
-
-        // Try exact path match first (normal case)
-        if (view.hoverPopover.file?.path === file.path) {
-          return content;
-        }
-        // Path might not match immediately after rename due to async update
-        // Continue to check other popovers and fall back to single-popover logic
-      }
-    }
+  // Page previews and Canvas cards match the note by file identity, so an embed of another note is never read. Empty content is not trusted: likely transient state after file operations.
+  const embedContent = findEmbeddedEditors(app, file)[0]?.editor?.getValue();
+  if (embedContent) {
+    return embedContent;
   }
 
-  // If exactly one active popover exists with content, use it
-  // Obsidian only allows one hover popover at a time - opening another closes the first
-  // This handles post-rename case where popover's file.path hasn't updated yet
-  if (popoverCount === 1 && singlePopoverContent) {
-    return singlePopoverContent;
-  }
-
-  // Check active view's editor as fallback - only if file matches
+  // Check active view as fallback - only if file matches
   // This prevents bulk operations from returning active editor content for all files
+  // The view's text, not its editor's, which a Reading view leaves stale
   const activeView = app.workspace.getActiveViewOfType(MarkdownView);
-  if (activeView?.editor && activeView.file?.path === file.path) {
-    const content = activeView.editor.getValue();
+  if (activeView && activeView.file?.path === file.path) {
+    const content = activeView.getViewData();
     if (content) {
       return content;
     }
@@ -199,10 +148,11 @@ function findEditorContent(app: App, file: TFile): string | null {
 
   // Check main workspace leaves as final fallback
   // These can be stale after file operations (renames, etc.)
-  for (const leaf of leaves) {
-    const view = leaf.view as MarkdownView;
-    if (view && view.file?.path === file.path && view.editor) {
-      const content = view.editor.getValue();
+  for (const leaf of app.workspace.getLeavesOfType('markdown')) {
+    // A deferred leaf's view is no MarkdownView and has no file or editor (measured, Obsidian 1.14.4), so it is skipped until the leaf loads
+    const view = leaf.view;
+    if (view instanceof MarkdownView && view.file?.path === file.path) {
+      const content = view.getViewData();
       // Don't trust empty content - could be transient/stale state
       if (content) {
         return content;
@@ -211,22 +161,5 @@ function findEditorContent(app: App, file: TFile): string | null {
     }
   }
 
-  return null;
-}
-
-/**
- * Find an editor instance for the given file in the workspace
- * @param app - Obsidian App instance
- * @param file - File to find editor for
- * @returns Editor instance if found, null otherwise
- */
-export function findEditor(app: App, file: TFile): Editor | null {
-  const leaves = app.workspace.getLeavesOfType('markdown');
-  for (const leaf of leaves) {
-    const view = leaf.view as MarkdownView;
-    if (view && view.file?.path === file.path && view.editor) {
-      return view.editor;
-    }
-  }
   return null;
 }

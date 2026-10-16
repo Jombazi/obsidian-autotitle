@@ -39,6 +39,7 @@ vi.mock('../../src/core/file-creation-coordinator', () => ({
         shouldInsertTitle: false,
         shouldMoveCursor: false,
         placeCursorAtEnd: false,
+        viewLagsFile: false,
       }),
     };
   }),
@@ -69,7 +70,6 @@ describe('WorkspaceIntegration', () => {
       fileOperations: {
         insertTitle: vi.fn().mockResolvedValue(undefined),
         handleCursorPositioning: vi.fn().mockResolvedValue(undefined),
-        cleanup: vi.fn(),
       },
       editorLifecycle: {
         clearCreationDelayTimer: vi.fn(),
@@ -78,7 +78,9 @@ describe('WorkspaceIntegration', () => {
       },
       isFullyLoaded: true,
       pluginLoadTime: Date.now() - 10000,
-      recentlyRenamedPaths: new Set(),
+      fileStateManager: {
+        wasRecentlyRenamedInto: vi.fn().mockReturnValue(false),
+      },
     };
   });
 
@@ -196,44 +198,6 @@ describe('WorkspaceIntegration', () => {
     });
   });
 
-  describe('rate limiting', () => {
-    it('should have rate limit constant defined', async () => {
-      const { WorkspaceIntegration } =
-        await import('../../src/core/workspace-integration');
-      const integration = new WorkspaceIntegration(mockPlugin);
-
-      expect(integration.TITLE_INSERTION_RATE_LIMIT_MS).toBe(1000);
-    });
-
-    it('should track last title insertion time', async () => {
-      const { WorkspaceIntegration } =
-        await import('../../src/core/workspace-integration');
-      const integration = new WorkspaceIntegration(mockPlugin);
-
-      expect(integration.lastTitleInsertionTime).toBe(0);
-
-      integration.lastTitleInsertionTime = 12345;
-      expect(integration.lastTitleInsertionTime).toBe(12345);
-    });
-
-    it('should allow insertion after rate limit window passes', async () => {
-      const { WorkspaceIntegration } =
-        await import('../../src/core/workspace-integration');
-      const integration = new WorkspaceIntegration(mockPlugin);
-
-      // Set last insertion to now
-      const now = Date.now();
-      integration.lastTitleInsertionTime = now;
-
-      // Advance time past rate limit
-      vi.advanceTimersByTime(1001);
-
-      // Time should have advanced
-      const elapsed = Date.now() - integration.lastTitleInsertionTime;
-      expect(elapsed).toBeGreaterThanOrEqual(1000);
-    });
-  });
-
   describe('setupSaveEventHook', () => {
     it('should setup save event hook when command exists', async () => {
       const { WorkspaceIntegration } =
@@ -269,7 +233,7 @@ describe('WorkspaceIntegration', () => {
     });
   });
 
-  describe('setupCursorPositioning', () => {
+  describe('setupNewNotePipeline', () => {
     it('should wait for layout ready before setting up', async () => {
       const { WorkspaceIntegration } =
         await import('../../src/core/workspace-integration');
@@ -277,7 +241,7 @@ describe('WorkspaceIntegration', () => {
 
       // onLayoutReady is now built into the mock Workspace
 
-      integration.setupCursorPositioning();
+      integration.setupNewNotePipeline();
 
       expect(mockApp.workspace.onLayoutReady).toHaveBeenCalled();
     });
@@ -289,7 +253,7 @@ describe('WorkspaceIntegration', () => {
 
       // onLayoutReady calls callback immediately (built into mock)
 
-      integration.setupCursorPositioning();
+      integration.setupNewNotePipeline();
 
       expect(mockPlugin.registerEvent).toHaveBeenCalled();
     });

@@ -16,11 +16,11 @@ Automatically set the first line as note title, just like in Apple Notes. Forget
 - Replace characters forbidden in file names with safe alternatives, or omit them entirely.
 - Strip Markdown syntax in file name.
 - Configure custom text replacements.
-- Automatically populate a first line alias property — make forbidden characters searchable in Quick switcher and link suggestions, or set as note title in other plugins.
+- Automatically copy the first line to a property — make forbidden characters searchable in the Quick switcher and link suggestions, or set as note title in other plugins.
 - Commands to batch rename all notes in a folder, all notes with a tag, all search results, or the entire vault.
 - Automatically insert file name in first line on note creation.
-- Exclude select notes, folders, tags, properties or file names from renaming, or only enable renaming in some.
-- Command to convert selection containing forbidden characters into a valid internal link, with the original text preserved in link alias.
+- Exclude notes by file path, tag or property from renaming, or only enable renaming in some.
+- Command to convert selection containing forbidden characters into a valid internal link, with the original text preserved in the link's display text.
 
 ## File integrity
 
@@ -34,16 +34,16 @@ Multiple safeguards are in place to prevent unintended changes but **regular [ba
 
 | Command                   | Description                                                                      |
 | ------------------------- | -------------------------------------------------------------------------------- |
-| Put first line in title   | Rename active note, even if in excluded folder or with excluded tag or property. |
+| Put first line in title   | Rename active note, even if excluded by file path, tag or property. |
 | Toggle automatic renaming | Toggle the **Rename automatically** setting.                                     |
 
 ### Command palette
 
 | Command                                               | Description                                                                                                                                                    |
 | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Put first line in title                               | Rename active note, even if in excluded folder or with excluded tag or property.                                                                               |
-| Put first line in title (unless excluded)             | Rename active note except if in excluded folder or with excluded tag or property.                                                                              |
-| Put first line in title in all notes                  | Rename all notes in vault except if in excluded folder or with excluded tag or property.                                                                       |
+| Put first line in title                               | Rename active note, even if excluded by file path, tag or property.                                                                          |
+| Put first line in title (unless excluded)             | Rename active note except if excluded by file path, tag or property.                                                                         |
+| Put first line in title in all notes                  | Rename all notes in vault except if excluded by file path, tag or property.                                                                  |
 | Toggle automatic renaming                             | Toggle the **Rename automatically** setting.                                                                                                                   |
 | Disable renaming for note                             | Exclude active note from renaming.                                                                                                                             |
 | Enable renaming for note                              | Stop excluding active note from renaming.                                                                                                                      |
@@ -90,4 +90,4 @@ Until **First Line is Title** appears in the plugin directory, to install it:
 
 ## Credits
 
-The settings import and export modals are adapted from [Notebook Navigator](https://github.com/johansan/notebook-navigator) by Johan Sanneblad, used under the GPL-3.0 licence.
+The settings import and export modals are adapted from [Notebook Navigator](https://github.com/johansan/notebook-navigator) by Johan Sanneblad, used under the GPL-3.0 license.

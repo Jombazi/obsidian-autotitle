@@ -1,18 +1,21 @@
 import { getLanguage } from 'obsidian';
 import enTranslations from '../locale/en.json';
 import ruTranslations from '../locale/ru.json';
+// Russian copy writes е for ё except where е would change the meaning, and quotes with straight "…", the style Obsidian's own Russian text uses most; notice punctuation rules sit at `showNotice`
 
-// Module state - initialized immediately to prevent tree-shaking
-const state = (() => {
-  return {
-    availableTranslations: {
-      en: enTranslations,
-      ru: ruTranslations,
-    } as Record<string, Record<string, unknown>>,
-    translations: enTranslations,
-    currentLocale: 'en',
-  };
-})();
+type TranslationVariables = Record<string, string | number>;
+
+/** The plural categories the locale files use; English has no `few`. */
+type PluralCategory = 'one' | 'few' | 'many';
+
+const state = {
+  availableTranslations: {
+    en: enTranslations,
+    ru: ruTranslations,
+  } as Record<string, Record<string, unknown>>,
+  translations: enTranslations,
+  currentLocale: 'en',
+};
 
 /**
  * Initialize i18n system
@@ -38,67 +41,59 @@ export function initI18n(): void {
   }
 }
 
+/** The node a dot-separated key path names in the current locale, or `undefined` when the path leaves the tree. */
+function resolveKeyPath(keyPath: string): unknown {
+  let node: unknown = state.translations;
+  for (const key of keyPath.split('.')) {
+    if (typeof node !== 'object' || node === null || !(key in node)) {
+      return undefined;
+    }
+    node = (node as Record<string, unknown>)[key];
+  }
+  return node;
+}
+
+/** Fills every `{{name}}` placeholder that `variables` has a value for, leaving the others as written. */
+export function interpolate(
+  template: string,
+  variables?: TranslationVariables
+): string {
+  if (!variables) return template;
+  // One pass with a replacer function: a replacement string would expand `$&` and `$$` in values containing `$`, and a later variable could rewrite a placeholder an earlier value brought in
+  return template.replace(/\{\{(\w+)\}\}/g, (placeholder, name: string) =>
+    Object.prototype.hasOwnProperty.call(variables, name)
+      ? String(variables[name])
+      : placeholder
+  );
+}
+
+/** The plural category `count` takes in the current locale. */
+function getPluralCategory(count: number): PluralCategory {
+  if (state.currentLocale !== 'ru') return count === 1 ? 'one' : 'many';
+
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'one';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'few';
+  return 'many';
+}
+
+/** The member of a plural group that `count` selects, falling back to `many` where a group leaves a category out. */
+function selectPluralForm(group: unknown, count: number): unknown {
+  if (typeof group !== 'object' || group === null) return undefined;
+  const forms = group as Partial<Record<PluralCategory, unknown>>;
+  return forms[getPluralCategory(count)] ?? forms.many;
+}
+
 /**
  * Get translated string by key path
  * @param keyPath - Dot-separated key path (e.g., 'commands.putFirstLineInTitle')
  * @param variables - Optional object with variables to replace (e.g., { filename: 'test.md' })
- * @param fallback - Fallback string if translation not found
- * @returns Translated string
+ * @returns Translated string, or the key path when it names no string
  */
-export function t(
-  keyPath: string,
-  variables?: Record<string, string | number> | string,
-  fallback?: string
-): string {
-  // Handle overloaded signature (variables can be fallback string)
-  let vars: Record<string, string | number> | undefined;
-  let fb: string | undefined;
-
-  if (typeof variables === 'string') {
-    fb = variables;
-    vars = undefined;
-  } else {
-    vars = variables;
-    fb = fallback;
-  }
-
-  const keys = keyPath.split('.');
-  let value: unknown = state.translations;
-
-  for (const key of keys) {
-    if (value && typeof value === 'object' && key in value && value !== null) {
-      value = (value as Record<string, unknown>)[key];
-    } else {
-      // Key not found, use fallback
-      let result = fb || keyPath;
-
-      // Replace variables if provided
-      if (vars) {
-        for (const [varKey, varVal] of Object.entries(vars)) {
-          result = result.replace(
-            new RegExp(`\\{\\{${varKey}\\}\\}`, 'g'),
-            String(varVal)
-          );
-        }
-      }
-
-      return result;
-    }
-  }
-
-  let result = typeof value === 'string' ? value : fb || keyPath;
-
-  // Replace variables if provided
-  if (vars) {
-    for (const [key, val] of Object.entries(vars)) {
-      result = result.replace(
-        new RegExp(`\\{\\{${key}\\}\\}`, 'g'),
-        String(val)
-      );
-    }
-  }
-
-  return result;
+export function t(keyPath: string, variables?: TranslationVariables): string {
+  const value = resolveKeyPath(keyPath);
+  return interpolate(typeof value === 'string' ? value : keyPath, variables);
 }
 
 /**
@@ -109,145 +104,44 @@ export function getCurrentLocale(): string {
 }
 
 /**
- * Get plural form for Russian locale
- * @param count - Number to determine plural form
- * @param one - Form for 1, 21, 31, etc. (заметка)
- * @param few - Form for 2-4, 22-24, etc. (заметки)
- * @param many - Form for 5-20, 25-30, etc. (заметок)
- * @returns Appropriate plural form
+ * Translates a plural group, picking the form `count` takes in the current locale.
+ * @param keyPath - Dot-separated key path to a group of `one`/`few`/`many` strings (e.g., 'commands.putFirstLineInTitleNNotes'); a plain string is used as is
+ * @param count - Selects the form and fills `{{count}}`
+ * @param variables - Fill the group's other placeholders
+ * @returns The translated string, or the key path when it names neither a string nor a group
  */
-export function getPluralForm(
+export function tp(
+  keyPath: string,
   count: number,
-  one: string,
-  few: string,
-  many: string
+  variables?: TranslationVariables
 ): string {
-  if (state.currentLocale !== 'ru') {
-    return count === 1 ? one : many;
-  }
-
-  const mod10 = count % 10;
-  const mod100 = count % 100;
-
-  if (mod10 === 1 && mod100 !== 11) {
-    return one;
-  } else if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
-    return few;
-  } else {
-    return many;
-  }
+  const value = resolveKeyPath(keyPath);
+  const form =
+    typeof value === 'string' ? value : selectPluralForm(value, count);
+  return interpolate(typeof form === 'string' ? form : keyPath, {
+    ...variables,
+    count,
+  });
 }
 
 /**
- * Get translated plural message
- * @param keyPath - Dot-separated key path to plural forms object (e.g., 'modals.processNNotes')
- * @param count - Number to determine plural form
- * @param fallback - Fallback string if translation not found
- * @returns Translated plural string with {{count}} replaced
- */
-export function tp(keyPath: string, count: number, fallback?: string): string {
-  const keys = keyPath.split('.');
-  let value: unknown = state.translations;
-
-  for (const key of keys) {
-    if (value && typeof value === 'object' && key in value && value !== null) {
-      value = (value as Record<string, unknown>)[key];
-    } else {
-      return (fallback || keyPath).replace('{{count}}', String(count));
-    }
-  }
-
-  // If not an object with plural forms, return as-is
-  if (typeof value === 'string') {
-    return value.replace('{{count}}', String(count));
-  }
-
-  // Get the appropriate plural form
-  let pluralKey: string;
-  if (state.currentLocale !== 'ru') {
-    pluralKey = count === 1 ? 'one' : 'many';
-  } else {
-    const mod10 = count % 10;
-    const mod100 = count % 100;
-
-    if (mod10 === 1 && mod100 !== 11) {
-      pluralKey = 'one';
-    } else if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
-      pluralKey = 'few';
-    } else {
-      pluralKey = 'many';
-    }
-  }
-
-  const valueRecord = value as Record<string, unknown>;
-  const message =
-    valueRecord[pluralKey] || valueRecord['many'] || fallback || keyPath;
-  if (typeof message === 'string') {
-    return message.replace('{{count}}', String(count));
-  }
-  // Fallback for non-string message (shouldn't happen with valid translations)
-  const messageStr =
-    typeof message === 'object'
-      ? JSON.stringify(message)
-      : // eslint-disable-next-line @typescript-eslint/no-base-to-string -- fallback for unexpected types
-        String(message);
-  return messageStr.replace('{{count}}', String(count));
-}
-
-/**
- * Get translated plural message parts for custom formatting
- * @param keyPath - Dot-separated key path to plural forms object (e.g., 'modals.processNNotes')
- * @param count - Number to determine plural form
- * @returns Object with before, noun, and after parts for custom formatting
+ * Translates a plural group into parts, so the caller can style the counted noun.
+ * @param keyPath - Dot-separated key path to a group whose forms hold `before`, `noun` and `after` (e.g., 'modals.renameNNotes')
+ * @param count - Selects the form
+ * @returns The parts of the selected form, or the key path as `before` when it names no such group
  */
 export function tpSplit(
   keyPath: string,
   count: number
 ): { before: string; noun: string; after: string } {
-  const keys = keyPath.split('.');
-  let value: unknown = state.translations;
-
-  for (const key of keys) {
-    if (value && typeof value === 'object' && key in value && value !== null) {
-      value = (value as Record<string, unknown>)[key];
-    } else {
-      return { before: keyPath, noun: '', after: '' };
-    }
+  const form = selectPluralForm(resolveKeyPath(keyPath), count);
+  if (typeof form !== 'object' || form === null) {
+    return { before: keyPath, noun: '', after: '' };
   }
-
-  // Get the appropriate plural form
-  let pluralKey: string;
-  if (state.currentLocale !== 'ru') {
-    pluralKey = count === 1 ? 'one' : 'many';
-  } else {
-    const mod10 = count % 10;
-    const mod100 = count % 100;
-
-    if (mod10 === 1 && mod100 !== 11) {
-      pluralKey = 'one';
-    } else if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
-      pluralKey = 'few';
-    } else {
-      pluralKey = 'many';
-    }
-  }
-
-  const valueRecord = value as Record<string, unknown>;
-  const pluralForm = valueRecord[pluralKey] || valueRecord['many'];
-
-  if (pluralForm && typeof pluralForm === 'object') {
-    const pf = pluralForm as Record<string, string>;
-    return {
-      before: pf.before || '',
-      noun: pf.noun || '',
-      after: pf.after || '',
-    };
-  }
-
-  // Fallback for simple string format
-  return {
-    before: typeof pluralForm === 'string' ? pluralForm : keyPath,
-    noun: '',
-    after: '',
-  };
+  const {
+    before = '',
+    noun = '',
+    after = '',
+  } = form as Partial<Record<'before' | 'noun' | 'after', string>>;
+  return { before, noun, after };
 }

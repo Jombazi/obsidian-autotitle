@@ -11,8 +11,11 @@ import { vi } from 'vitest';
 // signatures instead of drowning in mock-vs-real shape mismatches.
 import type {
   App as ObsidianApp,
+  Debouncer,
   Editor as ObsidianEditor,
   MarkdownView as ObsidianMarkdownView,
+  SearchResult,
+  SearchResultContainer,
   TFile as ObsidianTFile,
   TFolder as ObsidianTFolder,
 } from 'obsidian';
@@ -108,6 +111,7 @@ export class Vault {
   );
   getFolderByPath = vi.fn((path: string) => new TFolder(path));
   getAllLoadedFiles = vi.fn().mockReturnValue([]);
+  getAllFolders = vi.fn((_includeRoot?: boolean): TFolder[] => []);
   getMarkdownFiles = vi.fn().mockReturnValue([]);
   getFiles = vi.fn().mockReturnValue([]);
   on = vi.fn();
@@ -151,6 +155,8 @@ export class MetadataCache {
   off = vi.fn();
   trigger = vi.fn();
   getFirstLinkpathDest = vi.fn().mockReturnValue(null);
+  // What Obsidian's parser resolves for text with nothing to index; a test that needs metadata stubs what the parser returns for its text
+  computeMetadataAsync = vi.fn().mockResolvedValue({});
   fileToLinktext = vi.fn((file: TFile) => file.basename);
   resolvedLinks: Record<string, Record<string, number>> = {};
   unresolvedLinks: Record<string, Record<string, number>> = {};
@@ -292,6 +298,9 @@ class MockMarkdownView {
   setEphemeralState = vi.fn();
   onload = vi.fn();
   onunload = vi.fn();
+  getMode = vi.fn((): 'source' | 'preview' => 'source');
+  // Source view's and Live Preview's behavior: the view's text is its editor's; a Reading view test overrides it with the text the view holds
+  getViewData = vi.fn((): string => this.editor.getValue());
 }
 
 export const MarkdownView = MockMarkdownView as unknown as new (
@@ -367,6 +376,8 @@ export class Modal {
     register: ReturnType<typeof vi.fn>;
     unregister: ReturnType<typeof vi.fn>;
   };
+  // Obsidian 1.14.4's default
+  shouldRestoreSelection = true;
 
   constructor(app: App) {
     this.app = app;
@@ -389,6 +400,8 @@ export class Modal {
     this.titleEl.textContent = title;
     return this;
   });
+
+  setContent = vi.fn().mockReturnThis();
 }
 
 // Mock PluginSettingTab class
@@ -421,19 +434,32 @@ export class PluginSettingTab {
   hide(): void {}
 }
 
-// Mock ConfirmationModal (Obsidian 1.13+)
+// Mock ConfirmationModal (Obsidian 1.13+). Defines no `open`, so a stub of `Modal.prototype.open` still catches a subclass's `super.open()`
 export class ConfirmationModal extends Modal {
   buttonContainerEl: HTMLElement;
+  /** Every button added, in order, so a test can read the flags the DOM does not show. */
+  buttons: ConfirmationButton[] = [];
 
   constructor(app: App) {
     super(app);
-    this.buttonContainerEl = document.createElement('div');
+    this.containerEl.classList.add('mod-confirmation');
+    // A sibling of the content on the dialog itself, as Obsidian's constructor builds it
+    this.buttonContainerEl = this.modalEl.createDiv('modal-button-container');
   }
 
   addClass = vi.fn().mockReturnThis();
   addCheckbox = vi.fn().mockReturnThis();
-  addButton = vi.fn().mockReturnThis();
-  addCancelButton = vi.fn().mockReturnThis();
+
+  addButton(cb: (btn: ConfirmationButton) => unknown): this {
+    const button = new ConfirmationButton(this.buttonContainerEl, this);
+    this.buttons.push(button);
+    cb(button);
+    return this;
+  }
+
+  addCancelButton(text = 'Cancel'): this {
+    return this.addButton((btn) => btn.setButtonText(text).setCancel());
+  }
 }
 
 // Mock SettingGroup class
@@ -510,6 +536,7 @@ function createMockComponent() {
     'setLimits',
     'setDynamicTooltip',
     'showTooltip',
+    'setDestructive',
   ]) {
     component[method] = vi.fn().mockReturnValue(component);
   }
@@ -567,7 +594,10 @@ export class Setting {
   });
 
   setHeading = vi.fn().mockReturnThis();
-  setClass = vi.fn().mockReturnThis();
+  setClass = vi.fn((cls: string) => {
+    this.settingEl.classList.add(cls);
+    return this;
+  });
   setDisabled = vi.fn().mockReturnThis();
   setTooltip = vi.fn().mockReturnThis();
 
@@ -593,6 +623,8 @@ export class Setting {
 
   addText = vi.fn((cb: (component: any) => void) => {
     const component = createMockComponent();
+    // A real input, so builders that style it or attach a suggester to it can run
+    component.inputEl = this.controlEl.createEl('input', { type: 'text' });
     cb(component);
     this.components.push(component);
     return this;
@@ -621,6 +653,8 @@ export class Setting {
 
   addExtraButton = vi.fn((cb: (component: any) => void) => {
     const component = createMockComponent();
+    // A real element, as on `ExtraButtonComponent`, so builders can set attributes on it
+    component.extraSettingsEl = this.controlEl.createDiv();
     cb(component);
     this.components.push(component);
     return this;
@@ -673,46 +707,347 @@ export class AbstractInputSuggest {
   onSelect = vi.fn().mockReturnThis();
 }
 
+// Mock ButtonComponent: a real button, so a test can click it
+export class ButtonComponent {
+  buttonEl: HTMLButtonElement;
+  private clickCallback?: (evt: MouseEvent) => unknown;
+
+  constructor(containerEl: HTMLElement) {
+    this.buttonEl = containerEl.createEl('button');
+    this.buttonEl.addEventListener('click', (evt) => {
+      void this.clickCallback?.(evt);
+    });
+  }
+
+  setButtonText(name: string): this {
+    this.buttonEl.textContent = name;
+    return this;
+  }
+
+  setCta(): this {
+    this.buttonEl.classList.add('mod-cta');
+    return this;
+  }
+
+  // A flag rather than a class, so no test leans on a class name Obsidian may not use
+  isDestructive = false;
+  setDestructive(): this {
+    this.isDestructive = true;
+    return this;
+  }
+
+  setDisabled(disabled: boolean): this {
+    this.buttonEl.disabled = disabled;
+    return this;
+  }
+
+  onClick(callback: (evt: MouseEvent) => unknown): this {
+    this.clickCallback = callback;
+    return this;
+  }
+}
+
+// Mock ConfirmationButton: a click awaits the handler, then closes the modal unless it resolved truthy; a disabled button does nothing
+export class ConfirmationButton extends ButtonComponent {
+  hasInitialFocus = false;
+  isSecondary = false;
+  // Kept apart from the base callback, which the base click listener would otherwise run without the close
+  private confirmationHandler?: (evt: MouseEvent) => unknown;
+
+  constructor(containerEl: HTMLElement, modal: { close(): void }) {
+    super(containerEl);
+    this.buttonEl.addEventListener('click', (evt) => {
+      void this.runClick(evt, modal);
+    });
+  }
+
+  private async runClick(
+    evt: MouseEvent,
+    modal: { close(): void }
+  ): Promise<void> {
+    if (this.buttonEl.disabled) return;
+    const keepOpen = await this.confirmationHandler?.(evt);
+    if (!keepOpen) modal.close();
+  }
+
+  onClick(handler: (evt: MouseEvent) => unknown): this {
+    this.confirmationHandler = handler;
+    return this;
+  }
+
+  setInitialFocus(): this {
+    this.hasInitialFocus = true;
+    return this;
+  }
+
+  setSecondary(): this {
+    this.isSecondary = true;
+    return this;
+  }
+
+  setCancel(): this {
+    this.buttonEl.classList.add('mod-cancel');
+    return this;
+  }
+}
+
+// Mock TextComponent: a real text input, as Obsidian's builds one with spellcheck off
+export class TextComponent {
+  inputEl: HTMLInputElement;
+
+  constructor(containerEl: HTMLElement) {
+    this.inputEl = containerEl.createEl('input', { type: 'text' });
+    this.inputEl.spellcheck = false;
+  }
+
+  getValue(): string {
+    return this.inputEl.value;
+  }
+
+  setValue(value: string): this {
+    this.inputEl.value = value;
+    return this;
+  }
+
+  setPlaceholder(placeholder: string): this {
+    this.inputEl.placeholder = placeholder;
+    return this;
+  }
+
+  // Obsidian's text components report every `input` event, so a test drives them by dispatching one
+  onChange(callback: (value: string) => unknown): this {
+    this.inputEl.addEventListener('input', () => {
+      void callback(this.inputEl.value);
+    });
+    return this;
+  }
+}
+
+// Mock ToggleComponent: a real switch element that flips on click, as Obsidian's does
+export class ToggleComponent {
+  toggleEl: HTMLElement;
+  private on = false;
+  private changeCallback?: (value: boolean) => unknown;
+
+  constructor(containerEl: HTMLElement) {
+    this.toggleEl = containerEl.createDiv({ cls: 'checkbox-container' });
+    this.toggleEl.addEventListener('click', () => {
+      this.setValue(!this.on);
+      void this.changeCallback?.(this.on);
+    });
+  }
+
+  getValue(): boolean {
+    return this.on;
+  }
+
+  setValue(on: boolean): this {
+    this.on = on;
+    this.toggleEl.classList.toggle('is-enabled', on);
+    return this;
+  }
+
+  onChange(callback: (value: boolean) => unknown): this {
+    this.changeCallback = callback;
+    return this;
+  }
+}
+
+// Mock ExtraButtonComponent: a real icon button, so a test can click it and read its icon and tooltip
+export class ExtraButtonComponent {
+  extraSettingsEl: HTMLElement;
+  private clickCallback?: () => unknown;
+
+  constructor(containerEl: HTMLElement) {
+    this.extraSettingsEl = containerEl.createDiv({
+      cls: 'clickable-icon extra-setting-button',
+    });
+    this.extraSettingsEl.addEventListener('click', () => {
+      void this.clickCallback?.();
+    });
+  }
+
+  setIcon(icon: string): this {
+    this.extraSettingsEl.setAttribute('data-icon', icon);
+    return this;
+  }
+
+  setTooltip(tooltip: string): this {
+    this.extraSettingsEl.setAttribute('aria-label', tooltip);
+    return this;
+  }
+
+  setDisabled(_disabled: boolean): this {
+    return this;
+  }
+
+  onClick(callback: () => unknown): this {
+    this.clickCallback = callback;
+    return this;
+  }
+}
+
+export const displayTooltip = vi.fn();
+
+// Port of the fuzzy half of Obsidian 1.14.4's matcher: the query's characters in order, case-folded, adjacent ones merged into one range; fewer ranges, a tighter span, an earlier start and a shorter text score higher. Its token pass and word-boundary penalty are left out.
+export function prepareFuzzySearch(
+  query: string
+): (text: string) => SearchResult | null {
+  const queryCharacters = query
+    .toLowerCase()
+    .split('')
+    .filter((character) => character !== ' ');
+  return (text) => {
+    if (query === '') return { score: 0, matches: [] };
+    if (queryCharacters.length === 0) return null;
+    const lowerText = text.toLowerCase();
+    const matches: [number, number][] = [];
+    let searchFrom = 0;
+    for (const character of queryCharacters) {
+      const index = lowerText.indexOf(character, searchFrom);
+      if (index === -1) return null;
+      const lastRange = matches[matches.length - 1];
+      if (lastRange && lastRange[1] === index) lastRange[1] = index + 1;
+      else matches.push([index, index + 1]);
+      searchFrom = index + 1;
+    }
+    const start = matches[0][0];
+    const span = matches[matches.length - 1][1] - start;
+    const score =
+      -(matches.length - 1) -
+      (span - query.length) / 100 -
+      start / 1000 -
+      lowerText.length / 10000;
+    return { score, matches };
+  };
+}
+
+// As Obsidian's: best score first, in place
+export function sortSearchResults(results: SearchResultContainer[]): void {
+  results.sort((left, right) => right.match.score - left.match.score);
+}
+
+// Stand-in for Obsidian's `debounce`: the last call's arguments run `timeout` ms after the first call, or after the last when `resetTimer` is set; `run()` fires a pending call at once and `cancel()` drops it. On the global timers, so `vi.useFakeTimers()` drives it.
+export function debounce<T extends unknown[], V>(
+  cb: (...args: [...T]) => V,
+  timeout = 0,
+  resetTimer = false
+): Debouncer<T, V> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingArgs: [...T] | null = null;
+
+  const fire = (): V | void => {
+    timer = null;
+    const args = pendingArgs;
+    pendingArgs = null;
+    if (args) return cb(...args);
+  };
+
+  const debounced = ((...args: [...T]) => {
+    pendingArgs = args;
+    if (timer !== null && !resetTimer) return debounced;
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(fire, timeout);
+    return debounced;
+  }) as Debouncer<T, V>;
+
+  debounced.cancel = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    pendingArgs = null;
+    return debounced;
+  };
+  debounced.run = () => {
+    if (timer === null) return;
+    clearTimeout(timer);
+    return fire();
+  };
+  return debounced;
+}
+
 // Mock utility functions
+// Mirrors Obsidian 1.14.4: separators collapse, leading and trailing slashes go, and an empty result is the root "/"
 export const normalizePath = vi.fn((path: string) => {
-  return path.replace(/\\/g, '/').replace(/\/+/g, '/');
+  const normalized = path.replace(/([\\/])+/g, '/').replace(/(^\/+|\/+$)/g, '');
+  return (normalized === '' ? '/' : normalized).normalize('NFC');
 });
 
 export const setIcon = vi.fn((el: HTMLElement, icon: string) => {
   el.setAttribute('data-icon', icon);
 });
 
-export const getFrontMatterInfo = vi.fn(() => {
-  // Default: no frontmatter (tests will mock specific return values)
-  return {
+/**
+ * Stand-in for Obsidian's `getFrontMatterInfo` so fixtures can be written as raw
+ * note content instead of pre-split offsets.
+ *
+ * A port of Obsidian 1.14.4's implementation, so it returns exactly what the app
+ * does: `to` and `frontmatter` end at the closing `---` and keep the newline
+ * before it, and `contentStart` falls after the closing line's newline.
+ */
+export function splitFrontMatter(content: string) {
+  const notFound = {
     exists: false,
     frontmatter: '',
     from: 0,
     to: 0,
     contentStart: 0,
   };
-});
+  const opener = /^---(\r?\n)/.exec(content);
+  if (!opener) return notFound;
 
-// Mirrors Obsidian's getAllTags: frontmatter + inline tags combined, each with a leading '#'
+  const from = opener[0].length;
+  // A closing `---` counts only at the start of a line, and only when the line ends there.
+  const closer = /---(\r?\n|$)/g;
+  closer.lastIndex = from;
+  let match = closer.exec(content);
+  while (match && content.charAt(match.index - 1) !== '\n') {
+    match = closer.exec(content);
+  }
+  if (!match) return notFound;
+
+  return {
+    exists: true,
+    frontmatter: content.slice(from, match.index),
+    from,
+    to: match.index,
+    contentStart: closer.lastIndex,
+  };
+}
+
+// Defaults to the port above; `mockReset` restores it, and a suite can still mock its own return values.
+export const getFrontMatterInfo = vi.fn(splitFrontMatter);
+
+// Mirrors Obsidian 1.14.4's parseFrontMatterTags: the first key matching /^tags$/i; a non-empty string becomes one trimmed tag (no comma split), an array keeps only its strings, trimmed; empty and space-containing entries drop; each gains a leading '#'; null, not [], when the frontmatter is missing or the value is empty or of any other type
+export const parseFrontMatterTags = vi.fn(
+  (frontmatter: any): string[] | null => {
+    if (!frontmatter) return null;
+    const tagsKey = Object.keys(frontmatter).find((key) => /^tags$/i.test(key));
+    const value: unknown = tagsKey === undefined ? null : frontmatter[tagsKey];
+    if (!value) return null;
+
+    let tags: string[];
+    if (typeof value === 'string') {
+      tags = [value.trim()];
+    } else if (Array.isArray(value)) {
+      tags = value
+        .filter((tag): tag is string => typeof tag === 'string')
+        .map((tag) => tag.trim());
+    } else {
+      return null;
+    }
+
+    return tags
+      .filter((tag) => tag !== '' && !tag.includes(' '))
+      .map((tag) => (tag.startsWith('#') ? tag : `#${tag}`));
+  }
+);
+
+// Mirrors Obsidian's getAllTags: frontmatter tags as parseFrontMatterTags reads them, then inline tags, each with a leading '#'
 export const getAllTags = vi.fn((cache: any): string[] | null => {
   if (!cache) return null;
 
-  const withHash = (tag: unknown): string => {
-    const value = String(tag);
-    return value.startsWith('#') ? value : `#${value}`;
-  };
-
-  const frontmatterTags = cache.frontmatter?.tags;
-  const propertyTags =
-    frontmatterTags === undefined || frontmatterTags === null
-      ? []
-      : (Array.isArray(frontmatterTags)
-          ? frontmatterTags
-          : [frontmatterTags]
-        ).map(withHash);
-  const inlineTags = (cache.tags ?? []).map((tagCache: any) =>
-    withHash(tagCache.tag)
-  );
+  const propertyTags = parseFrontMatterTags(cache.frontmatter) ?? [];
+  const inlineTags = (cache.tags ?? []).map((tagCache: any) => tagCache.tag);
 
   return [...propertyTags, ...inlineTags];
 });
@@ -776,12 +1111,6 @@ export const requestUrl = vi.fn().mockResolvedValue({
   json: {},
   text: '',
 });
-
-// Helper interface for ViewWithFileEditor
-export interface ViewWithFileEditor {
-  file: TFile | null;
-  editor?: Editor;
-}
 
 // Export default mock app instance for convenience
 export const mockApp = new App();

@@ -1,39 +1,22 @@
 import { SettingDefinitionItem, SettingDefinitionGroup } from 'obsidian';
+import { SettingPath } from './settings-paths';
 import {
-  appendEmphasis,
   buildButtonRow,
   FirstLineIsTitlePlugin,
+  quoteLabel,
 } from './settings-base';
 import { RenameAllFilesModal } from '../modals';
 import { getOwnerWindow } from '../utils/owner-window';
 import { t } from '../i18n';
 
 const FEEDBACK_URL = 'https://github.com/churnish/first-line-is-title/issues';
-const HELP_URL = 'https://github.com/churnish/first-line-is-title/discussions';
+const DISCUSSIONS_URL =
+  'https://github.com/churnish/first-line-is-title/discussions';
 
-/**
- * Builds a description where one term is quoted as a UI label; see
- * `appendEmphasis` for the per-locale marks.
- */
-function buildEmphasizedDescription(
-  part1Key: string,
-  emphasizedKey: string,
-  part2Key: string
-): DocumentFragment {
-  return createFragment((frag) => {
-    frag.appendText(t(part1Key));
-    appendEmphasis(frag, emphasizedKey);
-    frag.appendText(t(part2Key));
-  });
-}
-
-/**
- * General settings live at the top of the settings tab as first-level items —
- * no page wrapper and no heading, per Obsidian's convention.
- */
+/** General settings live at the top of the settings tab as first-level items — no page wrapper and no heading, per Obsidian's convention. */
 export function buildGeneralDefinitions(
   plugin: FirstLineIsTitlePlugin
-): SettingDefinitionItem[] {
+): SettingDefinitionItem<SettingPath>[] {
   return [
     {
       name: t('settings.general.renameAutomatically.name'),
@@ -71,13 +54,10 @@ export function buildGeneralDefinitions(
   ];
 }
 
-/**
- * Settings that only take effect the moment a note is created, grouped away from
- * the rename settings above them because nothing here fires on an existing note.
- */
+/** Settings that only take effect the moment a note is created, grouped away from the rename settings above them because nothing here fires on an existing note. */
 export function buildNewNotesGroup(
   plugin: FirstLineIsTitlePlugin
-): SettingDefinitionGroup {
+): SettingDefinitionGroup<SettingPath> {
   return {
     type: 'group',
     heading: t('settings.sections.newNotesGroup'),
@@ -101,11 +81,10 @@ export function buildNewNotesGroup(
       },
       {
         name: t('settings.general.insertTitle.name'),
-        desc: buildEmphasizedDescription(
-          'settings.general.insertTitle.desc.part1',
-          'settings.general.insertTitle.desc.untitled',
-          'settings.general.insertTitle.desc.part2'
-        ),
+        // The same word `FileOperations.insertTitle` skips
+        desc: t('settings.general.insertTitle.desc', {
+          untitled: quoteLabel(t('untitled')),
+        }),
         control: {
           type: 'toggle',
           key: 'core.insertTitle',
@@ -113,11 +92,9 @@ export function buildNewNotesGroup(
       },
       {
         name: t('settings.general.convertReplacementChars.name'),
-        desc: buildEmphasizedDescription(
-          'settings.general.convertReplacementChars.desc.part1',
-          'settings.general.convertReplacementChars.desc.characterReplacements',
-          'settings.general.convertReplacementChars.desc.part2'
-        ),
+        desc: t('settings.general.convertReplacementChars.desc', {
+          section: quoteLabel(t('settings.sections.characterReplacements')),
+        }),
         visible: () =>
           plugin.settings.core.insertTitle &&
           plugin.settings.characterReplacements.enableForbiddenCharReplacements,
@@ -139,17 +116,13 @@ export function buildNewNotesGroup(
   };
 }
 
-/**
- * Vault-wide action that belongs below the everyday settings rather than inside
- * one of them. Last of the everyday settings, directly above the Exclusions page row.
- */
+/** Vault-wide action that belongs below the everyday settings rather than inside one of them. Last of the everyday settings, directly above the Exclusions page row. */
 export function buildFooterDefinitions(
   plugin: FirstLineIsTitlePlugin
-): SettingDefinitionItem[] {
+): SettingDefinitionItem<SettingPath>[] {
   return [
     {
-      // `render` rather than `action` so the button keeps its label instead of
-      // turning the whole row into a click target.
+      // `render` rather than `action` so the button keeps its label instead of turning the whole row into a click target.
       name: t('settings.general.renameAllNotes.name'),
       desc: t('settings.general.renameAllNotes.desc'),
       render: buildButtonRow({
@@ -162,29 +135,19 @@ export function buildFooterDefinitions(
   ];
 }
 
-/**
- * Support sits below Advanced: both rows address the plugin itself rather than
- * any setting, so they get their own box at the very bottom instead of trailing
- * the everyday settings.
- *
- * Help leads because it is the self-serve option — a user who finds an existing
- * answer never needs the row below it.
- *
- * Stays in the settings search index — `searchable: false` would hide the only
- * route users have to report a bug when they search rather than scroll.
- */
-export function buildSupportGroup(): SettingDefinitionGroup {
+/** Support sits below Advanced: both rows address the plugin itself rather than any setting, so they get their own box at the very bottom instead of trailing the everyday settings. Help leads because it is the self-serve option — a user who finds an existing answer never needs the row below it. Stays in the settings search index — `searchable: false` would hide the only route users have to report a bug when they search rather than scroll. */
+export function buildSupportGroup(): SettingDefinitionGroup<SettingPath> {
   return {
     type: 'group',
     heading: t('settings.sections.supportGroup'),
     items: [
       {
-        name: t('settings.general.help.name'),
-        desc: t('settings.general.help.desc'),
+        name: t('settings.general.discuss.name'),
+        desc: t('settings.general.discuss.desc'),
         render: buildButtonRow({
-          text: t('settings.general.help.button'),
+          text: t('settings.general.discuss.button'),
           onClick: (setting) => {
-            getOwnerWindow(setting.settingEl).open(HELP_URL, '_blank');
+            getOwnerWindow(setting.settingEl).open(DISCUSSIONS_URL, '_blank');
           },
         }),
       },

@@ -7,13 +7,17 @@
  * stamped with the current version so it does not reset again on the next load.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { App, PluginManifest } from 'obsidian';
+import * as mockObsidian from './mockObsidian';
+import { TFile } from './mockObsidian';
 import FirstLineIsTitle from '../main';
 import {
   CURRENT_DATA_SCHEMA_VERSION,
   DEFAULT_SETTINGS,
 } from '../src/constants';
+import { WorkspaceIntegration } from '../src/core/workspace-integration';
+import type { PluginSettings } from '../src/types';
 
 type SettingsRecord = Record<string, Record<string, unknown>> & {
   dataSchemaVersion: number;
@@ -35,15 +39,15 @@ describe('FirstLineIsTitle.loadSettings', () => {
     it('discards stored settings when dataSchemaVersion is absent', async () => {
       const settings = await loadStoredSettings({
         core: { charCount: 42, renameAutomatically: false },
-        exclusions: { excludedFolders: ['Notes'] },
+        exclusions: { excludedFiles: ['Notes/'] },
       });
 
       expect(settings.core.charCount).toBe(DEFAULT_SETTINGS.core.charCount);
       expect(settings.core.renameAutomatically).toBe(
         DEFAULT_SETTINGS.core.renameAutomatically
       );
-      expect(settings.exclusions.excludedFolders).toEqual(
-        DEFAULT_SETTINGS.exclusions.excludedFolders
+      expect(settings.exclusions.excludedFiles).toEqual(
+        DEFAULT_SETTINGS.exclusions.excludedFiles
       );
     });
 
@@ -107,8 +111,7 @@ describe('FirstLineIsTitle.loadSettings', () => {
     });
 
     it('does not hand out the shared DEFAULT_SETTINGS object', async () => {
-      // Settings are mutated in place (osPreset on every load), so a shared reference
-      // would leak one vault's state into the module-level defaults.
+      // Settings are mutated in place (the settings tab and the folder commands write into them), so a shared reference would leak one vault's state into the module-level defaults.
       const settings = await loadStoredSettings({});
 
       expect(settings).not.toBe(DEFAULT_SETTINGS);
@@ -122,12 +125,12 @@ describe('FirstLineIsTitle.loadSettings', () => {
       const settings = await loadStoredSettings({
         dataSchemaVersion: CURRENT_DATA_SCHEMA_VERSION,
         core: { charCount: 42, renameAutomatically: false },
-        exclusions: { excludedFolders: ['Notes'] },
+        exclusions: { excludedFiles: ['Notes/'] },
       });
 
       expect(settings.core.charCount).toBe(42);
       expect(settings.core.renameAutomatically).toBe(false);
-      expect(settings.exclusions.excludedFolders).toEqual(['Notes']);
+      expect(settings.exclusions.excludedFiles).toEqual(['Notes/']);
     });
 
     it('fills unstored keys from the defaults', async () => {
@@ -138,8 +141,8 @@ describe('FirstLineIsTitle.loadSettings', () => {
 
       expect(settings.core.charCount).toBe(42);
       expect(settings.core.insertTitle).toBe(DEFAULT_SETTINGS.core.insertTitle);
-      expect(settings.aliases.aliasPropertyKey).toBe(
-        DEFAULT_SETTINGS.aliases.aliasPropertyKey
+      expect(settings.firstLineProperty.propertyKey).toBe(
+        DEFAULT_SETTINGS.firstLineProperty.propertyKey
       );
     });
 
@@ -150,6 +153,58 @@ describe('FirstLineIsTitle.loadSettings', () => {
       });
 
       expect(settings.core.hasSetupExclusions).toBe(true);
+    });
+
+    it('loads, with that list at its default, when a stored list holds the wrong types', async () => {
+      // A non-string tag used to throw in the exclusion-list cleanup on every start
+      const settings = await loadStoredSettings({
+        dataSchemaVersion: CURRENT_DATA_SCHEMA_VERSION,
+        core: { charCount: 42 },
+        exclusions: { excludedTags: [1, 'draft'], excludedFiles: ['Notes/'] },
+      });
+
+      expect(settings.exclusions.excludedTags).toEqual(
+        DEFAULT_SETTINGS.exclusions.excludedTags
+      );
+      expect(settings.exclusions.excludedFiles).toEqual(['Notes/']);
+      expect(settings.core.charCount).toBe(42);
+    });
+
+    it('takes the default for a stored option no longer offered', async () => {
+      const settings = await loadStoredSettings({
+        dataSchemaVersion: CURRENT_DATA_SCHEMA_VERSION,
+        firstLineProperty: { hideProperty: 'sometimes' },
+      });
+
+      expect(settings.firstLineProperty.hideProperty).toBe(
+        DEFAULT_SETTINGS.firstLineProperty.hideProperty
+      );
+    });
+
+    it('drops stored keys the defaults lack', async () => {
+      const settings = await loadStoredSettings({
+        dataSchemaVersion: CURRENT_DATA_SCHEMA_VERSION,
+        retiredSection: { flag: true },
+        core: { retiredOption: 1 },
+      });
+
+      expect('retiredSection' in settings).toBe(false);
+      expect('retiredOption' in settings.core).toBe(false);
+    });
+
+    it('drops a stored osPreset, which nothing reads any more', async () => {
+      const settings = await loadStoredSettings({
+        dataSchemaVersion: CURRENT_DATA_SCHEMA_VERSION,
+        characterReplacements: {
+          osPreset: 'Windows',
+          enableForbiddenCharReplacements: true,
+        },
+      });
+
+      expect('osPreset' in settings.characterReplacements).toBe(false);
+      expect(
+        settings.characterReplacements.enableForbiddenCharReplacements
+      ).toBe(true);
     });
   });
 
@@ -293,6 +348,22 @@ describe('pre-4.0.0 settings backup', () => {
     );
   });
 
+  it('throws the last write error when no name can be created, which the backup turns into null', async () => {
+    const { plugin } = await loadWithAdapter({});
+    // Each failure names its path, so the thrown one shows which attempt it came from
+    const create = vi.fn(async (path: string) => {
+      throw new Error(`Cannot create ${path}`);
+    });
+    (plugin.app.vault as unknown as { create: unknown }).create = create;
+
+    await expect(plugin.createSettingsFileAtVaultRoot('{}')).rejects.toThrow(
+      /^Cannot create first-line-is-title-settings-\d{8}-\d{6}-5\.json$/
+    );
+    // The unsuffixed name plus every suffixed retry
+    expect(create).toHaveBeenCalledTimes(6);
+    expect(await plugin.writeSettingsBackup('{}')).toBeNull();
+  });
+
   it('resets without a backup when the plugin folder is unknown', async () => {
     const { plugin, adapter } = await loadWithAdapter(
       { renameNotes: 'automatically', core: { charCount: 42 } },
@@ -300,5 +371,338 @@ describe('pre-4.0.0 settings backup', () => {
     );
     expect(adapter.read).not.toHaveBeenCalled();
     expect(plugin.settings.dataSchemaVersion).toBe(CURRENT_DATA_SCHEMA_VERSION);
+  });
+});
+
+/** A plugin past `loadSettings`, with its saves and property hiding stubbed. */
+function createLoadedPlugin(): FirstLineIsTitle {
+  const plugin = new FirstLineIsTitle({} as App, {} as PluginManifest);
+  plugin.settings = structuredClone(DEFAULT_SETTINGS);
+  plugin.saveData = vi.fn().mockResolvedValue(undefined);
+  plugin.updatePropertyVisibility = vi.fn();
+  return plugin;
+}
+
+function defaultsWith(
+  change: (settings: PluginSettings) => void
+): PluginSettings {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  change(settings);
+  return settings;
+}
+
+describe('FirstLineIsTitle.replaceSettings', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('makes the replacement the live settings and saves it once', async () => {
+    const plugin = createLoadedPlugin();
+    const next = defaultsWith((settings) => {
+      settings.core.charCount = 42;
+    });
+
+    expect(await plugin.replaceSettings(next)).toBe(true);
+
+    expect(plugin.settings).toBe(next);
+    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+    expect(plugin.saveData).toHaveBeenCalledWith(next);
+  });
+
+  it('applies changed property hiding without a reload', async () => {
+    const plugin = createLoadedPlugin();
+
+    await plugin.replaceSettings(
+      defaultsWith((settings) => {
+        settings.firstLineProperty.propertyKey = 'aliases';
+        settings.firstLineProperty.hideProperty = 'always';
+      })
+    );
+
+    expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves what a cascade writes, such as the debug stamp', async () => {
+    const plugin = createLoadedPlugin();
+
+    await plugin.replaceSettings(
+      defaultsWith((settings) => {
+        settings.core.debug = true;
+      })
+    );
+
+    const saved = vi.mocked(plugin.saveData).mock.calls[0][0] as PluginSettings;
+    expect(saved.core.debugEnabledTimestamp).not.toBe('');
+  });
+
+  it("cleans the replacement's exclusion lists", async () => {
+    const plugin = createLoadedPlugin();
+
+    await plugin.replaceSettings(
+      defaultsWith((settings) => {
+        settings.exclusions.excludedFiles = ['Notes/', 'Notes/', ' '];
+      })
+    );
+
+    expect(plugin.settings.exclusions.excludedFiles).toEqual(['Notes/']);
+  });
+
+  it('keeps the previous settings and reports false when the save fails', async () => {
+    const plugin = createLoadedPlugin();
+    plugin.settings.core.charCount = 7;
+    const snapshot = structuredClone(plugin.settings);
+    plugin.saveData = vi.fn().mockRejectedValue(new Error('disk full'));
+    const next = defaultsWith((settings) => {
+      settings.core.charCount = 42;
+    });
+
+    expect(await plugin.replaceSettings(next)).toBe(false);
+
+    expect(plugin.settings).not.toBe(next);
+    expect(plugin.settings).toEqual(snapshot);
+  });
+
+  describe('code holding the plugin across a replacement', () => {
+    it('lets the tag toggle write into the new settings', async () => {
+      const plugin = createLoadedPlugin();
+      // Built before the replacement, as a toggle used earlier in the session would be
+      void plugin.tagOperations;
+      const previous = plugin.settings;
+      const next = structuredClone(DEFAULT_SETTINGS);
+
+      await plugin.replaceSettings(next);
+      await plugin.toggleTagExclusion('project');
+
+      expect(next.exclusions.excludedTags).toEqual(['#project']);
+      expect(previous.exclusions.excludedTags).toEqual([]);
+    });
+
+    it('lets the folder toggle write into the new settings', async () => {
+      const plugin = createLoadedPlugin();
+      void plugin.folderOperations;
+      const previous = plugin.settings;
+      const next = structuredClone(DEFAULT_SETTINGS);
+
+      await plugin.replaceSettings(next);
+      await plugin.toggleFolderExclusion('Notes');
+
+      expect(next.exclusions.excludedFiles).toEqual(['Notes/']);
+      expect(previous.exclusions.excludedFiles).toEqual([]);
+    });
+
+    it('lets rename on save follow the new settings', async () => {
+      const plugin = createLoadedPlugin();
+      const saveCommand = {
+        checkCallback: vi.fn((_checking: boolean) => true),
+      };
+      (
+        plugin.app as unknown as {
+          commands: { commands: Record<string, unknown> };
+        }
+      ).commands.commands['editor:save-file'] = saveCommand;
+      const executeRenameUnlessExcluded = vi.fn();
+      plugin.commandRegistrar = {
+        executeRenameUnlessExcluded,
+      } as unknown as FirstLineIsTitle['commandRegistrar'];
+      plugin.app.workspace.getActiveFile = vi.fn(() => new TFile('note.md'));
+      new WorkspaceIntegration(plugin).setupSaveEventHook();
+
+      await plugin.replaceSettings(
+        defaultsWith((settings) => {
+          settings.core.renameOnSave = true;
+        })
+      );
+      vi.useFakeTimers();
+      saveCommand.checkCallback(false);
+      vi.advanceTimersByTime(100);
+
+      expect(executeRenameUnlessExcluded).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe('FirstLineIsTitle debounced settings save', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('saves once, 500 ms after the last request', () => {
+    vi.useFakeTimers();
+    const plugin = createLoadedPlugin();
+
+    plugin.requestSaveSettings();
+    vi.advanceTimersByTime(300);
+    plugin.requestSaveSettings();
+    vi.advanceTimersByTime(499);
+    expect(plugin.saveData).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+
+    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes a pending save at once on flush, and nothing when none is pending', () => {
+    vi.useFakeTimers();
+    const plugin = createLoadedPlugin();
+
+    plugin.flushSettingsSave();
+    expect(plugin.saveData).not.toHaveBeenCalled();
+    plugin.requestSaveSettings();
+    plugin.flushSettingsSave();
+    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(500);
+
+    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes a pending save when the plugin unloads', () => {
+    vi.useFakeTimers();
+    const plugin = createLoadedPlugin();
+
+    plugin.requestSaveSettings();
+    // The mocked Plugin base sets `onunload` as an instance field, which shadows the real method
+    FirstLineIsTitle.prototype.onunload.call(plugin);
+
+    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('FirstLineIsTitle.setRenamingDisabledForNote', () => {
+  function createPluginWithNote(frontmatter: Record<string, unknown>) {
+    const plugin = createLoadedPlugin();
+    const file = new TFile('note.md');
+    plugin.app.metadataCache.getFileCache = vi.fn(() => ({ frontmatter }));
+    const steps: string[] = [];
+    const ensurePropertyTypeIsCheckbox = vi.fn(async () => {
+      steps.push('checkbox type');
+    });
+    plugin.propertyManager = {
+      ensurePropertyTypeIsCheckbox,
+    } as unknown as FirstLineIsTitle['propertyManager'];
+    const written: Record<string, unknown> = { ...frontmatter };
+    plugin.app.fileManager.processFrontMatter = vi.fn(
+      async (_file: unknown, edit: (fm: Record<string, unknown>) => void) => {
+        steps.push('write');
+        edit(written);
+      }
+    ) as never;
+    return { plugin, file, steps, written, ensurePropertyTypeIsCheckbox };
+  }
+
+  /** The message and classes of every notice raised while `run` runs. */
+  async function capturedNotices(
+    run: () => Promise<void>
+  ): Promise<string[][]> {
+    const notices: mockObsidian.Notice[] = [];
+    const NoticeClass = mockObsidian.Notice;
+    const noticeSpy = vi
+      .spyOn(mockObsidian, 'Notice')
+      .mockImplementation(function (message: string) {
+        const notice = new NoticeClass(message);
+        notices.push(notice);
+        return notice;
+      } as never);
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await run();
+    } finally {
+      noticeSpy.mockRestore();
+      consoleSpy.mockRestore();
+    }
+    return notices.map((notice) => [
+      notice.message,
+      notice.containerEl.className,
+    ]);
+  }
+
+  it('writes the disable property, as a checkbox value, after making its type a checkbox', async () => {
+    const { plugin, file, steps, written } = createPluginWithNote({
+      title: 'x',
+    });
+
+    await plugin.setRenamingDisabledForNote(file, true);
+
+    expect(steps).toEqual(['checkbox type', 'write']);
+    expect(written).toEqual({ title: 'x', 'no rename': true });
+  });
+
+  it('writes nothing, but still confirms, when the note already carries the property', async () => {
+    const { plugin, file, steps } = createPluginWithNote({
+      'no rename': true,
+    });
+
+    const notices = await capturedNotices(() =>
+      plugin.setRenamingDisabledForNote(file, true)
+    );
+
+    expect(steps).toEqual(['checkbox type']);
+    expect(notices).toEqual([['Disabled renaming for “note”', '']]);
+  });
+
+  it('removes every case variant of the disable property', async () => {
+    const { plugin, file, written, ensurePropertyTypeIsCheckbox } =
+      createPluginWithNote({
+        title: 'x',
+        'no rename': true,
+        'No Rename': true,
+        'NO RENAME': 'true',
+      });
+
+    await plugin.setRenamingDisabledForNote(file, false);
+
+    expect(written).toEqual({ title: 'x' });
+    expect(ensurePropertyTypeIsCheckbox).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [true, 'Failed to disable renaming. Check console for details.'],
+    [false, 'Failed to enable renaming. Check console for details.'],
+  ])(
+    'shows a warning-tinted notice when the property cannot be written (disabled: %s)',
+    async (disabled, message) => {
+      const { plugin, file } = createPluginWithNote(
+        disabled ? {} : { 'no rename': true }
+      );
+      plugin.app.fileManager.processFrontMatter = vi
+        .fn()
+        .mockRejectedValue(new Error('locked'));
+
+      const notices = await capturedNotices(() =>
+        plugin.setRenamingDisabledForNote(file, disabled)
+      );
+
+      expect(notices).toEqual([[message, 'mod-warning']]);
+    }
+  );
+});
+
+describe('FirstLineIsTitle.outputAllSettings', () => {
+  /** The first argument of every `console.debug` call `run` makes. */
+  function debugOutput(run: () => void): unknown[] {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    debugSpy.mockClear();
+    try {
+      run();
+      return debugSpy.mock.calls.map((call) => call[0]);
+    } finally {
+      debugSpy.mockRestore();
+    }
+  }
+
+  it('logs nothing while debug is off', () => {
+    const plugin = createLoadedPlugin();
+
+    expect(debugOutput(() => plugin.outputAllSettings())).toEqual([]);
+  });
+
+  it('logs each settings section that differs from the defaults, and no other', () => {
+    const plugin = createLoadedPlugin();
+    plugin.settings.core.debug = true;
+    plugin.settings.exclusions.excludedFiles = ['Archive/'];
+
+    expect(debugOutput(() => plugin.outputAllSettings())).toEqual([
+      '🔧 Settings (non-default values only):',
+      '  core:',
+      '  exclusions:',
+    ]);
   });
 });

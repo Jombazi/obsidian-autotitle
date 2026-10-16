@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { RateLimiter } from '../../src/core/rate-limiter';
 
 describe('RateLimiter', () => {
@@ -87,20 +87,38 @@ describe('RateLimiter', () => {
       expect(result).toBe(true);
     });
 
-    it('should log when label is provided and limit hit', () => {
+    it('should log when label is provided, debug is on and limit hit', () => {
       const consoleSpy = vi.spyOn(console, 'debug');
+      const debugLimiter = new RateLimiter({
+        windowMs: 1000,
+        maxOperations: 5,
+        isDebugEnabled: () => true,
+      });
 
       // Exhaust limit
       for (let i = 0; i < 5; i++) {
-        rateLimiter.checkLimit('file1');
+        debugLimiter.checkLimit('file1');
       }
 
       // Hit limit with label
-      rateLimiter.checkLimit('file1', 'Test Label');
+      debugLimiter.checkLimit('file1', 'Test Label');
 
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining('Rate limit hit for Test Label')
       );
+    });
+
+    it('should not log a labeled refusal while debug is off', () => {
+      const consoleSpy = vi.spyOn(console, 'debug');
+      consoleSpy.mockClear();
+
+      for (let i = 0; i < 5; i++) {
+        rateLimiter.checkLimit('file1');
+      }
+      const allowed = rateLimiter.checkLimit('file1', 'Test Label');
+
+      expect(allowed).toBe(false);
+      expect(consoleSpy).not.toHaveBeenCalled();
     });
 
     it('should not log when label is not provided', () => {
@@ -201,20 +219,38 @@ describe('RateLimiter', () => {
       expect(result).toBe(true);
     });
 
-    it('should log when label is provided and limit hit', () => {
+    it('should log when label is provided, debug is on and limit hit', () => {
       const consoleSpy = vi.spyOn(console, 'debug');
+      const debugLimiter = new RateLimiter({
+        windowMs: 1000,
+        maxOperations: 5,
+        isDebugEnabled: () => true,
+      });
 
       // Exhaust limit
       for (let i = 0; i < 5; i++) {
-        rateLimiter.checkGlobalLimit();
+        debugLimiter.checkGlobalLimit();
       }
 
       // Hit limit with label
-      rateLimiter.checkGlobalLimit('Global Test');
+      debugLimiter.checkGlobalLimit('Global Test');
 
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining('Global rate limit hit')
       );
+    });
+
+    it('should not log a labeled global refusal while debug is off', () => {
+      const consoleSpy = vi.spyOn(console, 'debug');
+      consoleSpy.mockClear();
+
+      for (let i = 0; i < 5; i++) {
+        rateLimiter.checkGlobalLimit();
+      }
+      const allowed = rateLimiter.checkGlobalLimit('Global Test');
+
+      expect(allowed).toBe(false);
+      expect(consoleSpy).not.toHaveBeenCalled();
     });
 
     it('should not log when label is not provided', () => {
@@ -240,6 +276,74 @@ describe('RateLimiter', () => {
       // Per-key limit should still work
       const result = rateLimiter.checkLimit('file1');
       expect(result).toBe(true);
+    });
+  });
+
+  describe('purgeExpired', () => {
+    /** Keys the limiter still tracks */
+    function trackedKeys(limiter: RateLimiter): string[] {
+      return [
+        ...(
+          limiter as unknown as { tracker: Map<string, unknown> }
+        ).tracker.keys(),
+      ];
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('drops only keys whose window has expired', () => {
+      vi.useFakeTimers();
+      const limiter = new RateLimiter({ windowMs: 1000, maxOperations: 5 });
+      limiter.checkLimit('old.md');
+      vi.advanceTimersByTime(600);
+      limiter.checkLimit('recent.md');
+      vi.advanceTimersByTime(500);
+
+      limiter.purgeExpired();
+
+      expect(trackedKeys(limiter)).toEqual(['recent.md']);
+    });
+
+    it('keeps a blocked key blocked within its window', () => {
+      vi.useFakeTimers();
+      const limiter = new RateLimiter({ windowMs: 1000, maxOperations: 1 });
+      limiter.checkLimit('busy.md');
+      expect(limiter.checkLimit('busy.md')).toBe(false);
+
+      limiter.purgeExpired();
+
+      expect(limiter.checkLimit('busy.md')).toBe(false);
+    });
+
+    // A title typed out letter by letter renames through one path per letter, each processed once.
+    it('sweeps from checkLimit once a window has passed, so paths no longer active are not kept', () => {
+      vi.useFakeTimers();
+      const limiter = new RateLimiter({ windowMs: 500, maxOperations: 15 });
+      for (const path of ['T.md', 'Ti.md', 'Tit.md', 'Titl.md']) {
+        limiter.checkLimit(path);
+        vi.advanceTimersByTime(200);
+      }
+      vi.advanceTimersByTime(400);
+
+      limiter.checkLimit('Title.md');
+
+      expect(trackedKeys(limiter)).toEqual(['Title.md']);
+    });
+
+    it('sweeps from checkLimit at most once per window', () => {
+      vi.useFakeTimers();
+      const limiter = new RateLimiter({ windowMs: 500, maxOperations: 15 });
+      const purgeExpired = vi.spyOn(limiter, 'purgeExpired');
+      vi.advanceTimersByTime(501);
+
+      for (let i = 0; i < 10; i++) {
+        limiter.checkLimit(`note ${i}.md`);
+        vi.advanceTimersByTime(10);
+      }
+
+      expect(purgeExpired).toHaveBeenCalledTimes(1);
     });
   });
 

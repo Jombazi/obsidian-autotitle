@@ -1,8 +1,56 @@
-import { Notice } from 'obsidian';
+import { App, Editor, EditorPosition } from 'obsidian';
 import FirstLineIsTitle from '../../main';
-import { generateSafeLinkTarget, reverseSafeLinkTarget } from '../utils';
+import {
+  generateSafeLinkTarget,
+  reverseSafeLinkTarget,
+} from '../utils/string-processing';
 import { InternalLinkModal } from '../modals';
-import { t } from '../i18n';
+
+/** True when `a` comes after `b` in the document. */
+function isAfter(a: EditorPosition, b: EditorPosition): boolean {
+  return a.line > b.line || (a.line === b.line && a.ch > b.ch);
+}
+
+/**
+ * Replaces every selection holding more than whitespace with `buildReplacement(text)`, or, when nothing is selected, asks for the text in the link dialog and hands it to `insertFromDialog`.
+ * Every selection's text is read before the first edit, and the edits run from the bottom of the note up, so a replacement never shifts a range still to come.
+ * @param app - Opens the dialog
+ * @param editor - The editor the command runs in
+ * @param buildReplacement - The text that replaces a selection, given its text
+ * @param insertFromDialog - Inserts what the dialog returns
+ * @returns Where the topmost replaced selection started, or null when nothing was replaced
+ */
+export function replaceSelectionsOrAsk(
+  app: App,
+  editor: Editor,
+  buildReplacement: (selectedText: string) => string,
+  insertFromDialog: (dialogText: string) => void
+): EditorPosition | null {
+  const selections = editor.listSelections();
+  const hasSelection = selections.some(
+    ({ anchor, head }) => anchor.line !== head.line || anchor.ch !== head.ch
+  );
+
+  if (!hasSelection) {
+    new InternalLinkModal(app, insertFromDialog).open();
+    return null;
+  }
+
+  const ranges = selections.map(({ anchor, head }) => {
+    // A selection made backwards has its anchor after its head
+    const [from, to] = isAfter(anchor, head) ? [head, anchor] : [anchor, head];
+    return { from, to, text: editor.getRange(from, to) };
+  });
+  ranges.sort((a, b) => b.from.line - a.from.line || b.from.ch - a.from.ch);
+
+  let topmostStart: EditorPosition | null = null;
+  for (const { from, to, text } of ranges) {
+    if (!text.trim()) continue;
+    editor.replaceRange(buildReplacement(text), from, to);
+    topmostStart = from;
+  }
+  return topmostStart;
+}
 
 export class LinkManager {
   private plugin: FirstLineIsTitle;
@@ -11,285 +59,89 @@ export class LinkManager {
     this.plugin = plugin;
   }
 
-  addSafeInternalLink(): void {
-    // Try to get active editor from any view type (Markdown, canvas, etc.)
-    const activeEditor = this.plugin.app.workspace.activeEditor?.editor;
-    if (!activeEditor) {
-      new Notice(t('notifications.errorNoActiveNote'));
-      return;
-    }
-
-    const selections = activeEditor.listSelections();
-
-    // Check if any selection has content (anchor != head means text is selected)
-    const hasSelection = selections.some(
-      (sel) =>
-        sel.anchor.line !== sel.head.line || sel.anchor.ch !== sel.head.ch
-    );
-
-    if (hasSelection) {
-      // Step 1: Capture all selection data (positions + text) before modifying document
-      const selectionData = selections.map((sel) => {
-        // Normalize selection range (anchor might be after head)
-        const from =
-          sel.anchor.line < sel.head.line ||
-          (sel.anchor.line === sel.head.line && sel.anchor.ch <= sel.head.ch)
-            ? sel.anchor
-            : sel.head;
-        const to = from === sel.anchor ? sel.head : sel.anchor;
-
-        const text = activeEditor.getRange(from, to);
-        return { from, to, text };
-      });
-
-      // Step 2: Sort by START position in reverse (bottom-to-top, right-to-left)
-      selectionData.sort((a, b) => {
-        if (a.from.line !== b.from.line) {
-          return b.from.line - a.from.line; // Reverse line order
+  addSafeInternalLink(editor: Editor): void {
+    replaceSelectionsOrAsk(
+      this.plugin.app,
+      editor,
+      (text) => {
+        const trimmedSelection = text.trim();
+        // A selected wikilink is toggled off
+        if (
+          trimmedSelection.startsWith('[[') &&
+          trimmedSelection.endsWith(']]')
+        ) {
+          const linkContent = trimmedSelection.slice(2, -2);
+          const pipeIndex = linkContent.indexOf('|');
+          // [[target|display text]] → display text; [[target]] → reverse(target)
+          return pipeIndex !== -1
+            ? linkContent.slice(pipeIndex + 1)
+            : reverseSafeLinkTarget(linkContent, this.plugin.settings);
         }
-        return b.from.ch - a.from.ch; // Reverse character order
-      });
-
-      // Step 3: Process each selection using captured text (not re-reading from document)
-      for (const { from, to, text } of selectionData) {
-        if (text.trim()) {
-          const trimmedSelection = text.trim();
-          let replacement: string;
-
-          // Check if selection is a wikilink - if so, toggle it off
-          if (
-            trimmedSelection.startsWith('[[') &&
-            trimmedSelection.endsWith(']]')
-          ) {
-            const linkContent = trimmedSelection.slice(2, -2);
-            const pipeIndex = linkContent.indexOf('|');
-
-            if (pipeIndex !== -1) {
-              // Has display text: [[target|display text]] → display text
-              replacement = linkContent.slice(pipeIndex + 1);
-            } else {
-              // No display text: [[target]] → reverse(target)
-              replacement = reverseSafeLinkTarget(
-                linkContent,
-                this.plugin.settings
-              );
-            }
-          } else {
-            // Plain text: text → [[safe(text)]]
-            const safeLinkTarget = generateSafeLinkTarget(
-              text,
-              this.plugin.settings
-            );
-            replacement = `[[${safeLinkTarget}]]`;
-          }
-
-          activeEditor.replaceRange(replacement, from, to);
-        }
+        // Plain text: text → [[safe(text)]]
+        return `[[${generateSafeLinkTarget(text, this.plugin.settings)}]]`;
+      },
+      (linkTarget) => {
+        editor.replaceSelection(
+          `[[${generateSafeLinkTarget(linkTarget, this.plugin.settings)}]]`
+        );
       }
-    } else {
-      // No selection - show modal
-      const modal = new InternalLinkModal(
-        this.plugin.app,
-        this.plugin,
-        (linkTarget: string) => {
-          const safeLinkTarget = generateSafeLinkTarget(
-            linkTarget,
-            this.plugin.settings
-          );
-          const wikiLink = `[[${safeLinkTarget}]]`;
-          activeEditor.replaceSelection(wikiLink);
-        }
-      );
-      modal.open();
-    }
+    );
   }
 
-  addSafeInternalLinkWithDisplayText(): void {
-    // Try to get active editor from any view type (Markdown, canvas, etc.)
-    const activeEditor = this.plugin.app.workspace.activeEditor?.editor;
-    if (!activeEditor) {
-      new Notice(t('notifications.errorNoActiveNote'));
-      return;
-    }
-
-    const selections = activeEditor.listSelections();
-
-    // Check if any selection has content (anchor != head means text is selected)
-    const hasSelection = selections.some(
-      (sel) =>
-        sel.anchor.line !== sel.head.line || sel.anchor.ch !== sel.head.ch
-    );
-
-    if (hasSelection) {
-      // Step 1: Capture all selection data (positions + text) before modifying document
-      const selectionData = selections.map((sel) => {
-        // Normalize selection range (anchor might be after head)
-        const from =
-          sel.anchor.line < sel.head.line ||
-          (sel.anchor.line === sel.head.line && sel.anchor.ch <= sel.head.ch)
-            ? sel.anchor
-            : sel.head;
-        const to = from === sel.anchor ? sel.head : sel.anchor;
-
-        const text = activeEditor.getRange(from, to);
-        return { from, to, text };
-      });
-
-      // Step 2: Sort by START position in reverse (bottom-to-top, right-to-left)
-      selectionData.sort((a, b) => {
-        if (a.from.line !== b.from.line) {
-          return b.from.line - a.from.line; // Reverse line order
+  addSafeInternalLinkWithDisplayText(editor: Editor): void {
+    replaceSelectionsOrAsk(
+      this.plugin.app,
+      editor,
+      (text) => {
+        const trimmedSelection = text.trim();
+        if (
+          !trimmedSelection.startsWith('[[') ||
+          !trimmedSelection.endsWith(']]')
+        ) {
+          // Plain text: Hey^ → [[Heyˆ|Hey^]]
+          return `[[${generateSafeLinkTarget(text, this.plugin.settings)}|${text}]]`;
         }
-        return b.from.ch - a.from.ch; // Reverse character order
-      });
-
-      // Step 3: Process each selection using captured text (not re-reading from document)
-      for (const { from, to, text } of selectionData) {
-        if (text.trim()) {
-          const trimmedSelection = text.trim();
-          let replacement: string;
-
-          // Check if selection is a wikilink
-          if (
-            trimmedSelection.startsWith('[[') &&
-            trimmedSelection.endsWith(']]')
-          ) {
-            const linkContent = trimmedSelection.slice(2, -2);
-            const pipeIndex = linkContent.indexOf('|');
-
-            if (pipeIndex !== -1) {
-              // Has display text: [[target|display text]]
-              const target = linkContent.slice(0, pipeIndex);
-              const displayText = linkContent.slice(pipeIndex + 1);
-              const reversedTarget = reverseSafeLinkTarget(
-                target,
-                this.plugin.settings
-              );
-
-              if (reversedTarget === displayText) {
-                // [[Heyˆ|Hey^]] → Hey^ (strip when display text matches reversed target)
-                replacement = displayText;
-              } else {
-                // [[Heyˆ|Bye]] → [[Heyˆ|Hey^]] (update display text to reversed target)
-                replacement = `[[${target}|${reversedTarget}]]`;
-              }
-            } else {
-              // No display text: [[Heyˆ]] → [[Heyˆ|Hey^]] (add display text as reversed target)
-              const reversedTarget = reverseSafeLinkTarget(
-                linkContent,
-                this.plugin.settings
-              );
-              replacement = `[[${linkContent}|${reversedTarget}]]`;
-            }
-          } else {
-            // Plain text: Hey^ → [[Heyˆ|Hey^]]
-            const safeLinkTarget = generateSafeLinkTarget(
-              text,
-              this.plugin.settings
-            );
-            replacement = `[[${safeLinkTarget}|${text}]]`;
-          }
-
-          activeEditor.replaceRange(replacement, from, to);
+        const linkContent = trimmedSelection.slice(2, -2);
+        const pipeIndex = linkContent.indexOf('|');
+        if (pipeIndex === -1) {
+          // No display text: [[Heyˆ]] → [[Heyˆ|Hey^]] (add display text as reversed target)
+          return `[[${linkContent}|${reverseSafeLinkTarget(linkContent, this.plugin.settings)}]]`;
         }
+        const target = linkContent.slice(0, pipeIndex);
+        const displayText = linkContent.slice(pipeIndex + 1);
+        const reversedTarget = reverseSafeLinkTarget(
+          target,
+          this.plugin.settings
+        );
+        // [[Heyˆ|Hey^]] → Hey^ (strip when display text matches reversed target); [[Heyˆ|Bye]] → [[Heyˆ|Hey^]] (update display text to reversed target)
+        return reversedTarget === displayText
+          ? displayText
+          : `[[${target}|${reversedTarget}]]`;
+      },
+      (linkText) => {
+        editor.replaceSelection(
+          `[[${generateSafeLinkTarget(linkText, this.plugin.settings)}|${linkText}]]`
+        );
       }
-    } else {
-      // No selection - show modal
-      const modal = new InternalLinkModal(
-        this.plugin.app,
-        this.plugin,
-        (linkTarget: string, linkDisplayText?: string) => {
-          const safeLinkTarget = generateSafeLinkTarget(
-            linkTarget,
-            this.plugin.settings
-          );
-          let wikiLink: string;
-          if (linkDisplayText && linkDisplayText.trim()) {
-            wikiLink = `[[${safeLinkTarget}|${linkDisplayText}]]`;
-          } else {
-            wikiLink = `[[${safeLinkTarget}|${linkTarget}]]`;
-          }
-          activeEditor.replaceSelection(wikiLink);
-        },
-        true
-      ); // true for withDisplayText
-      modal.open();
-    }
+    );
   }
 
-  addInternalLinkWithDisplayTextAndCustomTarget(): void {
-    // Try to get active editor from any view type (Markdown, canvas, etc.)
-    const activeEditor = this.plugin.app.workspace.activeEditor?.editor;
-    if (!activeEditor) {
-      new Notice(t('notifications.errorNoActiveNote'));
-      return;
-    }
-
-    const selections = activeEditor.listSelections();
-
-    // Check if any selection has content (anchor != head means text is selected)
-    const hasSelection = selections.some(
-      (sel) =>
-        sel.anchor.line !== sel.head.line || sel.anchor.ch !== sel.head.ch
+  addInternalLinkWithDisplayTextAndCustomTarget(editor: Editor): void {
+    // Each selection becomes [[|text]]: an empty target with the text as display text
+    const topmostStart = replaceSelectionsOrAsk(
+      this.plugin.app,
+      editor,
+      (text) => `[[|${text}]]`,
+      (linkTarget) => {
+        const cursor = editor.getCursor();
+        editor.replaceSelection(`[[|${linkTarget}]]`);
+        // After [[, where typing opens the link suggester
+        editor.setCursor({ line: cursor.line, ch: cursor.ch + 2 });
+      }
     );
-
-    if (hasSelection) {
-      // Step 1: Capture all selection data (positions + text) before modifying document
-      const selectionData = selections.map((sel) => {
-        // Normalize selection range (anchor might be after head)
-        const from =
-          sel.anchor.line < sel.head.line ||
-          (sel.anchor.line === sel.head.line && sel.anchor.ch <= sel.head.ch)
-            ? sel.anchor
-            : sel.head;
-        const to = from === sel.anchor ? sel.head : sel.anchor;
-
-        const text = activeEditor.getRange(from, to);
-        return { from, to, text };
-      });
-
-      // Step 2: Sort by START position in reverse (bottom-to-top, right-to-left)
-      selectionData.sort((a, b) => {
-        if (a.from.line !== b.from.line) {
-          return b.from.line - a.from.line; // Reverse line order
-        }
-        return b.from.ch - a.from.ch; // Reverse character order
-      });
-
-      // Step 3: Process each selection, track final cursor position
-      let finalCursorPos: { line: number; ch: number } | null = null;
-
-      for (const { from, to, text } of selectionData) {
-        if (text.trim()) {
-          // Replace selection with [[|text]] (empty target, text as display text)
-          const replacement = `[[|${text}]]`;
-          activeEditor.replaceRange(replacement, from, to);
-
-          // Track cursor position for last (topmost) selection
-          // Cursor goes right after [[
-          finalCursorPos = { line: from.line, ch: from.ch + 2 };
-        }
-      }
-
-      // Position cursor after [[ to trigger link suggester (only if we processed any)
-      if (finalCursorPos) {
-        activeEditor.setCursor(finalCursorPos);
-      }
-    } else {
-      // No selection - show modal
-      const modal = new InternalLinkModal(
-        this.plugin.app,
-        this.plugin,
-        (linkTarget: string) => {
-          // Insert [[|linkTarget]] with cursor positioned after [[
-          const wikiLink = `[[|${linkTarget}]]`;
-          const cursor = activeEditor.getCursor();
-          activeEditor.replaceSelection(wikiLink);
-          // Position cursor after [[
-          activeEditor.setCursor({ line: cursor.line, ch: cursor.ch + 2 });
-        }
-      );
-      modal.open();
+    // After the topmost link's [[, so the link suggester opens on typing
+    if (topmostStart) {
+      editor.setCursor({ line: topmostStart.line, ch: topmostStart.ch + 2 });
     }
   }
 }

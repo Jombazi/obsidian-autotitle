@@ -1,8 +1,22 @@
-import { Notice } from 'obsidian';
-import { verboseLog, reverseCharacterReplacements } from '../utils';
+import { Editor, MarkdownFileInfo, Notice, TFile } from 'obsidian';
+import { verboseLog } from '../utils';
+import { reverseCharacterReplacements } from '../utils/string-processing';
+import { hasDisablePropertyInFile } from '../utils/disable-property';
 import { RenameAllFilesModal } from '../modals';
 import FirstLineIsTitle from '../../main';
 import { t } from '../i18n';
+import { IGNORE_ALL_EXCLUSIONS } from '../types';
+
+/**
+ * The active editor's editor for a rename command, or none when it shows one section of the note: a focused footnote or heading preview holds only that section's text, which would rename the note after it. The editor-change handler skips such embeds too; without an editor the rename reads the whole note itself.
+ * @param activeEditor - `workspace.activeEditor`
+ */
+function wholeNoteEditor(activeEditor: MarkdownFileInfo): Editor | undefined {
+  return activeEditor.subpath ? undefined : activeEditor.editor;
+}
+
+/** The active editor when it shows a Markdown note, which the rename commands need. */
+type ActiveNoteEditor = MarkdownFileInfo & { file: TFile };
 
 /**
  * CommandRegistrar
@@ -43,7 +57,7 @@ export class CommandRegistrar {
 
   /**
    * Register command: Put first line in title
-   * Note: This command ignores folder/tag/property exclusions but ALWAYS respects disable property
+   * Note: This command ignores path/tag/property exclusions but ALWAYS respects disable property
    */
   private registerRenameCurrentFileCommand(): void {
     this.plugin.addCommand({
@@ -51,34 +65,8 @@ export class CommandRegistrar {
       name: t('commands.putFirstLineInTitle'),
       icon: 'file-type-corner',
       checkCallback: (checking: boolean) => {
-        const activeEditor = this.app.workspace.activeEditor;
-        if (!activeEditor?.file || activeEditor.file.extension !== 'md') {
-          return false;
-        }
-
-        if (checking) {
-          return true;
-        }
-
-        verboseLog(
-          this.plugin,
-          `Manual rename command triggered for ${activeEditor.file.path} (ignoring folder/tag/property exclusions, respecting disable property)`
-        );
-        const exclusionOverrides = {
-          ignoreFolder: true,
-          ignoreTag: true,
-          ignoreProperty: true,
-        };
-        void this.plugin.renameEngine.processFile(
-          activeEditor.file,
-          true,
-          true,
-          undefined,
-          false,
-          exclusionOverrides,
-          true,
-          activeEditor.editor
-        );
+        if (!this.getActiveNoteEditor()) return false;
+        if (!checking) void this.executeRenameCurrentFile();
         return true;
       },
     });
@@ -93,29 +81,8 @@ export class CommandRegistrar {
       name: t('commands.putFirstLineInTitleUnlessExcluded'),
       icon: 'file-type-corner',
       checkCallback: (checking: boolean) => {
-        const activeEditor = this.app.workspace.activeEditor;
-        if (!activeEditor?.file || activeEditor.file.extension !== 'md') {
-          return false;
-        }
-
-        if (checking) {
-          return true;
-        }
-
-        verboseLog(
-          this.plugin,
-          `Manual rename command triggered for ${activeEditor.file.path} (unless excluded)`
-        );
-        void this.plugin.renameEngine.processFile(
-          activeEditor.file,
-          true,
-          true,
-          undefined,
-          false,
-          undefined,
-          true,
-          activeEditor.editor
-        );
+        if (!this.getActiveNoteEditor()) return false;
+        if (!checking) void this.executeRenameUnlessExcluded();
         return true;
       },
     });
@@ -144,8 +111,8 @@ export class CommandRegistrar {
       id: 'add-safe-internal-link',
       name: t('commands.addSafeInternalLink'),
       icon: 'link',
-      editorCallback: (_editor, _view) => {
-        this.plugin.addSafeInternalLink();
+      editorCallback: (editor) => {
+        this.plugin.linkManager.addSafeInternalLink(editor);
       },
     });
   }
@@ -158,8 +125,8 @@ export class CommandRegistrar {
       id: 'add-safe-internal-link-with-display-text',
       name: t('commands.addSafeInternalLinkWithDisplayText'),
       icon: 'link',
-      editorCallback: (_editor, _view) => {
-        this.plugin.addSafeInternalLinkWithDisplayText();
+      editorCallback: (editor) => {
+        this.plugin.linkManager.addSafeInternalLinkWithDisplayText(editor);
       },
     });
   }
@@ -172,8 +139,10 @@ export class CommandRegistrar {
       id: 'add-internal-link-with-display-text-and-custom-target',
       name: t('commands.addInternalLinkWithDisplayTextAndCustomTarget'),
       icon: 'link',
-      editorCallback: (_editor, _view) => {
-        this.plugin.addInternalLinkWithDisplayTextAndCustomTarget();
+      editorCallback: (editor) => {
+        this.plugin.linkManager.addInternalLinkWithDisplayTextAndCustomTarget(
+          editor
+        );
       },
     });
   }
@@ -187,13 +156,7 @@ export class CommandRegistrar {
       name: t('commands.toggleAutomaticRenaming'),
       icon: 'file-cog',
       callback: async () => {
-        const newValue = !this.settings.core.renameAutomatically;
-        this.settings.core.renameAutomatically = newValue;
-        await this.plugin.saveSettings();
-        const notificationKey = newValue
-          ? 'notifications.automaticRenamingEnabled'
-          : 'notifications.automaticRenamingDisabled';
-        new Notice(t(notificationKey));
+        await this.executeToggleAutomaticRenaming();
       },
     });
   }
@@ -202,63 +165,56 @@ export class CommandRegistrar {
    * Execute rename current file command (public method for ribbon/external use)
    */
   async executeRenameCurrentFile(): Promise<void> {
-    const activeEditor = this.app.workspace.activeEditor;
-    if (!activeEditor?.file || activeEditor.file.extension !== 'md') {
-      verboseLog(
-        this.plugin,
-        `Showing notice: ${t('notifications.errorNoActiveNote')}`
-      );
-      new Notice(t('notifications.errorNoActiveNote'));
-      return;
-    }
+    const activeEditor = this.getActiveNoteEditorOrNotify();
+    if (!activeEditor) return;
     verboseLog(
       this.plugin,
-      `Manual rename command triggered for ${activeEditor.file.path} (ignoring folder/tag/property exclusions, respecting disable property)`
+      `Manual rename command triggered for ${activeEditor.file.path} (ignoring path/tag/property exclusions, respecting disable property)`
     );
-    const exclusionOverrides = {
-      ignoreFolder: true,
-      ignoreTag: true,
-      ignoreProperty: true,
-    };
-    await this.plugin.renameEngine.processFile(
-      activeEditor.file,
-      true,
-      true,
-      undefined,
-      false,
-      exclusionOverrides,
-      true,
-      activeEditor.editor
-    );
+    await this.plugin.renameEngine.processFile(activeEditor.file, {
+      isManualCommand: true,
+      exclusionOverrides: IGNORE_ALL_EXCLUSIONS,
+      hasActiveEditor: true,
+      editor: wholeNoteEditor(activeEditor),
+    });
   }
 
   /**
    * Execute rename unless excluded command (public method for ribbon/external use)
    */
   async executeRenameUnlessExcluded(): Promise<void> {
+    const activeEditor = this.getActiveNoteEditorOrNotify();
+    if (!activeEditor) return;
+    verboseLog(
+      this.plugin,
+      `Manual rename command triggered for ${activeEditor.file.path} (unless excluded)`
+    );
+    await this.plugin.renameEngine.processFile(activeEditor.file, {
+      isManualCommand: true,
+      hasActiveEditor: true,
+      editor: wholeNoteEditor(activeEditor),
+    });
+  }
+
+  private getActiveNoteEditor(): ActiveNoteEditor | null {
     const activeEditor = this.app.workspace.activeEditor;
     if (!activeEditor?.file || activeEditor.file.extension !== 'md') {
+      return null;
+    }
+    return activeEditor as ActiveNoteEditor;
+  }
+
+  /** The ribbon runs the rename with no availability check, so it is told here when no note is active. */
+  private getActiveNoteEditorOrNotify(): ActiveNoteEditor | null {
+    const activeEditor = this.getActiveNoteEditor();
+    if (!activeEditor) {
       verboseLog(
         this.plugin,
         `Showing notice: ${t('notifications.errorNoActiveNote')}`
       );
       new Notice(t('notifications.errorNoActiveNote'));
-      return;
     }
-    verboseLog(
-      this.plugin,
-      `Manual rename command triggered for ${activeEditor.file.path} (unless excluded)`
-    );
-    await this.plugin.renameEngine.processFile(
-      activeEditor.file,
-      true,
-      true,
-      undefined,
-      false,
-      undefined,
-      true,
-      activeEditor.editor
-    );
+    return activeEditor;
   }
 
   /**
@@ -268,6 +224,8 @@ export class CommandRegistrar {
     const newValue = !this.settings.core.renameAutomatically;
     this.settings.core.renameAutomatically = newValue;
     await this.plugin.saveSettings();
+    // Settings can stay open in its own window while the ribbon or command palette flips this.
+    this.plugin.refreshSettingsTab();
     const notificationKey = newValue
       ? 'notifications.automaticRenamingEnabled'
       : 'notifications.automaticRenamingDisabled';
@@ -276,7 +234,7 @@ export class CommandRegistrar {
 
   /**
    * Register command: Disable renaming for current note
-   * Uses checkCallback to only show when disable property doesn't exist
+   * Uses checkCallback to only show when the note does not carry the disable property's value
    */
   private registerDisableRenamingCommand(): void {
     this.plugin.addCommand({
@@ -289,22 +247,19 @@ export class CommandRegistrar {
           return false;
         }
 
-        // Check if property exists (synchronously using cache)
-        const fileCache = this.app.metadataCache.getFileCache(activeFile);
-        const hasProperty =
-          fileCache?.frontmatter?.[
-            this.settings.exclusions.disableRenamingKey
-          ] !== undefined;
+        // Check the disable property (synchronously using cache)
+        const hasProperty = hasDisablePropertyInFile(
+          activeFile,
+          this.app,
+          this.settings
+        );
 
         if (checking) {
-          // Only show command if property doesn't exist
+          // Only show command if renaming is not already disabled
           return !hasProperty;
         }
 
-        // Execute command
-        this.plugin.disableRenamingForNote().catch((error) => {
-          console.error('Failed to disable renaming:', error);
-        });
+        void this.plugin.setRenamingDisabledForNote(activeFile, true);
         return true;
       },
     });
@@ -312,7 +267,7 @@ export class CommandRegistrar {
 
   /**
    * Register command: Enable renaming for current note
-   * Uses checkCallback to only show when disable property exists
+   * Uses checkCallback to only show when the note carries the disable property's value
    */
   private registerEnableRenamingCommand(): void {
     this.plugin.addCommand({
@@ -325,22 +280,19 @@ export class CommandRegistrar {
           return false;
         }
 
-        // Check if property exists (synchronously using cache)
-        const fileCache = this.app.metadataCache.getFileCache(activeFile);
-        const hasProperty =
-          fileCache?.frontmatter?.[
-            this.settings.exclusions.disableRenamingKey
-          ] !== undefined;
+        // Check the disable property (synchronously using cache)
+        const hasProperty = hasDisablePropertyInFile(
+          activeFile,
+          this.app,
+          this.settings
+        );
 
         if (checking) {
-          // Only show command if property exists
+          // Only show command if renaming is disabled
           return hasProperty;
         }
 
-        // Execute command
-        this.plugin.enableRenamingForNote().catch((error) => {
-          console.error('Failed to enable renaming:', error);
-        });
+        void this.plugin.setRenamingDisabledForNote(activeFile, false);
         return true;
       },
     });
@@ -365,7 +317,7 @@ export class CommandRegistrar {
           return true;
         }
 
-        // Get filename with optional character reversal
+        // Reverses replacement characters whenever Character replacements is on; "Convert replacement characters" governs title insertion only
         const filename = reverseCharacterReplacements(
           file.basename,
           this.settings

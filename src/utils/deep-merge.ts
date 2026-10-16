@@ -5,9 +5,6 @@ import { DeepPartial } from '../types';
  * Arrays and primitives from source override defaults
  * Nested objects are merged recursively
  *
- * Lives in its own module rather than the utils barrel so test fixtures can build
- * settings with it even in suites that `vi.mock` the barrel.
- *
  * @param defaults The default object (will not be mutated)
  * @param source The source object with overrides (will not be mutated)
  * @returns A new object with merged values
@@ -15,12 +12,13 @@ import { DeepPartial } from '../types';
 // `NoInfer` pins T to the defaults: without it a `Partial<PluginSettings>` source drags
 // the inferred T down to `Partial<PluginSettings>`, and the return type loses its keys.
 export function deepMerge<T>(defaults: T, source: DeepPartial<NoInfer<T>>): T {
-  // Handle null/undefined cases
+  // Primitive defaults are values, not shared objects, so they can be returned as is
   if (!defaults || typeof defaults !== 'object') return defaults;
-  if (!source || typeof source !== 'object') return defaults;
 
   // Create a deep copy of defaults to avoid mutation
   const result = JSON.parse(JSON.stringify(defaults)) as T;
+  // The copy even with nothing to merge: callers mutate the result, and handing back `defaults` itself would let that reach the shared object
+  if (!source || typeof source !== 'object') return result;
   // Use Record for dynamic key access
   const resultRecord = result as Record<string, unknown>;
   const sourceRecord = source as Record<string, unknown>;

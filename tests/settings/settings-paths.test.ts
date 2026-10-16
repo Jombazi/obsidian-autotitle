@@ -4,7 +4,7 @@ import { getPath, setPath } from '../../src/settings/settings-paths';
 describe('settings-paths', () => {
   describe('getPath', () => {
     it('reads a top-level key', () => {
-      expect(getPath({ a: 1 }, 'a')).toBe(1);
+      expect(getPath({ dataSchemaVersion: 4 }, 'dataSchemaVersion')).toBe(4);
     });
 
     it('reads a nested dot-path', () => {
@@ -14,12 +14,16 @@ describe('settings-paths', () => {
     });
 
     it('reads a deeply nested dot-path', () => {
-      const obj = { a: { b: { c: { d: 'deep' } } } };
-      expect(getPath(obj, 'a.b.c.d')).toBe('deep');
+      const settings = {
+        markupStripping: { stripMarkupSettings: { bold: false } },
+      };
+      expect(
+        getPath(settings, 'markupStripping.stripMarkupSettings.bold')
+      ).toBe(false);
     });
 
     it('returns undefined for a missing leaf', () => {
-      expect(getPath({ core: {} }, 'core.missing')).toBeUndefined();
+      expect(getPath({ core: {} }, 'core.renameOnSave')).toBeUndefined();
     });
 
     it('returns undefined when an intermediate segment is missing', () => {
@@ -35,62 +39,70 @@ describe('settings-paths', () => {
     });
 
     it('preserves falsy leaf values', () => {
-      expect(getPath({ core: { flag: false } }, 'core.flag')).toBe(false);
-      expect(getPath({ core: { count: 0 } }, 'core.count')).toBe(0);
-      expect(getPath({ core: { text: '' } }, 'core.text')).toBe('');
+      expect(getPath({ core: { debug: false } }, 'core.debug')).toBe(false);
+      expect(getPath({ core: { charCount: 0 } }, 'core.charCount')).toBe(0);
+      expect(
+        getPath(
+          { core: { debugEnabledTimestamp: '' } },
+          'core.debugEnabledTimestamp'
+        )
+      ).toBe('');
     });
   });
 
   describe('setPath', () => {
     it('writes a top-level key', () => {
-      const obj: Record<string, unknown> = {};
-      setPath(obj, 'a', 1);
-      expect(obj.a).toBe(1);
+      const settings: Record<string, unknown> = {};
+      setPath(settings, 'dataSchemaVersion', 4);
+      expect(settings.dataSchemaVersion).toBe(4);
     });
 
     it('writes a nested dot-path', () => {
-      const obj: Record<string, unknown> = { core: { renameOnSave: false } };
-      setPath(obj, 'core.renameOnSave', true);
-      expect((obj.core as Record<string, unknown>).renameOnSave).toBe(true);
+      const settings: Record<string, unknown> = {
+        core: { renameOnSave: false },
+      };
+      setPath(settings, 'core.renameOnSave', true);
+      expect((settings.core as Record<string, unknown>).renameOnSave).toBe(
+        true
+      );
     });
 
     it('creates missing intermediate objects', () => {
-      const obj: Record<string, unknown> = {};
-      setPath(obj, 'a.b.c', 'value');
-      expect(getPath(obj, 'a.b.c')).toBe('value');
+      const settings: Record<string, unknown> = {};
+      setPath(settings, 'markupStripping.stripMarkupSettings.bold', true);
+      expect(
+        getPath(settings, 'markupStripping.stripMarkupSettings.bold')
+      ).toBe(true);
     });
 
     it('replaces a primitive intermediate rather than throwing', () => {
-      const obj: Record<string, unknown> = { core: 5 };
-      setPath(obj, 'core.flag', true);
-      expect(getPath(obj, 'core.flag')).toBe(true);
+      const settings: Record<string, unknown> = { core: 5 };
+      setPath(settings, 'core.debug', true);
+      expect(getPath(settings, 'core.debug')).toBe(true);
     });
 
     it('replaces a null intermediate', () => {
-      const obj: Record<string, unknown> = { core: null };
-      setPath(obj, 'core.flag', true);
-      expect(getPath(obj, 'core.flag')).toBe(true);
+      const settings: Record<string, unknown> = { core: null };
+      setPath(settings, 'core.debug', true);
+      expect(getPath(settings, 'core.debug')).toBe(true);
     });
 
     it('leaves sibling keys untouched', () => {
-      const obj: Record<string, unknown> = {
-        core: { a: 1, b: 2 },
-        other: { c: 3 },
+      const settings: Record<string, unknown> = {
+        core: { debug: false, charCount: 2 },
+        exclusions: { matchSubtags: true },
       };
-      setPath(obj, 'core.a', 99);
-      expect(obj).toEqual({ core: { a: 99, b: 2 }, other: { c: 3 } });
-    });
-
-    it('is a no-op for an empty path', () => {
-      const obj: Record<string, unknown> = { a: 1 };
-      setPath(obj, '', undefined);
-      expect(obj.a).toBe(1);
+      setPath(settings, 'core.debug', true);
+      expect(settings).toEqual({
+        core: { debug: true, charCount: 2 },
+        exclusions: { matchSubtags: true },
+      });
     });
 
     it('round-trips with getPath', () => {
-      const obj: Record<string, unknown> = {};
-      setPath(obj, 'exclusions.excludedFileNames', ['x']);
-      expect(getPath(obj, 'exclusions.excludedFileNames')).toEqual(['x']);
+      const settings: Record<string, unknown> = {};
+      setPath(settings, 'exclusions.excludedFiles', ['x']);
+      expect(getPath(settings, 'exclusions.excludedFiles')).toEqual(['x']);
     });
   });
 });

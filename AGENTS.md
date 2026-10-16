@@ -1,5 +1,8 @@
 # first-line-is-title
 
+- **Reading view is the source of truth for titles**: A title MUST reproduce, as faithfully as possible, the text Obsidian's Reading view renders for the first line — markup, escapes and code spans included. Measure Reading view's rendering of a case BEFORE changing how titles are extracted, and treat every divergence from it as a defect.
+- **Project docs**: Consult @docs/README.md before working on a topic it covers. ALWAYS update it when adding, removing, or renaming a doc.
+
 ***
 
 ## Guidelines
@@ -34,5 +37,5 @@ Per official Obsidian plugin guidelines:
 - **4.0.0 resets stored settings**: `loadSettings()` discards any `data.json` whose `dataSchemaVersion` does not equal `CURRENT_DATA_SCHEMA_VERSION` and starts from `DEFAULT_SETTINGS`. `hasSetupExclusions: false` re-runs exclusion auto-detection and `hasShownFirstTimeNotice: false` re-fires the first-run notice — NEVER special-case either consequence.
 - **NEVER write migration code before 4.0.0 ships**: every pre-4.0.0 `data.json` is discarded wholesale, so a migration would have nothing to migrate. Rename or remove the persisted key directly.
 - **Rename stale persisted keys while the window is open**: until 4.0.0 ships, renaming a persisted key costs nothing. After it ships, each rename costs either a migration or a `CURRENT_DATA_SCHEMA_VERSION` bump that resets every user's settings.
-- **Renaming a key in a vault already stamped with the current version leaves an orphan**: the version still matches, so `deepMerge` runs and copies the stale key forward while the renamed key takes defaults. Clear such test vaults by hand.
+- **A renamed key's old value is dropped on load**: `loadSettings()` merges stored data through `mergeSettingsOverDefaults`, which keeps only keys `DEFAULT_SETTINGS` has, with matching shapes, so the old key leaves `data.json` at the next save while the renamed key takes its default.
 - **A persisted-key rename is NOT a symbol rename**: it appears as the interface field, the `DEFAULT_SETTINGS` entry, plain read sites, a dot-path string in the settings control (`key: 'core.insertTitle'`) that no symbol search finds, the locale namespace in both `en.json` and `ru.json`, and test fixtures. Rename long or capitalised names BEFORE short section names, and run `npx tsc --noEmit` between passes — line-wrapped property access and object-literal fixture keys escape a dot-path regex.

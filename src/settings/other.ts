@@ -4,8 +4,9 @@ import {
   PluginSettingTab,
   SettingDefinitionPage,
 } from 'obsidian';
+import { SettingPath } from './settings-paths';
 import { buildButtonRow, FirstLineIsTitlePlugin } from './settings-base';
-import { PluginSettings } from '../types';
+import { ContentReadMethod, NotificationMode, TitleCase } from '../types';
 import { DEFAULT_SETTINGS } from '../constants';
 import { verboseLog } from '../utils';
 import { t } from '../i18n';
@@ -15,64 +16,37 @@ import {
   SettingsExportModal,
   SettingsImportModal,
 } from '../modals/settings-transfer';
+import { addFlitModalClass } from '../modals/flit-modal-class';
 
 // Plugin names (proper nouns, not subject to sentence case)
 const PLUGIN_AUTO_CARD_LINK = 'Auto Card Link';
 const PLUGIN_LINK_EMBED = 'Link Embed';
 
-/**
- * Card link description interleaves two plugin links with three text fragments.
- */
+/** Common file systems cap a file name at 255 characters or bytes, and the title still takes the `.md` extension. */
+const MAX_CHAR_COUNT = 255 - '.md'.length;
+
+/** Card link description interleaves two plugin links with three text fragments. */
 function buildCardLinkDescription(): DocumentFragment {
   return createFragment((frag) => {
     frag.appendText(t('settings.other.grabTitleFromCardLink.desc.part1'));
-    createPluginLink(frag, 'auto-card-link', PLUGIN_AUTO_CARD_LINK);
-    frag.appendText(t('settings.other.grabTitleFromCardLink.desc.part2'));
     createPluginLink(frag, 'obsidian-link-embed', PLUGIN_LINK_EMBED);
+    frag.appendText(t('settings.other.grabTitleFromCardLink.desc.part2'));
+    createPluginLink(frag, 'auto-card-link', PLUGIN_AUTO_CARD_LINK);
     frag.appendText(t('settings.other.grabTitleFromCardLink.desc.part3'));
   });
 }
 
-/**
- * Deep-clones settings for rollback. `structuredClone` fails only on
- * non-cloneable values, which plain settings never contain.
- */
-function cloneSettings(source: PluginSettings): PluginSettings {
-  try {
-    return structuredClone(source);
-  } catch {
-    return JSON.parse(JSON.stringify(source)) as PluginSettings;
-  }
-}
-
-/**
- * Restores DEFAULT_SETTINGS wholesale and re-runs the first-enable logic so the
- * plugin ends up in the same state as a fresh install.
- */
+/** Restores DEFAULT_SETTINGS wholesale and re-runs the exclusion setup so the plugin ends up in the same state as a fresh install. */
 async function resetAllSettings(
   plugin: FirstLineIsTitlePlugin,
   tab: PluginSettingTab
 ): Promise<void> {
-  // Deep copy for rollback (reference would be unsafe if settings were modified in-place)
-  const previousSettings = cloneSettings(plugin.settings);
-  const newSettings = cloneSettings(DEFAULT_SETTINGS);
-
-  newSettings.core.lastUsageDate = plugin.getTodayDateString?.() || '';
-
-  try {
-    plugin.settings = newSettings;
-    await plugin.saveSettings();
-  } catch {
-    // Rollback to previous settings on save failure
-    plugin.settings = previousSettings;
-    const notice = new Notice(t('settings.errors.saveFailed'));
-    notice.containerEl.addClass('mod-warning');
+  // A copy, never DEFAULT_SETTINGS itself: the replacement becomes the live object, which is mutated in place
+  if (!(await plugin.replaceSettings(structuredClone(DEFAULT_SETTINGS)))) {
     return;
   }
 
-  const pluginInitializer = new PluginInitializer(plugin);
-  await pluginInitializer.initializeFirstEnableLogic();
-  await pluginInitializer.checkFirstTimeExclusionsSetup();
+  await new PluginInitializer(plugin).checkFirstTimeExclusionsSetup();
 
   verboseLog(plugin, `Showing notice: ${t('notifications.settingsCleared')}`);
   new Notice(t('notifications.settingsCleared'));
@@ -83,7 +57,7 @@ async function resetAllSettings(
 export function buildOtherPage(
   plugin: FirstLineIsTitlePlugin,
   tab: PluginSettingTab
-): SettingDefinitionPage {
+): SettingDefinitionPage<SettingPath> {
   return {
     type: 'page',
     name: t('settings.sections.other'),
@@ -96,7 +70,7 @@ export function buildOtherPage(
           type: 'slider',
           key: 'core.charCount',
           min: 1,
-          max: 252,
+          max: MAX_CHAR_COUNT,
           step: 1,
           defaultValue: DEFAULT_SETTINGS.core.charCount,
         },
@@ -113,7 +87,7 @@ export function buildOtherPage(
               'settings.other.notificationMode.onTitleChange'
             ),
             Never: t('settings.other.notificationMode.never'),
-          },
+          } satisfies Record<NotificationMode, string>,
         },
       },
       {
@@ -126,7 +100,7 @@ export function buildOtherPage(
             preserve: t('settings.other.titleCase.preserve'),
             uppercase: t('settings.other.titleCase.uppercase'),
             lowercase: t('settings.other.titleCase.lowercase'),
-          },
+          } satisfies Record<TitleCase, string>,
         },
       },
       {
@@ -138,8 +112,7 @@ export function buildOtherPage(
         },
       },
       {
-        // Debug's dependent row travels with it: left outside the group it
-        // would appear in a separate box below, detached from its parent.
+        // Debug's dependent row travels with it: left outside the group it would appear in a separate box below, detached from its parent.
         type: 'group',
         heading: t('settings.other.troubleshooting.title'),
         items: [
@@ -165,7 +138,7 @@ export function buildOtherPage(
                 Editor: t('settings.other.contentReadMethod.editor'),
                 Cache: t('settings.other.contentReadMethod.cache'),
                 File: t('settings.other.contentReadMethod.file'),
-              },
+              } satisfies Record<ContentReadMethod, string>,
             },
           },
           {
@@ -223,15 +196,12 @@ export function buildOtherPage(
             ]),
           },
           {
-            // `render` rather than `action` so the row carries a labelled
-            // button, matching "Rename all notes" and "Send feedback".
+            // `render` rather than `action` so the row carries a labeled button, matching "Rename all notes" and "Send feedback".
             name: t('settings.other.clearSettings.name'),
             desc: t('settings.other.clearSettings.desc'),
             render: buildButtonRow({
               text: t('settings.other.clearSettings.button'),
-              // Red tint without the filled-CTA treatment, since this is a
-              // secondary destructive action rather than the page's primary
-              // one.
+              // Red tint without the filled-CTA treatment, since this is a secondary destructive action rather than the page's primary one.
               destructive: true,
               onClick: () => {
                 const body = createFragment((frag) => {
@@ -241,7 +211,7 @@ export function buildOtherPage(
                   });
                 });
 
-                new ConfirmationModal(plugin.app)
+                addFlitModalClass(new ConfirmationModal(plugin.app))
                   .setTitle(t('settings.other.clearSettings.name'))
                   .setContent(body)
                   .addButton((btn) =>

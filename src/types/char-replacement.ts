@@ -61,9 +61,14 @@ export const CHAR_TO_SETTING_KEY: Record<string, CharKey> = {
   '.': 'dot',
 };
 
+/** The character each key stands for, inverted from {@link CHAR_TO_SETTING_KEY} so the pairing is written once; the cast holds because that map lists every key. */
+export const SETTING_KEY_TO_CHAR = Object.fromEntries(
+  Object.entries(CHAR_TO_SETTING_KEY).map(([char, key]) => [key, char])
+) as Record<CharKey, string>;
+
 /**
- * Characters forbidden on all operating systems, in settings-table display order.
- * Shared so the first-enable cascade and the settings table agree on membership.
+ * Characters replaced on all operating systems, in settings display order: those forbidden everywhere, plus the dot, which is forbidden only at the start of a name.
+ * Shared so the forbidden-character lists and the settings page agree on membership.
  */
 export const PRIMARY_CHAR_KEYS: CharKey[] = [
   'leftBracket',
@@ -78,7 +83,7 @@ export const PRIMARY_CHAR_KEYS: CharKey[] = [
 ];
 
 /**
- * Characters forbidden only on Windows and Android, in settings-table display order.
+ * Characters forbidden only on Windows and Android, in settings display order.
  * Disjoint from {@link PRIMARY_CHAR_KEYS}.
  */
 export const WINDOWS_ANDROID_CHAR_KEYS: CharKey[] = [
@@ -88,21 +93,3 @@ export const WINDOWS_ANDROID_CHAR_KEYS: CharKey[] = [
   'greaterThan',
   'question',
 ];
-
-/**
- * Characters auto-enabled the first time forbidden char replacement is switched on.
- *
- * Two independent code paths run this cascade — plugin load and the settings
- * toggle — and both latch on the same flag, so whichever fires first locks the
- * other out. They must therefore enable an identical key set.
- *
- * Windows/Android keys are included because the forbidden set is universal:
- * `processForbiddenChars` DELETES a forbidden character whose toggle is off
- * rather than passing it through, so omitting them would strip `? * " < >` from
- * every new user's filenames on every OS.
- */
-export const FIRST_ENABLE_CHAR_KEYS: CharKey[] = [
-  ...PRIMARY_CHAR_KEYS,
-  ...WINDOWS_ANDROID_CHAR_KEYS,
-  // Backslash defaults off; enabling it flips `extractTitle` to the literal-backslash branch, which stops treating `\` as a Markdown escape character.
-].filter((key) => key !== 'backslash');

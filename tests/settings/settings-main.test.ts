@@ -3,20 +3,21 @@
  *
  * Focus is `setControlValue`: the declarative API has no per-control onChange,
  * so this one method owns dot-path persistence, every cross-setting cascade,
- * and the choice between `update()` and `refreshDomState()`.
+ * and whether a write needs `update()`.
  *
- * That choice is load-bearing. `refreshDomState()` re-evaluates visible/disabled
- * predicates WITHOUT re-reading control values, so any cascade that force-writes
- * a sibling's value must use `update()` or that sibling keeps rendering a stale
- * value while the stored setting says otherwise.
+ * That choice is load-bearing. `refreshDomState()`, which Obsidian runs after
+ * every control write, re-evaluates visible/disabled predicates WITHOUT
+ * re-reading control values, so any cascade that force-writes a sibling's value
+ * must use `update()` or that sibling keeps rendering a stale value while the
+ * stored setting says otherwise.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import { App } from '../mockObsidian';
 import { DEFAULT_SETTINGS } from '../../src/constants';
-import { processForbiddenChars } from '../../src/utils/string-processing';
 import type { PluginSettings } from '../../src/types';
-import type { CharKey } from '../../src/types/char-replacement';
+import type { SettingPath } from '../../src/settings/settings-paths';
 
 vi.mock('../../src/i18n', () => ({
   t: vi.fn((key: string) => key),
@@ -24,8 +25,6 @@ vi.mock('../../src/i18n', () => ({
 }));
 
 vi.mock('../../src/utils', () => ({
-  normalizeExclusionLists: vi.fn(() => false),
-  detectOS: vi.fn(() => 'macOS'),
   verboseLog: vi.fn(),
 }));
 
@@ -66,8 +65,11 @@ vi.mock('../../src/settings/markup-stripping', () => ({
     name: 'Markup stripping',
   })),
 }));
-vi.mock('../../src/settings/alias', () => ({
-  buildAliasPage: vi.fn(() => ({ type: 'page', name: 'Alias' })),
+vi.mock('../../src/settings/first-line-property', () => ({
+  buildFirstLinePropertyPage: vi.fn(() => ({
+    type: 'page',
+    name: 'First line property',
+  })),
 }));
 vi.mock('../../src/settings/commands', () => ({
   buildCommandsPage: vi.fn(() => ({ type: 'page', name: 'Commands' })),
@@ -76,29 +78,48 @@ vi.mock('../../src/settings/other', () => ({
   buildOtherPage: vi.fn(() => ({ type: 'page', name: 'Advanced' })),
 }));
 
-import { FirstLineIsTitleSettings } from '../../src/settings/settings-main';
-import { PluginInitializer } from '../../src/core/plugin-initializer';
-import { normalizeExclusionLists } from '../../src/utils';
+import {
+  FirstLineIsTitleSettings,
+  runChangedCascades,
+} from '../../src/settings/settings-main';
 import { buildSupportGroup } from '../../src/settings/general';
+import { buildFirstLinePropertyPage } from '../../src/settings/first-line-property';
 
 interface TestPlugin {
   app: App;
   settings: PluginSettings;
-  saveSettings: ReturnType<typeof vi.fn>;
+  saveSettings: Mock<() => Promise<void>>;
+  requestSaveSettings: Mock<() => void>;
+  flushSettingsSave: Mock<() => void>;
   debugLog: ReturnType<typeof vi.fn>;
   updatePropertyVisibility: ReturnType<typeof vi.fn>;
-  editorLifecycle: { initializeCheckingSystem: ReturnType<typeof vi.fn> };
+  getCurrentTimestamp: ReturnType<typeof vi.fn>;
+  outputAllSettings: ReturnType<typeof vi.fn>;
 }
 
+const TIMESTAMP = '2026-10-11T09:00:00.000Z';
+
 function makePlugin(): TestPlugin {
-  return {
+  // A pending flag in place of the plugin's debouncer, so a request followed by a flush counts as the one write it is
+  let isSavePending = false;
+  const plugin: TestPlugin = {
     app: new App(),
     settings: structuredClone(DEFAULT_SETTINGS) as PluginSettings,
     saveSettings: vi.fn().mockResolvedValue(undefined),
+    requestSaveSettings: vi.fn(() => {
+      isSavePending = true;
+    }),
+    flushSettingsSave: vi.fn(() => {
+      if (!isSavePending) return;
+      isSavePending = false;
+      void plugin.saveSettings();
+    }),
     debugLog: vi.fn(),
     updatePropertyVisibility: vi.fn(),
-    editorLifecycle: { initializeCheckingSystem: vi.fn() },
+    getCurrentTimestamp: vi.fn(() => TIMESTAMP),
+    outputAllSettings: vi.fn(),
   };
+  return plugin;
 }
 
 describe('FirstLineIsTitleSettings', () => {
@@ -138,8 +159,7 @@ describe('FirstLineIsTitleSettings', () => {
 
     const advancedGroup = () =>
       tab.getSettingDefinitions()[advancedGroupIndex()] as
-        | { heading?: string; items?: { name?: string }[] }
-        | undefined;
+        { heading?: string; items?: { name?: string }[] } | undefined;
 
     it('keeps only Exclusions as a top-level page', () => {
       expect(topLevel()).toEqual(['Exclusions']);
@@ -149,10 +169,10 @@ describe('FirstLineIsTitleSettings', () => {
       const group = advancedGroup();
       expect(group?.heading).toBe(ADVANCED_HEADING);
       expect(group?.items?.map((i) => i.name)).toEqual([
-        'Alias',
         'Character replacements',
         'Commands',
         'Custom replacements',
+        'First line property',
         'Markup stripping',
         'Advanced',
       ]);
@@ -190,7 +210,10 @@ describe('FirstLineIsTitleSettings', () => {
     });
 
     it('returns undefined for an unknown path rather than throwing', () => {
-      expect(tab.getControlValue('core.nope.deeper')).toBeUndefined();
+      // Ruled out by the key type, but Obsidian hands back whatever string a control carries
+      expect(
+        tab.getControlValue('core.nope.deeper' as SettingPath)
+      ).toBeUndefined();
     });
   });
 
@@ -201,23 +224,16 @@ describe('FirstLineIsTitleSettings', () => {
       expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
     });
 
-    it('refreshes DOM state only, when no value-mutating cascade applies', async () => {
+    it('calls neither update() nor refreshDomState() when no value-mutating cascade applies', async () => {
+      // Obsidian's control binding refreshes the DOM state itself once this resolves
       await tab.setControlValue('core.renameOnSave', true);
-      expect(refreshDomState).toHaveBeenCalledTimes(1);
+      expect(refreshDomState).not.toHaveBeenCalled();
       expect(update).not.toHaveBeenCalled();
-    });
-
-    it('still saves exactly once when a cascade mutates several settings', async () => {
-      await tab.setControlValue(
-        'customReplacements.enableCustomReplacements',
-        false
-      );
-      expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
     });
   });
 
-  describe('force-off cascades', () => {
-    it('preserves convertReplacementChars when char replacements go off', async () => {
+  describe('character replacements switch', () => {
+    it('preserves convertReplacementChars when switched off', async () => {
       plugin.settings.core.convertReplacementChars = true;
       await tab.setControlValue(
         'characterReplacements.enableForbiddenCharReplacements',
@@ -225,186 +241,153 @@ describe('FirstLineIsTitleSettings', () => {
       );
       expect(plugin.settings.core.convertReplacementChars).toBe(true);
     });
-
-    it('clears applyCustomReplacementsInAlias when custom replacements go off', async () => {
-      plugin.settings.markupStripping.applyCustomReplacementsInAlias = true;
-      await tab.setControlValue(
-        'customReplacements.enableCustomReplacements',
-        false
-      );
-      expect(
-        plugin.settings.markupStripping.applyCustomReplacementsInAlias
-      ).toBe(false);
-    });
-
-    it('re-renders via update() so force-written siblings never show a stale value', async () => {
-      await tab.setControlValue(
-        'customReplacements.enableCustomReplacements',
-        false
-      );
-      expect(update).toHaveBeenCalledTimes(1);
-      expect(refreshDomState).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('first-enable cascades', () => {
-    it('bulk-enables custom replacements the first time they are switched on', async () => {
-      plugin.settings.core.hasEnabledCustomReplacements = false;
-      plugin.settings.customReplacements.rules.forEach((rule) => {
-        rule.enabled = false;
-      });
-
-      await tab.setControlValue(
-        'customReplacements.enableCustomReplacements',
-        true
-      );
-
-      expect(
-        plugin.settings.customReplacements.rules.every((r) => r.enabled)
-      ).toBe(true);
-      expect(plugin.settings.core.hasEnabledCustomReplacements).toBe(true);
-    });
-
-    it('does not bulk-enable again once the latch is set', async () => {
-      plugin.settings.core.hasEnabledCustomReplacements = true;
-      plugin.settings.customReplacements.rules.forEach((rule) => {
-        rule.enabled = false;
-      });
-
-      await tab.setControlValue(
-        'customReplacements.enableCustomReplacements',
-        true
-      );
-
-      expect(
-        plugin.settings.customReplacements.rules.some((r) => r.enabled)
-      ).toBe(false);
-    });
-
-    it('seeds alias defaults the first time aliases are switched on', async () => {
-      plugin.settings.core.hasEnabledAliases = false;
-      plugin.settings.aliases.keepEmptyAliasProperty = false;
-      plugin.settings.markupStripping.stripMarkupInAlias = false;
-
-      await tab.setControlValue('aliases.enableAliases', true);
-
-      expect(plugin.settings.aliases.keepEmptyAliasProperty).toBe(true);
-      expect(plugin.settings.markupStripping.stripMarkupInAlias).toBe(true);
-      expect(plugin.settings.core.hasEnabledAliases).toBe(true);
-    });
-
-    it('does not seed applyCustomReplacementsInAlias when custom replacements are disabled', async () => {
-      plugin.settings.core.hasEnabledAliases = false;
-      plugin.settings.customReplacements.enableCustomReplacements = false;
-      plugin.settings.markupStripping.applyCustomReplacementsInAlias = false;
-
-      await tab.setControlValue('aliases.enableAliases', true);
-
-      expect(
-        plugin.settings.markupStripping.applyCustomReplacementsInAlias
-      ).toBe(false);
-    });
-  });
-
-  describe('first-enable cascade parity', () => {
-    // The same cascade also runs at plugin load, and both latch on
-    // core.hasEnabledForbiddenChars — whichever fires first permanently locks
-    // the other out, so the two must enable an identical key set.
-    const enabledCharKeys = (settings: PluginSettings): CharKey[] => {
-      const { charReplacements } = settings.characterReplacements;
-      return (Object.keys(charReplacements) as CharKey[])
-        .filter((key) => charReplacements[key].enabled)
-        .sort();
-    };
-
-    async function afterSettingsToggle(): Promise<PluginSettings> {
-      const fresh = makePlugin();
-      const freshTab = new FirstLineIsTitleSettings(
-        fresh.app as never,
-        fresh as never
-      );
-      await freshTab.setControlValue(
-        'characterReplacements.enableForbiddenCharReplacements',
-        true
-      );
-      return fresh.settings;
-    }
-
-    async function afterPluginLoad(): Promise<PluginSettings> {
-      const fresh = makePlugin();
-      fresh.settings.characterReplacements.enableForbiddenCharReplacements = true;
-      await new PluginInitializer(fresh as never).initializeFirstEnableLogic();
-      return fresh.settings;
-    }
-
-    it('enables the same characters from either entry point', async () => {
-      expect(enabledCharKeys(await afterSettingsToggle())).toEqual(
-        enabledCharKeys(await afterPluginLoad())
-      );
-    });
-
-    it('leaves backslash off from either entry point', async () => {
-      for (const settings of [
-        await afterSettingsToggle(),
-        await afterPluginLoad(),
-      ]) {
-        expect(
-          settings.characterReplacements.charReplacements.backslash.enabled
-        ).toBe(false);
-      }
-    });
-
-    it('replaces rather than drops ? from either entry point', async () => {
-      // A forbidden char whose toggle is off is deleted outright, so trimming
-      // the Windows/Android keys out of the cascade would lose them silently.
-      for (const settings of [
-        await afterSettingsToggle(),
-        await afterPluginLoad(),
-      ]) {
-        expect(processForbiddenChars('What? Yes', settings)).toBe('What？Yes');
-      }
-    });
   });
 
   describe('side-effect cascades', () => {
     it('refreshes property visibility when the hiding mode changes', async () => {
-      await tab.setControlValue('aliases.hideAliasProperty', 'always');
+      await tab.setControlValue('firstLineProperty.hideProperty', 'always');
       expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
     });
 
     it('refreshes property visibility when sidebar hiding changes', async () => {
-      await tab.setControlValue('aliases.hideAliasInSidebar', true);
+      await tab.setControlValue('firstLineProperty.hideInSidebar', true);
       expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
     });
 
-    it('reinitialises the checking system when the interval changes', async () => {
-      await tab.setControlValue('core.checkInterval', 750);
-      expect(
-        plugin.editorLifecycle.initializeCheckingSystem
-      ).toHaveBeenCalledTimes(1);
-      expect(plugin.settings.core.checkInterval).toBe(750);
+    it('stamps the time and dumps the settings when debug goes on', async () => {
+      await tab.setControlValue('core.debug', true);
+
+      expect(plugin.settings.core.debugEnabledTimestamp).toBe(TIMESTAMP);
+      expect(plugin.outputAllSettings).toHaveBeenCalledTimes(1);
+      // Stamped before the save, so the timestamp is persisted with the switch
+      expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the stamp, with no dump, when debug goes off', async () => {
+      plugin.settings.core.debug = true;
+      plugin.settings.core.debugEnabledTimestamp = TIMESTAMP;
+
+      await tab.setControlValue('core.debug', false);
+
+      expect(plugin.settings.core.debugEnabledTimestamp).toBe('');
+      expect(plugin.outputAllSettings).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('runChangedCascades', () => {
+    it('runs the cascade of a key the replacement changed', () => {
+      const previous = structuredClone(plugin.settings);
+      plugin.settings.firstLineProperty.hideProperty = 'always';
+
+      runChangedCascades(plugin as never, previous);
+
+      expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
+    });
+
+    it('runs nothing when no cascade key changed', () => {
+      const previous = structuredClone(plugin.settings);
+      plugin.settings.core.charCount = 42;
+
+      runChangedCascades(plugin as never, previous);
+
+      expect(plugin.updatePropertyVisibility).not.toHaveBeenCalled();
+      expect(plugin.outputAllSettings).not.toHaveBeenCalled();
+    });
+
+    it('applies a changed property name to property hiding', () => {
+      const previous = structuredClone(plugin.settings);
+      plugin.settings.firstLineProperty.propertyKey = 'aliases';
+
+      runChangedCascades(plugin as never, previous);
+
+      expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
+    });
+
+    it('rebuilds property hiding once though all three of its keys changed', () => {
+      const previous = structuredClone(plugin.settings);
+      plugin.settings.firstLineProperty.propertyKey = 'aliases';
+      plugin.settings.firstLineProperty.hideProperty = 'always';
+      plugin.settings.firstLineProperty.hideInSidebar = true;
+
+      runChangedCascades(plugin as never, previous);
+
+      expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
+    });
+
+    it('stamps and dumps for debug turned on by the replacement', () => {
+      const previous = structuredClone(plugin.settings);
+      plugin.settings.core.debug = true;
+
+      runChangedCascades(plugin as never, previous);
+
+      expect(plugin.settings.core.debugEnabledTimestamp).toBe(TIMESTAMP);
+      expect(plugin.outputAllSettings).toHaveBeenCalledTimes(1);
+    });
+
+    it('stamps debug that was already on when the replacement left its timestamp empty', () => {
+      // A hand-trimmed import: without a stamp, the 24-hour auto-disable has nothing to measure from
+      plugin.settings.core.debug = true;
+      const previous = structuredClone(plugin.settings);
+
+      runChangedCascades(plugin as never, previous);
+
+      expect(plugin.settings.core.debugEnabledTimestamp).toBe(TIMESTAMP);
+    });
+
+    it('keeps the stamp of debug that stayed on', () => {
+      plugin.settings.core.debug = true;
+      plugin.settings.core.debugEnabledTimestamp = 'earlier';
+      const previous = structuredClone(plugin.settings);
+
+      runChangedCascades(plugin as never, previous);
+
+      expect(plugin.settings.core.debugEnabledTimestamp).toBe('earlier');
+      expect(plugin.outputAllSettings).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('property name debouncer', () => {
+    /** The debouncer the tab hands the First line property page. */
+    function requestPropertyKeyCascade(): () => void {
+      tab.getSettingDefinitions();
+      return vi.mocked(buildFirstLinePropertyPage).mock.calls[0][2];
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('applies the name to property hiding once typing pauses', () => {
+      vi.useFakeTimers();
+      const request = requestPropertyKeyCascade();
+
+      request();
+      request();
+      expect(plugin.updatePropertyVisibility).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(500);
+
+      expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
+    });
+
+    it('applies a pending name at once when Settings closes', () => {
+      vi.useFakeTimers();
+      requestPropertyKeyCascade()();
+
+      tab.hide();
+
+      expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(500);
+      expect(plugin.updatePropertyVisibility).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('hide', () => {
-    it('saves and rebuilds the definitions when exclusions were pruned', () => {
-      vi.mocked(normalizeExclusionLists).mockReturnValueOnce(true);
+    it('writes a save typing left pending', () => {
+      plugin.requestSaveSettings();
 
       tab.hide();
 
       expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
-      // List items are mapped at definition time, so the pruned arrays only
-      // reach the DOM once the definitions are rebuilt.
-      expect(update).toHaveBeenCalledTimes(1);
-    });
-
-    it('does nothing when the exclusion lists were already clean', () => {
-      vi.mocked(normalizeExclusionLists).mockReturnValueOnce(false);
-
-      tab.hide();
-
-      expect(plugin.saveSettings).not.toHaveBeenCalled();
-      expect(update).not.toHaveBeenCalled();
     });
   });
 });
