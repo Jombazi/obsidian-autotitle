@@ -1,3 +1,4 @@
+import type { Editor } from 'obsidian';
 import { CharReplacements } from './types/char-replacement';
 
 export interface CustomReplacement {
@@ -7,6 +8,9 @@ export interface CustomReplacement {
   onlyWholeLine: boolean;
 }
 
+/** Writes a debug line while debug mode is on, for helpers that take settings rather than the plugin; `verboseLogger` builds one. */
+export type DebugLogger = (message: string, data?: unknown) => void;
+
 export interface ExcludedProperty {
   key: string;
   value: string;
@@ -15,6 +19,8 @@ export interface ExcludedProperty {
 export interface TitleRegionCache {
   firstNonEmptyLine: string;
   titleSourceLine: string;
+  // Part of the key: deleting a fence line can leave the text unchanged while it stops being code.
+  raw: boolean;
   lastUpdated: number;
 }
 
@@ -27,11 +33,11 @@ export type RenameOutcomeReason =
   | 'error'
   | 'excluded'
   | 'file-not-found'
-  | 'footnote-popover-edit'
   | 'global-rate-limited'
   | 'max-conflicts-exceeded'
   | 'not-heading'
   | 'not-markdown'
+  | 'not-open-in-editor'
   | 'property-disabled'
   | 'read-error'
   | 'recently-renamed'
@@ -46,8 +52,51 @@ export interface RenameOutcome {
   reason: RenameOutcomeReason;
 }
 
-export type OSPreset = 'macOS' | 'Windows' | 'Linux';
-export type NotificationMode = 'Always' | 'On title change' | 'Never';
+/** Exclusion lists a check skips; an omitted key keeps its list. Nothing skips the rename-blocking property. */
+export interface ExclusionOverrides {
+  /** Skip the Excluded files rules */
+  ignoreExcludedFiles?: boolean;
+  /** Skip the Excluded tags rules */
+  ignoreExcludedTags?: boolean;
+  /** Skip the Excluded properties rules */
+  ignoreExcludedProperties?: boolean;
+}
+
+/** An exclusion list that can keep a note from being processed: Excluded files, Excluded tags or Excluded properties. */
+export type ExclusionList = 'files' | 'tags' | 'properties';
+
+/** Skips every exclusion list, as "Put first line in title" does. */
+export const IGNORE_ALL_EXCLUSIONS: Readonly<ExclusionOverrides> = {
+  ignoreExcludedFiles: true,
+  ignoreExcludedTags: true,
+  ignoreExcludedProperties: true,
+};
+
+/** How a `RenameEngine.processFile` pass was started, and what its caller already holds. Every key is optional; omitted, the pass is an automatic one that reads the note itself. */
+export interface ProcessFileOptions {
+  /** A command or menu item the user ran: it shows notices, searches every editor for the note's text, and needs no open editor */
+  isManualCommand?: boolean;
+  /** Note text the caller already read, used instead of reading the note */
+  providedContent?: string;
+  /** One note of a bulk run, which reports on its own: no per-note notices, and no global rate limit */
+  isBatchOperation?: boolean;
+  /** Exclusion lists the pass skips, for the rename and the first line property alike */
+  exclusionOverrides?: ExclusionOverrides;
+  /** Whether an editor shows the note, as the caller knows it; undefined looks for one */
+  hasActiveEditor?: boolean;
+  /** Editor the text comes from, which the first line property is written into */
+  editor?: Editor;
+}
+
+// Each string-union setting derives its type from a value list, so the import and load validation in `transfer.ts` checks against the same values the type allows.
+export const NOTIFICATION_MODES = [
+  'Always',
+  'On title change',
+  'Never',
+] as const;
+export type NotificationMode = (typeof NOTIFICATION_MODES)[number];
+export const TITLE_CASES = ['preserve', 'uppercase', 'lowercase'] as const;
+export type TitleCase = (typeof TITLE_CASES)[number];
 /**
  * Canonical exclusion-strategy values. Persisted verbatim in data.json and used as
  * settings-dropdown option keys — the literal text, including the trailing three-period
@@ -59,11 +108,21 @@ export const EXCLUSION_STRATEGY = {
 } as const;
 export type ExclusionStrategy =
   (typeof EXCLUSION_STRATEGY)[keyof typeof EXCLUSION_STRATEGY];
-export type TagMatchingMode =
-  'In Properties and note body' | 'In Properties only' | 'In note body only';
-export type ContentReadMethod = 'Editor' | 'Cache' | 'File';
+export const TAG_MATCHING_MODES = [
+  'In Properties and note body',
+  'In Properties only',
+  'In note body only',
+] as const;
+export type TagMatchingMode = (typeof TAG_MATCHING_MODES)[number];
+export const CONTENT_READ_METHODS = ['Editor', 'Cache', 'File'] as const;
+export type ContentReadMethod = (typeof CONTENT_READ_METHODS)[number];
 
-export type PropertyHidingOption = 'never' | 'always' | 'when_empty';
+export const PROPERTY_HIDING_OPTIONS = [
+  'never',
+  'always',
+  'when_empty',
+] as const;
+export type PropertyHidingOption = (typeof PROPERTY_HIDING_OPTIONS)[number];
 
 /**
  * Core plugin settings (General + Other tabs)
@@ -71,7 +130,7 @@ export type PropertyHidingOption = 'never' | 'always' | 'when_empty';
 export interface CoreSettings {
   // Rename behavior
   renameAutomatically: boolean;
-  titleCase: 'preserve' | 'uppercase' | 'lowercase';
+  titleCase: TitleCase;
   renameOnFocus: boolean;
   renameOnSave: boolean;
   onlyRenameIfHeading: boolean;
@@ -102,7 +161,6 @@ export interface CoreSettings {
   debugOutputFullContent: boolean;
   debugEnabledTimestamp: string;
   hasSetupExclusions: boolean;
-  hasEnabledForbiddenChars: boolean;
 }
 
 /**
@@ -126,7 +184,6 @@ export interface ExclusionSettings {
  */
 export interface CharacterReplacementsSettings {
   enableForbiddenCharReplacements: boolean;
-  osPreset: OSPreset;
   charReplacements: CharReplacements;
 }
 

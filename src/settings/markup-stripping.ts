@@ -1,99 +1,201 @@
 import { SettingDefinitionItem, SettingDefinitionPage } from 'obsidian';
 import { FirstLineIsTitlePlugin, quoteLabel } from './settings-base';
+import { getPath, LeafPath, SettingPath } from './settings-paths';
+import { MarkupStrippingSettings } from '../types';
 import { t } from '../i18n';
 import { createPluginLink, buildPluginLinkRouterGroup } from './plugin-links';
 
-/**
- * A markup-type toggle: `id` is the locale namespace under
- * `settings.markupStripping.`, `path` the dot-path under `markupStripping.`.
- */
+/** How a toggle's description reads. `example` fills a shared sentence under `settings.markupStripping.examples` with the toggle's code samples, its `example.markup`, `example.alternativeMarkup` and `example.result`; `standIn` quotes one of the top-level stand-in titles into the toggle's own `desc`; `sentence` is the toggle's own `desc` as is. */
+type MarkupDescription =
+  | { type: 'sentence' }
+  | { type: 'example'; template: 'single' | 'withAlternative' }
+  | { type: 'standIn'; standInKey: 'table' | 'mathBlock' | 'diagram' };
+
+/** A markup-type toggle: `id` is the locale namespace under `settings.markupStripping.`, `path` the dot-path under `markupStripping.`. */
 interface MarkupToggle {
   id: string;
-  path: string;
+  path: LeafPath<MarkupStrippingSettings>;
+  description: MarkupDescription;
+  /** Drawn directly below this toggle, and only while it is on. */
+  subToggle?: MarkupToggle;
 }
 
-/**
- * Source order matters — it is the display order, and the two conditional
- * sub-settings are inserted directly after their parent toggle.
- */
+const SINGLE_EXAMPLE: MarkupDescription = {
+  type: 'example',
+  template: 'single',
+};
+const EXAMPLE_WITH_ALTERNATIVE: MarkupDescription = {
+  type: 'example',
+  template: 'withAlternative',
+};
+const SENTENCE: MarkupDescription = { type: 'sentence' };
+
+/** Source order matters — it is the display order. */
 const MARKUP_TOGGLES: MarkupToggle[] = [
-  { id: 'headings', path: 'stripMarkupSettings.headings' },
-  { id: 'bold', path: 'stripMarkupSettings.bold' },
-  { id: 'italic', path: 'stripMarkupSettings.italic' },
-  { id: 'strikethrough', path: 'stripMarkupSettings.strikethrough' },
-  { id: 'highlight', path: 'stripMarkupSettings.highlight' },
-  { id: 'wikilinks', path: 'stripMarkupSettings.wikilinks' },
-  { id: 'markdownLinks', path: 'stripMarkupSettings.markdownLinks' },
-  { id: 'quote', path: 'stripMarkupSettings.quote' },
-  { id: 'callouts', path: 'stripMarkupSettings.callouts' },
-  { id: 'unorderedLists', path: 'stripMarkupSettings.unorderedLists' },
-  { id: 'orderedLists', path: 'stripMarkupSettings.orderedLists' },
-  { id: 'taskLists', path: 'stripMarkupSettings.taskLists' },
-  { id: 'stripHorizontalRuleMarkup', path: 'stripHorizontalRuleMarkup' },
-  { id: 'code', path: 'stripMarkupSettings.code' },
-  { id: 'codeBlocks', path: 'stripMarkupSettings.codeBlocks' },
-  { id: 'footnotes', path: 'stripMarkupSettings.footnotes' },
-  { id: 'comments', path: 'stripMarkupSettings.comments' },
-  { id: 'stripTableMarkup', path: 'stripTableMarkup' },
-  { id: 'stripInlineMathMarkup', path: 'stripInlineMathMarkup' },
-  { id: 'stripMathBlockMarkup', path: 'stripMathBlockMarkup' },
-  { id: 'htmlTags', path: 'stripMarkupSettings.htmlTags' },
+  {
+    id: 'headings',
+    path: 'stripMarkupSettings.headings',
+    description: SINGLE_EXAMPLE,
+  },
+  {
+    id: 'bold',
+    path: 'stripMarkupSettings.bold',
+    description: EXAMPLE_WITH_ALTERNATIVE,
+  },
+  {
+    id: 'italic',
+    path: 'stripMarkupSettings.italic',
+    description: EXAMPLE_WITH_ALTERNATIVE,
+  },
+  {
+    id: 'strikethrough',
+    path: 'stripMarkupSettings.strikethrough',
+    description: SINGLE_EXAMPLE,
+  },
+  {
+    id: 'highlight',
+    path: 'stripMarkupSettings.highlight',
+    description: SINGLE_EXAMPLE,
+  },
+  {
+    id: 'wikilinks',
+    path: 'stripMarkupSettings.wikilinks',
+    description: EXAMPLE_WITH_ALTERNATIVE,
+  },
+  {
+    id: 'markdownLinks',
+    path: 'stripMarkupSettings.markdownLinks',
+    description: SINGLE_EXAMPLE,
+  },
+  {
+    id: 'quote',
+    path: 'stripMarkupSettings.quote',
+    description: SINGLE_EXAMPLE,
+  },
+  {
+    id: 'callouts',
+    path: 'stripMarkupSettings.callouts',
+    description: SINGLE_EXAMPLE,
+  },
+  {
+    id: 'unorderedLists',
+    path: 'stripMarkupSettings.unorderedLists',
+    description: EXAMPLE_WITH_ALTERNATIVE,
+  },
+  {
+    id: 'orderedLists',
+    path: 'stripMarkupSettings.orderedLists',
+    description: SINGLE_EXAMPLE,
+  },
+  {
+    id: 'taskLists',
+    path: 'stripMarkupSettings.taskLists',
+    description: SINGLE_EXAMPLE,
+  },
+  {
+    id: 'stripHorizontalRuleMarkup',
+    path: 'stripHorizontalRuleMarkup',
+    description: SENTENCE,
+  },
+  { id: 'code', path: 'stripMarkupSettings.code', description: SINGLE_EXAMPLE },
+  {
+    id: 'codeBlocks',
+    path: 'stripMarkupSettings.codeBlocks',
+    description: SENTENCE,
+    subToggle: {
+      id: 'detectDiagrams',
+      path: 'detectDiagrams',
+      description: { type: 'standIn', standInKey: 'diagram' },
+    },
+  },
+  {
+    id: 'footnotes',
+    path: 'stripMarkupSettings.footnotes',
+    description: EXAMPLE_WITH_ALTERNATIVE,
+  },
+  {
+    id: 'comments',
+    path: 'stripMarkupSettings.comments',
+    description: SINGLE_EXAMPLE,
+    subToggle: {
+      id: 'commentsEntirely',
+      path: 'stripCommentsEntirely',
+      description: SENTENCE,
+    },
+  },
+  {
+    id: 'stripTableMarkup',
+    path: 'stripTableMarkup',
+    description: { type: 'standIn', standInKey: 'table' },
+  },
+  {
+    id: 'stripInlineMathMarkup',
+    path: 'stripInlineMathMarkup',
+    description: SINGLE_EXAMPLE,
+  },
+  {
+    id: 'stripMathBlockMarkup',
+    path: 'stripMathBlockMarkup',
+    description: { type: 'standIn', standInKey: 'mathBlock' },
+  },
+  {
+    id: 'htmlTags',
+    path: 'stripMarkupSettings.htmlTags',
+    description: SINGLE_EXAMPLE,
+  },
 ];
 
-/**
- * Terms that some descriptions quote as a UI label instead of rendering as a
- * code sample. Only ever one per description, always in part 1.
- */
-const EMPHASISED_TERM_KEYS = ['table', 'mathBlock', 'diagram'];
-
-/**
- * Assembles a description from numbered locale fragments: `desc.part{N}` runs
- * of prose interleaved with `desc.example{N}` code samples, plus an optional
- * emphasised term after part 1. Falls back to the flat `desc` key when no
- * numbered parts exist.
- */
-function buildMultiPartDescription(descKey: string): DocumentFragment {
+/** Fills `template` with code samples: each `{{name}}` placeholder becomes `<code>` holding the sample `getSample(name)` returns. */
+function buildCodeSampleSentence(
+  template: string,
+  getSample: (name: string) => string
+): DocumentFragment {
   return createFragment((frag) => {
-    const part1Key = `${descKey}.part1`;
-    if (t(part1Key) === part1Key) {
-      frag.appendText(t(descKey));
-      return;
-    }
-
-    let index = 1;
-    for (;;) {
-      let foundAny = false;
-
-      const partKey = `${descKey}.part${index}`;
-      const partValue = t(partKey);
-      if (partValue !== partKey) {
-        frag.appendText(partValue);
-        foundAny = true;
+    // A capturing split alternates prose and placeholder names: even indexes are prose, odd ones names
+    template.split(/\{\{(\w+)\}\}/).forEach((part, index) => {
+      if (index % 2 === 1) {
+        frag.createEl('code', { text: getSample(part) });
+      } else if (part !== '') {
+        frag.appendText(part);
       }
-
-      const exampleKey = `${descKey}.example${index}`;
-      const exampleValue = t(exampleKey);
-      if (exampleValue !== exampleKey) {
-        frag.createEl('code', { text: exampleValue });
-        foundAny = true;
-      }
-
-      if (index === 1) {
-        for (const termKey of EMPHASISED_TERM_KEYS) {
-          const fullKey = `${descKey}.${termKey}`;
-          const termValue = t(fullKey);
-          if (termValue !== fullKey) {
-            frag.appendText(quoteLabel(termValue));
-            foundAny = true;
-            break;
-          }
-        }
-      }
-
-      if (!foundAny) break;
-      index++;
-    }
+    });
   });
+}
+
+function buildMarkupDescription(
+  toggle: MarkupToggle
+): string | DocumentFragment {
+  const namespace = `settings.markupStripping.${toggle.id}`;
+  const { description } = toggle;
+  switch (description.type) {
+    case 'sentence':
+      return t(`${namespace}.desc`);
+    case 'standIn':
+      // Read from the top-level stand-in title rather than a copy kept beside the description, so the two cannot drift apart
+      return t(`${namespace}.desc`, {
+        standIn: quoteLabel(t(description.standInKey)),
+      });
+    case 'example':
+      return buildCodeSampleSentence(
+        t(`settings.markupStripping.examples.${description.template}`),
+        (name) => t(`${namespace}.example.${name}`)
+      );
+  }
+}
+
+function buildToggleDefinition(
+  toggle: MarkupToggle,
+  visible?: () => boolean
+): SettingDefinitionItem<SettingPath> {
+  const definition: SettingDefinitionItem<SettingPath> = {
+    name: t(`settings.markupStripping.${toggle.id}.name`),
+    desc: buildMarkupDescription(toggle),
+    control: {
+      type: 'toggle',
+      key: `markupStripping.${toggle.path}`,
+    },
+  };
+  return visible ? { ...definition, visible } : definition;
 }
 
 /** Description for the Templater toggle — a link plus an inline code sample. */
@@ -111,47 +213,20 @@ function buildTemplaterDescription(): DocumentFragment {
 
 export function buildMarkupStrippingPage(
   plugin: FirstLineIsTitlePlugin
-): SettingDefinitionPage {
-  const items: SettingDefinitionItem[] = [];
+): SettingDefinitionPage<SettingPath> {
+  const items: SettingDefinitionItem<SettingPath>[] = [];
 
   for (const toggle of MARKUP_TOGGLES) {
-    items.push({
-      name: t(`settings.markupStripping.${toggle.id}.name`),
-      desc: buildMultiPartDescription(
-        `settings.markupStripping.${toggle.id}.desc`
-      ),
-      control: {
-        type: 'toggle',
-        key: `markupStripping.${toggle.path}`,
-      },
-    });
-
-    if (toggle.id === 'codeBlocks') {
-      items.push({
-        name: t('settings.markupStripping.detectDiagrams.name'),
-        desc: buildMultiPartDescription(
-          'settings.markupStripping.detectDiagrams.desc'
-        ),
-        visible: () =>
-          plugin.settings.markupStripping.stripMarkupSettings.codeBlocks,
-        control: {
-          type: 'toggle',
-          key: 'markupStripping.detectDiagrams',
-        },
-      });
-    }
-
-    if (toggle.id === 'comments') {
-      items.push({
-        name: t('settings.markupStripping.commentsEntirely.name'),
-        desc: t('settings.markupStripping.commentsEntirely.desc'),
-        visible: () =>
-          plugin.settings.markupStripping.stripMarkupSettings.comments,
-        control: {
-          type: 'toggle',
-          key: 'markupStripping.stripCommentsEntirely',
-        },
-      });
+    items.push(buildToggleDefinition(toggle));
+    if (toggle.subToggle) {
+      const parentPath = toggle.path;
+      items.push(
+        buildToggleDefinition(
+          toggle.subToggle,
+          () =>
+            getPath(plugin.settings, `markupStripping.${parentPath}`) === true
+        )
+      );
     }
   }
 

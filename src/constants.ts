@@ -1,4 +1,9 @@
 import { EXCLUSION_STRATEGY, PluginSettings } from './types';
+import {
+  PRIMARY_CHAR_KEYS,
+  SETTING_KEY_TO_CHAR,
+  WINDOWS_ANDROID_CHAR_KEYS,
+} from './types/char-replacement';
 
 /**
  * Schema version of the settings this build understands. Bump it whenever the stored
@@ -27,7 +32,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     // only keys absent from data.json pick up a changed default.
     insertTitle: true,
     convertReplacementChars: true,
-    formatAsHeading: false,
+    formatAsHeading: true,
     moveCursorToFirstLine: true,
     placeCursorAtLineEnd: true,
     newNoteDelay: 0,
@@ -46,15 +51,12 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     debugOutputFullContent: false,
     debugEnabledTimestamp: '',
     hasSetupExclusions: false,
-    hasEnabledForbiddenChars: false,
   },
   exclusions: {
     fileScopeStrategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
     tagScopeStrategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
     propertyScopeStrategy: EXCLUSION_STRATEGY.ONLY_EXCLUDE,
-    // Empty, not a seeded blank row: deepMerge replaces arrays wholesale, so a seeded
-    // entry would materialise a dead rule on every fresh install. The lists render
-    // their own empty state.
+    // Empty, not a seeded blank row: a stored list replaces the default wholesale, so a seeded entry would materialize a dead rule on every fresh install; the lists render their own empty state.
     excludedFiles: [],
     excludedTags: [],
     excludedProperties: [],
@@ -65,77 +67,76 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   },
   characterReplacements: {
     enableForbiddenCharReplacements: false,
-    osPreset: 'macOS',
     charReplacements: {
       slash: {
         replacement: ' ∕ ',
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: false,
       },
       colon: {
         replacement: '։',
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: false,
       },
       asterisk: {
         replacement: '∗',
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: false,
       },
       question: {
         replacement: '？',
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: true,
       },
       lessThan: {
         replacement: '‹',
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: false,
       },
       greaterThan: {
         replacement: '›',
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: false,
       },
       quote: {
         replacement: "''",
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: false,
       },
       pipe: {
         replacement: '❘',
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: false,
       },
       hash: {
         replacement: '＃',
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: false,
       },
       leftBracket: {
         replacement: '［',
-        enabled: false,
+        enabled: true,
         trimLeft: true,
         trimRight: true,
       },
       rightBracket: {
         replacement: '］',
-        enabled: false,
+        enabled: true,
         trimLeft: true,
         trimRight: true,
       },
       caret: {
         replacement: 'ˆ',
-        enabled: false,
+        enabled: true,
         trimLeft: false,
         trimRight: false,
       },
@@ -200,15 +201,12 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   },
 };
 
-// OS-specific forbidden characters
-export const UNIVERSAL_FORBIDDEN_CHARS = [
-  '/',
-  ':',
-  '|',
-  String.fromCharCode(92),
-  '#',
-  '[',
-  ']',
-  '^',
-];
-export const WINDOWS_ANDROID_CHARS = ['*', '?', '<', '>', '"'];
+/** Characters no name may hold on any OS, derived from the settings keys so the two lists cannot drift; the dot is left out, since only a leading dot is forbidden. */
+export const UNIVERSAL_FORBIDDEN_CHARS = PRIMARY_CHAR_KEYS.filter(
+  (key) => key !== 'dot'
+).map((key) => SETTING_KEY_TO_CHAR[key]);
+
+/** Characters forbidden only on Windows and Android, derived from the settings keys. */
+export const WINDOWS_ANDROID_CHARS = WINDOWS_ANDROID_CHAR_KEYS.map(
+  (key) => SETTING_KEY_TO_CHAR[key]
+);

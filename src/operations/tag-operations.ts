@@ -1,69 +1,59 @@
 import { Notice } from 'obsidian';
 import { verboseLog } from '../utils';
-import { EXCLUSION_STRATEGY, PluginSettings } from '../types';
+import { PluginSettings } from '../types';
 import { t } from '../i18n';
+import {
+  excludedTagEntryKey,
+  hasExcludedTagEntry,
+  tagKey,
+} from '../utils/tag-utils';
+import { listedEntryDisablesRenaming } from '../utils/exclusion-strategy';
 
 export class TagOperations {
   constructor(
-    public settings: PluginSettings,
+    private getSettings: () => PluginSettings,
     private saveSettings: () => Promise<void>,
     private debugLog: (settingName: string, value: unknown) => void
   ) {}
 
+  /** Read live, because Clear settings and Import replace the plugin's settings object; public because `verboseLog(this, …)` takes `{ settings }`. */
+  get settings(): PluginSettings {
+    return this.getSettings();
+  }
+
   async toggleTagExclusion(tagName: string): Promise<void> {
     const tagToFind = tagName.startsWith('#') ? tagName : `#${tagName}`;
-    const isInList = this.settings.exclusions.excludedTags.includes(tagToFind);
-    const isInverted =
-      this.settings.exclusions.tagScopeStrategy ===
-      EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT;
+    const isInList = hasExcludedTagEntry(
+      this.settings.exclusions.excludedTags,
+      tagToFind
+    );
 
     if (isInList) {
+      // Every entry with the tag's key goes, so `project` and `#Project` cannot leave the tag listed; a pattern entry's key never equals a tag's, so patterns stay
+      const targetTagKey = tagKey(tagToFind);
       this.settings.exclusions.excludedTags =
         this.settings.exclusions.excludedTags.filter(
-          (tag) => tag !== tagToFind
+          (tag) => excludedTagEntryKey(tag) !== targetTagKey
         );
-      // Ensure there's always at least one entry (even if empty)
-      if (this.settings.exclusions.excludedTags.length === 0) {
-        this.settings.exclusions.excludedTags.push('');
-      }
-
-      if (isInverted) {
-        // In inverted mode, removing from list = disabling renaming
-        verboseLog(this, `Showing notice: Renaming disabled for ${tagToFind}`);
-        new Notice(
-          t('notifications.disabledRenamingFor', { filename: tagToFind })
-        );
-      } else {
-        // In normal mode, removing from list = enabling renaming
-        verboseLog(this, `Showing notice: Renaming enabled for ${tagToFind}`);
-        new Notice(
-          t('notifications.enabledRenamingFor', { filename: tagToFind })
-        );
-      }
     } else {
-      if (
-        this.settings.exclusions.excludedTags.length === 1 &&
-        this.settings.exclusions.excludedTags[0] === ''
-      ) {
-        this.settings.exclusions.excludedTags[0] = tagToFind;
-      } else {
-        this.settings.exclusions.excludedTags.push(tagToFind);
-      }
-
-      if (isInverted) {
-        // In inverted mode, adding to list = enabling renaming
-        verboseLog(this, `Showing notice: Renaming enabled for ${tagToFind}`);
-        new Notice(
-          t('notifications.enabledRenamingFor', { filename: tagToFind })
-        );
-      } else {
-        // In normal mode, adding to list = disabling renaming
-        verboseLog(this, `Showing notice: Renaming disabled for ${tagToFind}`);
-        new Notice(
-          t('notifications.disabledRenamingFor', { filename: tagToFind })
-        );
-      }
+      this.settings.exclusions.excludedTags.push(tagToFind);
     }
+
+    const isNowDisabled =
+      !isInList ===
+      listedEntryDisablesRenaming(this.settings.exclusions.tagScopeStrategy);
+    verboseLog(
+      this,
+      `Showing notice: Renaming ${isNowDisabled ? 'disabled' : 'enabled'} for ${tagToFind}`
+    );
+    new Notice(
+      t(
+        isNowDisabled
+          ? 'notifications.disabledRenamingForTag'
+          : 'notifications.enabledRenamingForTag',
+        { tag: tagToFind }
+      )
+    );
 
     this.debugLog('excludedTags', this.settings.exclusions.excludedTags);
     await this.saveSettings();

@@ -72,14 +72,19 @@ function createMockPlugin(settingsOverrides: DeepPartial<PluginSettings> = {}) {
     },
     settings: createTestSettings(settingsOverrides),
   };
-  // The real manager, not a stub: the folder and tag predicates delegate the
-  // strategy-dependent half of their decision to it.
-  plugin.contextMenuManager = new ContextMenuManager(plugin);
   return plugin;
 }
 
+/** The plugin's menu definitions, with the real manager's visibility checks rather than a stub: the folder and tag predicates delegate the strategy-dependent half of their decision to them. */
+function definitionsFor(plugin: any): MenuDefinitions {
+  return new MenuDefinitions(plugin, new ContextMenuManager(plugin));
+}
+
 /** The icons of the items this config renders for this context, in menu order. */
-function renderedIcons(config: MenuConfig, context: unknown): string[] {
+function renderedIcons<TContext>(
+  config: MenuConfig<TContext>,
+  context: TContext
+): string[] {
   const menu = new Menu();
   new MenuRenderer().render(menu as unknown as ObsidianMenu, config, context);
   return captureMenuItems(menu.addItem).map((item) => item.icon);
@@ -90,7 +95,7 @@ describe('MenuDefinitions', () => {
     const file = new TFile('Notes/note.md');
 
     function iconsFor(plugin: any): string[] {
-      return renderedIcons(new MenuDefinitions(plugin).getFileMenuConfig(), {
+      return renderedIcons(definitionsFor(plugin).getFileMenuConfig(), {
         file,
       });
     }
@@ -184,11 +189,37 @@ describe('MenuDefinitions', () => {
     );
   });
 
+  describe('file menu disable and enable', () => {
+    it.each([
+      [DISABLE_RENAMING, true],
+      [ENABLE_RENAMING, false],
+    ])(
+      'hands the note to the shared toggle from the %s item',
+      async (icon, disabled) => {
+        const plugin = createMockPlugin();
+        plugin.setRenamingDisabledForNote = vi
+          .fn()
+          .mockResolvedValue(undefined);
+        const file = new TFile('Notes/note.md');
+
+        const item = definitionsFor(plugin)
+          .getFileMenuConfig()
+          .items.find((candidate) => candidate.icon === icon);
+        await item?.onClick({ file });
+
+        expect(plugin.setRenamingDisabledForNote).toHaveBeenCalledWith(
+          file,
+          disabled
+        );
+      }
+    );
+  });
+
   describe('getFolderMenuConfig', () => {
     const folder = new TFolder('Notes');
 
     function iconsFor(plugin: any): string[] {
-      return renderedIcons(new MenuDefinitions(plugin).getFolderMenuConfig(), {
+      return renderedIcons(definitionsFor(plugin).getFolderMenuConfig(), {
         folder,
       });
     }
@@ -246,7 +277,7 @@ describe('MenuDefinitions', () => {
         });
 
         const icons = renderedIcons(
-          new MenuDefinitions(plugin).getFolderMenuConfig(),
+          definitionsFor(plugin).getFolderMenuConfig(),
           { folder: new TFolder('/') }
         );
 
@@ -263,7 +294,9 @@ describe('MenuDefinitions', () => {
       const plugin = createMockPlugin({
         exclusions: { fileScopeStrategy: strategy, excludedFiles },
       });
-      return plugin.contextMenuManager.shouldShowDisableMenuForFolder('Notes');
+      return new ContextMenuManager(plugin).shouldShowDisableMenuForFolder(
+        'Notes'
+      );
     }
 
     it("matches the folder's own entry regardless of case", () => {
@@ -285,7 +318,7 @@ describe('MenuDefinitions', () => {
     const tagName = 'project';
 
     function iconsFor(plugin: any): string[] {
-      return renderedIcons(new MenuDefinitions(plugin).getTagMenuConfig(), {
+      return renderedIcons(definitionsFor(plugin).getTagMenuConfig(), {
         tagName,
       });
     }

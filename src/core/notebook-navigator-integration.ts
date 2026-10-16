@@ -58,7 +58,11 @@ export class NotebookNavigatorIntegration {
 
   constructor(private plugin: FirstLineIsTitle) {
     this.menuRenderer = new MenuRenderer();
-    this.menuDefinitions = new MenuDefinitions(plugin);
+    // The same Disable/Enable checks as Obsidian's own menus; `onload` builds the context menu manager first
+    this.menuDefinitions = new MenuDefinitions(
+      plugin,
+      plugin.contextMenuManager
+    );
   }
 
   register(): void {
@@ -170,12 +174,7 @@ export class NotebookNavigatorIntegration {
     this.disposers = [];
   }
 
-  /**
-   * NN hands back tag ids lowercased and stripped of '#' (its own normalization).
-   * Flit's exclusion logic (shouldShowDisableMenuForTag, toggleTagExclusion,
-   * rename-time matching) is case-sensitive, so resolve back to the vault's
-   * actual tag casing to avoid inert case-mismatched exclusion entries.
-   */
+  /** NN hands back tag ids lowercased and stripped of '#' (its own normalization); exclusion matching ignores case, so this only keeps the entry a menu toggle writes, and its notice, in the vault's own casing. */
   private resolveCanonicalTag(nnTag: string): string {
     const bare = nnTag.replace(/^#/, '').toLowerCase();
     const allTags = Object.keys(this.plugin.app.metadataCache.getTags());

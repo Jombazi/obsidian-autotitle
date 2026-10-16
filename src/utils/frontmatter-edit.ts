@@ -25,7 +25,7 @@ export interface SourceEditorTarget {
  * Apply a properties change to a note's text the way `FileManager.processFrontMatter` does.
  * @param text - Full note text
  * @param mutate - Changes the parsed properties in place
- * @returns The note text with the changed properties block
+ * @returns The note text with the changed properties block, or `text` itself when `mutate` changed nothing
  * @throws The YAML parse error when the properties block is malformed, as `processFrontMatter` does
  */
 export function applyFrontMatterChange(
@@ -38,7 +38,12 @@ export function applyFrontMatterChange(
   const frontmatter = (
     parsed && typeof parsed === 'object' ? parsed : {}
   ) as Record<string, unknown>;
+  const before = JSON.stringify(frontmatter);
   mutate(frontmatter);
+  // Re-serializing an unchanged block drops its comments and reformats its values.
+  if (JSON.stringify(frontmatter) === before) {
+    return text;
+  }
   if (Object.keys(frontmatter).length === 0) {
     return info.exists ? text.slice(info.contentStart) : text;
   }

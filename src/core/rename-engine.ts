@@ -4,20 +4,37 @@ import {
   Notice,
   MarkdownView,
   MarkdownFileInfo,
-  getFrontMatterInfo,
+  CachedMetadata,
 } from 'obsidian';
-import { TitleRegionCache, RenameOutcome, RenameOutcomeReason } from '../types';
-import { TIMING, LIMITS } from '../constants/timing';
 import {
-  verboseLog,
-  shouldProcessFile,
-  canModifyFile,
-  extractTitle,
-  isValidHeading,
-  findTitleSourceLine,
-  processForbiddenChars,
+  TitleRegionCache,
+  RenameOutcome,
+  RenameOutcomeReason,
+  PluginSettings,
+  ExclusionList,
+  ExclusionOverrides,
+  ProcessFileOptions,
+} from '../types';
+import { TIMING, LIMITS } from '../constants/timing';
+import { verboseLog, verboseLogger } from '../utils';
+import { escapeRegExp, findExcludingList } from '../utils/file-exclusions';
+import { canModifyFile } from '../utils/disable-property';
+import {
+  findMarkdownViewOfEditor,
+  isFileOpenInAnyEditor,
   isOnlyFrontmatterChanged,
-} from '../utils';
+} from '../utils/editor-checks';
+import {
+  extractTitle,
+  applyTitleCase,
+  isValidHeading,
+} from '../utils/title-extraction';
+import { processForbiddenChars } from '../utils/string-processing';
+import {
+  TitleSource,
+  findTitleSource,
+  lineSourceFromText,
+} from '../utils/title-source';
 import { t } from '../i18n';
 import { RateLimiter } from './rate-limiter';
 import { readFileContent } from '../utils/content-reader';
@@ -26,8 +43,211 @@ import {
   findSourceEditorForFile,
 } from '../utils/frontmatter-edit';
 import { hasFirstLinePropertyName } from '../utils/first-line-property-keys';
+import { applyCustomReplacementRules } from '../utils/custom-replacement-rules';
+import { markdownLinkDestinations } from '../utils/inline-markup';
 
 import FirstLineIsTitle from '../../main';
+
+/** Device names Windows refuses as file names; refused on every platform, as the Windows forbidden characters are */
+const WINDOWS_RESERVED_NAMES: ReadonlySet<string> = new Set([
+  'CON',
+  'PRN',
+  'AUX',
+  'NUL',
+  'COM1',
+  'COM2',
+  'COM3',
+  'COM4',
+  'COM5',
+  'COM6',
+  'COM7',
+  'COM8',
+  'COM9',
+  'COM0',
+  'LPT1',
+  'LPT2',
+  'LPT3',
+  'LPT4',
+  'LPT5',
+  'LPT6',
+  'LPT7',
+  'LPT8',
+  'LPT9',
+  'LPT0',
+]);
+
+/** The notice a manual command shows when an exclusion list refuses the note */
+const EXCLUSION_NOTICE_KEYS: Readonly<Record<ExclusionList, string>> = {
+  files: 'notifications.notRenamedExcludedPath',
+  tags: 'notifications.notRenamedExcludedTag',
+  properties: 'notifications.notRenamedExcludedProperty',
+};
+
+/** How a link in the title source was recognized as pointing at the note itself, named in the debug log */
+type SelfReferenceKind =
+  'wikilink' | 'Markdown link fragment' | 'Markdown link' | 'cached link';
+
+/**
+ * Turn the title source into the note's title: custom replacements, markup stripping and forbidden-character handling, in the order the settings give.
+ * @param titleSource - Where the title comes from
+ * @param plugin - Holder of the settings, which also switch the debug log
+ * @returns The title, before any counter a name conflict adds
+ */
+function buildTitleFromSource(
+  titleSource: TitleSource,
+  plugin: { settings: PluginSettings }
+): string {
+  const { settings } = plugin;
+  // Code and a callout's default title are shown as typed: only title case applies to them, not markup stripping
+  const stripMarkup = (title: string): string =>
+    titleSource.raw
+      ? applyTitleCase(title, settings)
+      : extractTitle(title, settings);
+
+  let title = titleSource.text;
+  if (settings.customReplacements.applyAfterForbiddenChars) {
+    title = stripMarkup(title);
+    title = sanitizeTitleForFileName(title, plugin);
+    title = applyCustomReplacements(title, plugin);
+    // A rule's replacement text can reintroduce path separators and blow past the char limit, so re-sanitize
+    return sanitizeTitleForFileName(title, plugin);
+  }
+  if (settings.markupStripping.applyCustomReplacementsAfterMarkupStripping) {
+    title = stripMarkup(title);
+    title = applyCustomReplacements(title, plugin);
+  } else {
+    title = applyCustomReplacements(title, plugin);
+    title = stripMarkup(title);
+  }
+  return sanitizeTitleForFileName(title, plugin);
+}
+
+/**
+ * Apply the custom replacement rules, falling back to Untitled when they leave only whitespace.
+ * @param title - Title to apply the rules to
+ * @param plugin - Holder of the settings, which also switch the debug log
+ * @returns The replaced title
+ */
+function applyCustomReplacements(
+  title: string,
+  plugin: { settings: PluginSettings }
+): string {
+  const replaced = applyCustomReplacementRules(
+    title,
+    plugin.settings.customReplacements.rules
+  );
+  verboseLog(plugin, `Applied custom replacements:`, {
+    from: title,
+    to: replaced,
+  });
+  return replaced.trim() === '' ? t('untitled') : replaced;
+}
+
+/**
+ * Replace forbidden characters and truncate to the character limit, falling back to Untitled when the result is empty or a Windows reserved name.
+ * @param title - Title to make usable as a file name
+ * @param plugin - Holder of the settings, which also switch the debug log
+ * @returns The sanitized title
+ */
+function sanitizeTitleForFileName(
+  title: string,
+  plugin: { settings: PluginSettings }
+): string {
+  const sanitized = processForbiddenChars(title, plugin.settings, {
+    maxLength: plugin.settings.core.charCount,
+  });
+  if (
+    sanitized !== '' &&
+    !WINDOWS_RESERVED_NAMES.has(sanitized.toUpperCase())
+  ) {
+    return sanitized;
+  }
+  verboseLog(
+    plugin,
+    `Using fallback name \`${t('untitled')}\` for sanitized title \`${sanitized}\``
+  );
+  return t('untitled');
+}
+
+/**
+ * Find a link in the title source's text that points at the note itself.
+ * @param text - The title source's text
+ * @param file - Note being renamed
+ * @returns How the link was recognized, or null when the text holds none
+ */
+function findSelfReferenceInText(
+  text: string,
+  file: TFile
+): SelfReferenceKind | null {
+  const currentName = file.basename;
+  const escapedName = escapeRegExp(currentName);
+  const pathWithoutExt = file.path.replace(/\.md$/, '');
+  const escapedPath = escapeRegExp(pathWithoutExt);
+
+  // Match [[filename]], [[filename#heading]], [[filename#^block]], [[path/filename#heading]], with optional |alias, by basename or by path, since some users link with the path
+  const wikiLinkRegex = new RegExp(
+    `\\[\\[(${escapedName}|${escapedPath})(#[^\\]|]*?)?(\\|.*?)?\\]\\]`
+  );
+  if (wikiLinkRegex.test(text)) {
+    return 'wikilink';
+  }
+
+  // Markdown links by their destination as Reading view resolves it, so one holding parentheses or angle brackets counts and one inside code or a comment does not
+  for (const url of markdownLinkDestinations(text)) {
+    let decodedUrl = url;
+    try {
+      decodedUrl = decodeURIComponent(url);
+    } catch {
+      // Invalid encoding, use original
+    }
+
+    if (url.startsWith('#') && url.includes(currentName)) {
+      return 'Markdown link fragment';
+    }
+
+    // A relative path, with or without the .md extension, by basename or by path
+    const urlWithoutFragment = decodedUrl.split('#')[0];
+    if (
+      urlWithoutFragment &&
+      (urlWithoutFragment === `${currentName}.md` ||
+        urlWithoutFragment === currentName ||
+        urlWithoutFragment === `${pathWithoutExt}.md` ||
+        urlWithoutFragment === pathWithoutExt)
+    ) {
+      return 'Markdown link';
+    }
+  }
+  return null;
+}
+
+/**
+ * True when Obsidian's cached links hold a link to the note itself on the title source's line; the cache keeps a link's last parsed form, so it catches a mid-edit link the text patterns miss.
+ * @param cache - The note's cached metadata
+ * @param file - Note being renamed
+ * @param titleLine - The title source's absolute line, which link positions count in too; -1 (part of a line, or a synthetic title) skips the check
+ */
+function cachedLinkOnLinePointsAtNote(
+  cache: CachedMetadata | null,
+  file: TFile,
+  titleLine: number
+): boolean {
+  if (!cache?.links || titleLine < 0) {
+    return false;
+  }
+  const pathWithoutExt = file.path.replace(/\.md$/, '');
+  return cache.links.some((link) => {
+    if (link.position.start.line !== titleLine) {
+      return false;
+    }
+    const linkTarget = link.link.replace(/\.md$/, '');
+    return (
+      linkTarget === file.basename ||
+      linkTarget === pathWithoutExt ||
+      link.link === file.path ||
+      link.link === pathWithoutExt
+    );
+  });
+}
 
 export class RenameEngine {
   private plugin: FirstLineIsTitle;
@@ -38,14 +258,18 @@ export class RenameEngine {
   constructor(plugin: FirstLineIsTitle) {
     this.plugin = plugin;
 
+    const isDebugEnabled = (): boolean => this.plugin.settings.core.debug;
+
     this.perFileRateLimiter = new RateLimiter({
       windowMs: 500,
       maxOperations: 15,
+      isDebugEnabled,
     });
 
     this.globalRateLimiter = new RateLimiter({
       windowMs: 500,
       maxOperations: 30,
+      isDebugEnabled,
     });
   }
 
@@ -59,17 +283,17 @@ export class RenameEngine {
 
   /**
    * Update the first line property for a file with coordination to prevent concurrent updates.
-   * Used by manual commands to ensure the first line property stays in sync with filename.
+   * Runs for the outcomes `processFile`'s gate lets through — `renamed`, `no-rename-needed`, `empty-content-retained` — with the caller's exclusion overrides, so a manual rename that ignores exclusions writes the property too.
    * Coordinates with event-handler-manager's pendingFirstLinePropertyUpdates to prevent double-processing.
    *
    * @param file - The file to update the first line property for
-   * @param isManualCommand - Whether this is a manual command (determines if we should update)
+   * @param exclusionOverrides - Exclusion rules the caller ignored for the rename
    * @param editor - Editor the rename was read from, which the first line property is written into
    * @returns true if the first line property was updated, false if skipped
    */
   private async updateFirstLinePropertyWithCoordination(
     file: TFile,
-    _isManualCommand: boolean,
+    exclusionOverrides?: ExclusionOverrides,
     editor?: Editor
   ): Promise<boolean> {
     // Update the first line property when a property name is set (for both manual and automatic modes)
@@ -79,7 +303,7 @@ export class RenameEngine {
 
     // Check if event handler already has an update in progress
     if (
-      this.plugin.eventHandlerManager?.isFirstLinePropertyUpdatePending(
+      this.plugin.eventHandlerManager.isFirstLinePropertyUpdatePending(
         file.path
       )
     ) {
@@ -91,7 +315,7 @@ export class RenameEngine {
     }
 
     // Mark as in-progress to prevent event handlers from double-processing
-    this.plugin.eventHandlerManager?.markFirstLinePropertyUpdatePending(
+    this.plugin.eventHandlerManager.markFirstLinePropertyUpdatePending(
       file.path
     );
 
@@ -100,19 +324,19 @@ export class RenameEngine {
 
       verboseLog(
         this.plugin,
-        `// EDITOR_PASS (manual): Passing target=${target ? 'editor' : 'file'} to updateFirstLinePropertyIfNeeded`
+        `EDITOR_PASS (rename): Passing target=${target ? 'editor' : 'file'} to updateFirstLinePropertyIfNeeded`
       );
 
       const firstLinePropertyResult =
         await this.plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded(
           file,
           undefined,
-          undefined,
-          target
+          target,
+          exclusionOverrides
         );
       return firstLinePropertyResult;
     } finally {
-      this.plugin.eventHandlerManager?.clearFirstLinePropertyUpdatePending(
+      this.plugin.eventHandlerManager.clearFirstLinePropertyUpdatePending(
         file.path
       );
     }
@@ -133,14 +357,8 @@ export class RenameEngine {
       return found ?? null;
     }
     // Manual commands pass `workspace.activeEditor.editor`, which a Reading view also has, and an edit through it never reaches the file.
-    const ownedByReadingView = this.plugin.app.workspace
-      .getLeavesOfType('markdown')
-      .some(
-        (leaf) =>
-          leaf.view instanceof MarkdownView &&
-          leaf.view.editor === editor &&
-          leaf.view.getMode() !== 'source'
-      );
+    const owner = findMarkdownViewOfEditor(this.plugin.app, editor);
+    const ownedByReadingView = !!owner && owner.getMode() !== 'source';
     return ownedByReadingView
       ? (found ?? null)
       : { editor, isDirty: () => false };
@@ -152,7 +370,7 @@ export class RenameEngine {
    * @param file - Note that was edited
    * @param owner - The `editor-change` event's `info`; the editor is read only while it still shows the note
    */
-  async processEditorChangeOptimal(
+  async processEditorChange(
     editor: Editor,
     file: TFile,
     owner?: MarkdownView | MarkdownFileInfo
@@ -160,61 +378,40 @@ export class RenameEngine {
     const startTime = Date.now();
 
     try {
-      // Second line of defence behind the same check in handleEditorChangeWithThrottle: a
-      // throttle timer scheduled just before the plugin started writing can still land mid
-      // write, and this entry point performs a real vault.read() for a file with no tracked
-      // previous content. Placed above the lock check because that one only reaches this
-      // guard while a file operation happens to hold the lock.
+      // Second line of defence behind the same check in handleEditorChangeWithThrottle: a throttle timer scheduled just before the plugin started writing can still land mid write, and this entry point performs a real vault.read() for a file with no tracked previous content. Placed above the lock check so the plugin's own writes into a background editor never mark a spurious pending recheck there either.
       if (this.plugin.fileStateManager.isEditorSyncing(file.path)) {
-        if (this.plugin.settings.core.debug) {
-          console.debug(
-            `Editor change ignored - plugin is writing to this editor: ${file.path}`
-          );
-        }
+        verboseLog(
+          this.plugin,
+          `Editor change ignored - plugin is writing to this editor: ${file.path}`
+        );
         return;
       }
 
-      if (this.plugin.cacheManager?.isLocked(file.path)) {
-        if (this.plugin.settings.core.debug) {
-          console.debug(
-            `Editor change ignored - file operation in progress: ${file.path}`
-          );
-        }
-        // Only mark for recheck if not from our own background editor sync
-        // This prevents setValue() on background editors from scheduling spurious rechecks
-        if (!this.plugin.fileStateManager.isEditorSyncing(file.path)) {
-          this.plugin.cacheManager?.markPendingFirstLinePropertyRecheck(
-            file.path
-          );
-        } else if (this.plugin.settings.core.debug) {
-          console.debug(
-            `Skipping recheck - editor-change from background editor sync: ${file.path}`
-          );
-        }
+      if (this.plugin.fileStateManager.isLocked(file.path)) {
+        verboseLog(
+          this.plugin,
+          `Editor change ignored - file operation in progress: ${file.path}`
+        );
+        this.plugin.fileStateManager.markPendingFirstLinePropertyRecheck(
+          file.path
+        );
         return;
       }
 
       // A throttled change can outlive its editor: a deselected Canvas card's or closed page preview's destroyed view reads as empty and would rename the note "Untitled", and a tab switched to another note keeps the same editor holding that note's text. The file holds the card's flushed save or the tab's save on switch instead. Without an owner (the pending recheck, which re-resolves its editor just before calling), only teardown is detectable.
+      // A tab switched to Reading view keeps a hidden, still-connected editor at the text it loaded, while properties edited there and outside changes reach only the view (measured, Obsidian 1.14.4).
       const editorStillShowsNote = owner
         ? owner.file === file &&
           owner.editor === editor &&
-          editor.cm?.dom.isConnected !== false
+          editor.cm?.dom.isConnected !== false &&
+          !(owner instanceof MarkdownView && owner.getMode() !== 'source')
         : !(editor.cm && !editor.cm.dom.isConnected);
       if (!editorStillShowsNote) {
-        if (this.plugin.settings.core.debug) {
-          console.debug(
-            `Editor change read from file - editor no longer shows the note: ${file.path}`
-          );
-        }
-        await this.processFile(
-          file,
-          true,
-          false,
-          undefined,
-          false,
-          undefined,
-          true
+        verboseLog(
+          this.plugin,
+          `Editor change read from file - editor no longer shows the note: ${file.path}`
         );
+        await this.processFile(file, { hasActiveEditor: true });
         return;
       }
 
@@ -227,9 +424,10 @@ export class RenameEngine {
       );
       if (previousContent) {
         if (isOnlyFrontmatterChanged(currentContent, previousContent)) {
-          if (this.plugin.settings.core.debug) {
-            console.debug(`Skipping - only frontmatter edited: ${file.path}`);
-          }
+          verboseLog(
+            this.plugin,
+            `Skipping - only frontmatter edited: ${file.path}`
+          );
           this.plugin.fileStateManager.setLastEditorContent(
             file.path,
             currentContent
@@ -242,15 +440,13 @@ export class RenameEngine {
 
         if (isOnlyFrontmatterChanged(currentContent, diskContent)) {
           // No body edits (or YAML-only edit) - skip processing
-          if (this.plugin.settings.core.debug) {
-            console.debug(
-              `Skipping - no body edits detected on first open: ${file.path}`
-            );
-          }
+          verboseLog(
+            this.plugin,
+            `Skipping - no body edits detected on first open: ${file.path}`
+          );
           // Initialize tracking for next edit
           const currentTitleRegion = this.extractTitleRegion(
             editor,
-            file,
             currentContent
           );
           this.plugin.fileStateManager.setLastEditorContent(
@@ -265,15 +461,12 @@ export class RenameEngine {
         }
 
         // Body content differs from disk - user edited body, proceed with processing
-        if (this.plugin.settings.core.debug) {
-          console.debug(`Body edited, will process: ${file.path}`);
-        }
+        verboseLog(this.plugin, `Body edited, will process: ${file.path}`);
       }
 
       // Extract title region and check cache
       const currentTitleRegion = this.extractTitleRegion(
         editor,
-        file,
         currentContent
       );
       const cachedTitleRegion =
@@ -283,21 +476,18 @@ export class RenameEngine {
         cachedTitleRegion &&
         currentTitleRegion.firstNonEmptyLine ===
           cachedTitleRegion.firstNonEmptyLine &&
-        currentTitleRegion.titleSourceLine === cachedTitleRegion.titleSourceLine
+        currentTitleRegion.titleSourceLine ===
+          cachedTitleRegion.titleSourceLine &&
+        currentTitleRegion.raw === cachedTitleRegion.raw
       ) {
-        if (this.plugin.settings.core.debug) {
-          console.debug(
-            `Title region unchanged - skipping processing: ${file.path}`
-          );
-        }
-
-        // Still process the first line property if its settings changed (edge case)
-        // For now, skip all processing when title region unchanged
+        verboseLog(
+          this.plugin,
+          `Title region unchanged - skipping processing: ${file.path}`
+        );
         return;
       }
 
-      // Update lastEditorContent only when we're about to process
-      // (prevents first line property/metadata handlers from incorrectly skipping)
+      // Recorded only on the way to processing, so the content a skipped edit left is never taken for the last processed one
       this.plugin.fileStateManager.setLastEditorContent(
         file.path,
         currentContent
@@ -306,74 +496,50 @@ export class RenameEngine {
         file.path,
         currentTitleRegion
       );
-      if (this.plugin.settings.core.debug) {
-        console.debug(`Title region changed - processing: ${file.path}`, {
+      verboseLog(
+        this.plugin,
+        `Title region changed - processing: ${file.path}`,
+        {
           previous: cachedTitleRegion,
           current: currentTitleRegion,
-        });
-      }
+        }
+      );
 
-      const metadata = this.plugin.app.metadataCache.getFileCache(file);
-      const timeSinceStart = Date.now() - startTime;
-      if (this.plugin.settings.core.debug) {
-        console.debug(
-          `[TIMING] Content changed in ${timeSinceStart}ms: ${file.path}`
-        );
-      }
+      verboseLog(
+        this.plugin,
+        `[TIMING] Content changed in ${Date.now() - startTime}ms: ${file.path}`
+      );
       // Editor content rather than the cache, which lags the editor by up to Obsidian's autosave delay
       const providedContent = currentContent;
-      await this.processFileImmediate(file, providedContent, metadata, editor);
+      await this.processFileImmediate(file, providedContent, editor);
     } catch (error) {
       console.error(
-        `Error in optimal editor-change processing for ${file.path}:`,
+        `Error in editor-change processing for ${file.path}:`,
         error
       );
     }
   }
 
   /**
-   * Extract title region (first non-empty line and title source line) from editor content
-   * Returns TitleRegionCache with extracted strings
+   * Extract title region (first non-empty line, title source text and whether it is shown as typed) from editor content
    */
   extractTitleRegion(
     editor: Editor,
-    file: TFile,
     providedContent?: string
   ): TitleRegionCache {
     const content = providedContent || editor.getValue();
 
-    // Frontmatter boundary from the content itself: the cached frontmatterPosition lags the editor by up to Obsidian's autosave delay.
-    const contentLines = content
-      .slice(getFrontMatterInfo(content).contentStart)
-      .split('\n');
-
-    // Find first non-empty line
-    let firstNonEmptyLine = '';
-    for (const line of contentLines) {
-      if (line.trim() !== '') {
-        firstNonEmptyLine = line;
-        break;
-      }
-    }
-
-    if (firstNonEmptyLine === '') {
-      return {
-        firstNonEmptyLine: '',
-        titleSourceLine: '',
-        lastUpdated: Date.now(),
-      };
-    }
-
-    // Use shared utility function to find title source line
-    const titleSourceLine = findTitleSourceLine(
-      contentLines,
+    // Properties boundary from the content itself: the cached frontmatterPosition lags the editor by up to Obsidian's autosave delay.
+    const titleSource = findTitleSource(
+      lineSourceFromText(content),
       this.plugin.settings,
-      this.plugin
+      verboseLogger(this.plugin)
     );
 
     return {
-      firstNonEmptyLine,
-      titleSourceLine,
+      firstNonEmptyLine: titleSource?.firstNonEmptyLine ?? '',
+      titleSourceLine: titleSource?.text ?? '',
+      raw: titleSource?.raw ?? false,
       lastUpdated: Date.now(),
     };
   }
@@ -381,15 +547,9 @@ export class RenameEngine {
   async processFileImmediate(
     file: TFile,
     content?: string,
-    metadata?: unknown,
     editor?: Editor
   ): Promise<void> {
-    if (file.extension !== 'md') {
-      return;
-    }
-
-    // Note: shouldProcessFile is checked inside processFile where exclusionOverrides can be applied
-    // No need to check here - processFile handles all exclusion logic
+    // No exclusion check here: processFile applies it, with the caller's overrides
 
     verboseLog(
       this.plugin,
@@ -397,63 +557,29 @@ export class RenameEngine {
     );
 
     try {
-      // hasActiveEditor=true because this is called from editor-change event
-      await this.processFile(
-        file,
-        true,
-        false,
-        content,
-        false,
-        undefined,
-        true,
-        editor
-      );
+      // hasActiveEditor because this is called from the editor-change event
+      await this.processFile(file, {
+        providedContent: content,
+        hasActiveEditor: true,
+        editor,
+      });
     } catch (error) {
       console.error(`Error in immediate process for ${file.path}:`, error);
     }
   }
 
-  stripFrontmatterFromContent(
-    content: string | undefined,
-    file: TFile
-  ): string {
-    if (!content) return '';
-    const lines = content.split('\n');
-
-    if (lines.length > 0 && lines[0].trim() === '---') {
-      for (let i = 1; i < lines.length; i++) {
-        if (lines[i].trim() === '---') {
-          const strippedContent = lines.slice(i + 1).join('\n');
-          verboseLog(
-            this.plugin,
-            `Stripped frontmatter from ${file.path} (lines 0-${i} removed)`
-          );
-          return strippedContent;
-        }
-      }
-    }
-
-    return content;
-  }
-
+  /**
+   * Run one rename pass for a note: gate it, rename it to its first line, and update its first line property.
+   * @param file - Note to process
+   * @param options - How the pass was started, and what the caller already holds
+   */
   async processFile(
     file: TFile,
-    noDelay = false,
-    showNotices = false,
-    providedContent?: string,
-    isBatchOperation = false,
-    exclusionOverrides?: {
-      ignoreFiles?: boolean;
-      ignoreTag?: boolean;
-      ignoreProperty?: boolean;
-    },
-    hasActiveEditor?: boolean,
-    editor?: Editor
+    options: ProcessFileOptions = {}
   ): Promise<RenameOutcome> {
-    verboseLog(this.plugin, `Processing file: ${file.path}`, { noDelay });
+    verboseLog(this.plugin, `Processing file: ${file.path}`);
 
-    // Race condition check: File could be deleted between event trigger and processing
-    // This check catches that edge case and exits early with appropriate reason
+    // The note can be deleted between the event and this pass
     const currentFile = this.plugin.app.vault.getAbstractFileByPath(file.path);
     if (!currentFile || !(currentFile instanceof TFile)) {
       verboseLog(
@@ -473,9 +599,8 @@ export class RenameEngine {
     // Capture original path before acquiring lock (path may change during rename)
     const originalPath = file.path;
 
-    // Atomic lock acquisition: acquireLock() returns true if lock acquired, false if already locked
-    // This prevents race condition between separate check and acquire operations
-    if (!this.plugin.cacheManager?.acquireLock(originalPath)) {
+    // One call both tests and takes the lock, so no second pass can slip in between a check and an acquire
+    if (!this.plugin.fileStateManager.acquireLock(originalPath)) {
       verboseLog(
         this.plugin,
         `Skipping - file operation already in progress: ${originalPath}`
@@ -487,24 +612,14 @@ export class RenameEngine {
     const pathsToUnlock = new Set<string>([originalPath]);
 
     try {
-      const result = await this.processFileInternal(
-        file,
-        noDelay,
-        showNotices,
-        providedContent,
-        isBatchOperation,
-        exclusionOverrides,
-        hasActiveEditor,
-        editor
-      );
+      const result = await this.processFileInternal(file, options);
 
       // If file path changed during processing, track new path for cleanup
       if (file.path !== originalPath) {
         pathsToUnlock.add(file.path);
       }
 
-      // Handle the first line property in ONE place - after processFileInternal completes
-      // This consolidates first line property logic instead of scattering it across multiple code paths
+      // The one place a rename pass updates the first line property, for every outcome that leaves the note's title source standing
       const firstLinePropertyHandlingReasons: readonly RenameOutcomeReason[] = [
         'renamed',
         'no-rename-needed',
@@ -516,8 +631,8 @@ export class RenameEngine {
       ) {
         await this.updateFirstLinePropertyWithCoordination(
           file,
-          showNotices,
-          editor
+          options.exclusionOverrides,
+          options.editor
         );
       }
 
@@ -525,16 +640,16 @@ export class RenameEngine {
     } finally {
       // Release all tracked locks (handles both successful renames and external renames during processing)
       for (const path of pathsToUnlock) {
-        this.plugin.cacheManager?.releaseLock(path);
+        this.plugin.fileStateManager.releaseLock(path);
       }
 
       // Check if content changed during processing (rapid edits during rename/first line property operations)
       const newPath = file.path;
       if (
-        this.plugin.cacheManager?.hasPendingFirstLinePropertyRecheck(
+        this.plugin.fileStateManager.hasPendingFirstLinePropertyRecheck(
           originalPath
         ) ||
-        this.plugin.cacheManager?.hasPendingFirstLinePropertyRecheck(newPath)
+        this.plugin.fileStateManager.hasPendingFirstLinePropertyRecheck(newPath)
       ) {
         verboseLog(
           this.plugin,
@@ -546,11 +661,11 @@ export class RenameEngine {
           this.plugin.fileStateManager.hasThrottleTimer(newPath)
         ) {
           // A scheduled timer processes the latest text itself, and an immediate recheck would rename once more outside a linked note's delay.
-          this.plugin.cacheManager?.clearPendingFirstLinePropertyRecheck(
+          this.plugin.fileStateManager.clearPendingFirstLinePropertyRecheck(
             originalPath
           );
           if (newPath !== originalPath) {
-            this.plugin.cacheManager?.clearPendingFirstLinePropertyRecheck(
+            this.plugin.fileStateManager.clearPendingFirstLinePropertyRecheck(
               newPath
             );
           }
@@ -560,11 +675,11 @@ export class RenameEngine {
           );
         } else if (findSourceEditorForFile(this.plugin.app, file)) {
           // Any editor counts, not just the active tab: keystrokes in a page preview or Canvas card set the flag too, and with no recheck the name would stop short of the first line until the next edit.
-          this.plugin.cacheManager?.clearPendingFirstLinePropertyRecheck(
+          this.plugin.fileStateManager.clearPendingFirstLinePropertyRecheck(
             originalPath
           );
           if (newPath !== originalPath) {
-            this.plugin.cacheManager?.clearPendingFirstLinePropertyRecheck(
+            this.plugin.fileStateManager.clearPendingFirstLinePropertyRecheck(
               newPath
             );
           }
@@ -581,10 +696,7 @@ export class RenameEngine {
                   recheckFile
                 );
                 if (target) {
-                  await this.processEditorChangeOptimal(
-                    target.editor,
-                    recheckFile
-                  );
+                  await this.processEditorChange(target.editor, recheckFile);
                 }
               }
             })();
@@ -602,88 +714,80 @@ export class RenameEngine {
 
   private async processFileInternal(
     file: TFile,
-    noDelay: boolean,
-    showNotices: boolean,
-    providedContent?: string,
-    isBatchOperation = false,
-    exclusionOverrides?: {
-      ignoreFiles?: boolean;
-      ignoreTag?: boolean;
-      ignoreProperty?: boolean;
-    },
-    hasActiveEditor?: boolean,
-    editor?: Editor
+    options: ProcessFileOptions
   ): Promise<RenameOutcome> {
+    const {
+      isManualCommand = false,
+      providedContent,
+      isBatchOperation = false,
+      exclusionOverrides,
+      hasActiveEditor,
+      editor,
+    } = options;
+    // canModifyFile's editor half, checked before the read because it needs no text: a background pass for a note no editor shows would otherwise read the note only to refuse it.
+    if (
+      !isManualCommand &&
+      (hasActiveEditor === false ||
+        (hasActiveEditor === undefined &&
+          !isFileOpenInAnyEditor(file, this.plugin.app)))
+    ) {
+      verboseLog(
+        this.plugin,
+        `Skipping file: file not open in editor, refused before reading, so the BLOCKED dump has no text: ${file.path}`
+      );
+      this.plugin.outputDebugFileContent(file, 'BLOCKED');
+      return { success: false, reason: 'not-open-in-editor' };
+    }
+
     let initialContent: string;
     try {
       initialContent = await readFileContent(this.plugin, file, {
         providedContent,
-        providedEditor: editor, // Use editor from manual command
+        providedEditor: editor, // The editor a manual command or keystroke read from
         preferFresh: true,
-        searchWorkspace: showNotices, // Manual commands search for open editors, page previews and Canvas cards included
+        searchWorkspace: isManualCommand, // Manual commands search for open editors, page previews and Canvas cards included
       });
     } catch (error) {
       console.error(`Error reading file content: ${file.path}`, error);
       return { success: false, reason: 'read-error' };
     }
 
-    // Central gate: check policy requirements and always-on safeguards. It reads the rename-blocking property from the note's text, so a note the metadata cache has not indexed yet (just created, or replaced by sync) still counts it; the cache is the fallback when the text has no parseable frontmatter.
-    const { canModify, reason } = canModifyFile(
-      file,
-      this.plugin.app,
-      this.plugin.settings.exclusions.disableRenamingKey,
-      this.plugin.settings.exclusions.disableRenamingValue,
-      showNotices, // showNotices indicates manual command
-      hasActiveEditor, // From editor-change event or auto-detected
-      initialContent
-    );
+    // Central gate: check policy requirements and always-on safeguards. It reads the rename-blocking property from the note's text, so a note the metadata cache has not indexed yet (just created, or replaced by sync) still counts it; the cache is the fallback when the text has no parseable frontmatter. Its editor half runs again with its own leaf walk, because the read's await can close the editor.
+    const verdict = canModifyFile(file, this.plugin.app, this.plugin.settings, {
+      isManualCommand,
+      hasActiveEditor,
+      content: initialContent,
+    });
 
-    if (!canModify) {
-      verboseLog(this.plugin, `Skipping file: ${reason}: ${file.path}`);
+    if (!verdict.canModify) {
+      verboseLog(this.plugin, `Skipping file: ${verdict.reason}: ${file.path}`);
 
       // Output file content if debug setting enabled
       this.plugin.outputDebugFileContent(file, 'BLOCKED', initialContent);
 
-      if (showNotices && !isBatchOperation) {
+      // A manual command skips the editor half, so it never meets `not-open-in-editor`, which only automatic passes reach and which shows no notice; the reason is checked anyway so that refusal can never show the rename-blocking property's notice.
+      if (
+        isManualCommand &&
+        !isBatchOperation &&
+        verdict.reason === 'disable-property'
+      ) {
         new Notice(
-          t('notifications.notRenamedExcluded', { filename: file.basename })
+          t('notifications.notRenamedDisableProperty', {
+            filename: file.basename,
+          })
         );
       }
-      return { success: false, reason: 'property-disabled' };
+      return {
+        success: false,
+        reason:
+          verdict.reason === 'disable-property'
+            ? 'property-disabled'
+            : 'not-open-in-editor',
+      };
     }
 
     // Output debug file content if enabled
     this.plugin.outputDebugFileContent(file, 'PROCESSING', initialContent);
-
-    // Skip processing when editing in footnote popover
-    // When user types in footnote definition, providedContent contains only the footnote text
-    // (e.g., "1", "123") while disk has the full file with frontmatter and main content.
-    // Size ratio < threshold indicates popover context. We must skip to avoid ping-pong renaming
-    // between footnote content and main content on alternating keystrokes.
-    // Threshold of 0.3 provides safety margin (was 0.5 but that's too aggressive).
-    // This check allows normal processing when editing main content even if footnotes exist.
-    try {
-      const diskContent = await this.plugin.app.vault.read(file);
-      if (diskContent.match(/\n\[\^[^\]]+\]:\s/)) {
-        const ratio =
-          diskContent.length > 0
-            ? initialContent.length / diskContent.length
-            : 1;
-        if (ratio < LIMITS.FOOTNOTE_SIZE_THRESHOLD) {
-          verboseLog(
-            this.plugin,
-            `Skipping - editing in footnote popover (editor/disk ratio ${(ratio * 100).toFixed(1)}%): ${file.path}`
-          );
-          return { success: false, reason: 'footnote-popover-edit' };
-        }
-      }
-    } catch (error) {
-      // If we can't read disk content, continue with normal processing
-      verboseLog(
-        this.plugin,
-        `Could not read disk content for footnote check: ${error}`
-      );
-    }
 
     // Time-based rate limiting (per-file always enforced, global bypassed for batches)
     if (!this.checkFileTimeLimit(file)) {
@@ -697,24 +801,33 @@ export class RenameEngine {
       }
     }
 
-    // Pass exclusionOverrides to skip checks for manual single-file commands
-    if (
-      !shouldProcessFile(
-        file,
-        this.plugin.settings,
-        this.plugin.app,
-        initialContent,
+    // The text the gate approved, so the title never comes from a later read; built before the exclusion check, which reads tags typed into it ahead of the metadata cache, and its lines are read lazily, so a refused note costs no more than before
+    let titleSource: TitleSource | null = findTitleSource(
+      lineSourceFromText(initialContent),
+      this.plugin.settings,
+      verboseLogger(this.plugin)
+    );
+
+    // Pass exclusionOverrides to skip checks for manual single-file commands; only text whose tags Obsidian will index passes, so a tag in code, a card link's title or after an HTML comment block never excludes the note
+    const excludingList = findExcludingList(
+      file,
+      this.plugin.settings,
+      this.plugin.app,
+      {
+        content: initialContent,
         exclusionOverrides,
-        this.plugin
-      )
-    ) {
+        log: verboseLogger(this.plugin),
+        titleLine: titleSource?.tagsIndexed ? titleSource.text : undefined,
+      }
+    );
+    if (excludingList !== null) {
       verboseLog(
         this.plugin,
         `Skipping file based on include/exclude strategy: ${file.path}`
       );
-      if (showNotices && !isBatchOperation) {
+      if (isManualCommand && !isBatchOperation) {
         new Notice(
-          t('notifications.notRenamedExcluded', { filename: file.basename })
+          t(EXCLUSION_NOTICE_KEYS[excludingList], { filename: file.basename })
         );
       }
       return { success: false, reason: 'excluded' };
@@ -724,51 +837,31 @@ export class RenameEngine {
     verboseLog(this.plugin, `RENAME: Starting renameFile for ${file.name}`);
 
     const cacheManager = this.plugin.cacheManager;
-    const previousFileContent = cacheManager?.getContent(file.path);
-
-    let content = await readFileContent(this.plugin, file, {
-      providedContent,
-      providedEditor: editor, // Use editor from manual command
-      searchWorkspace: showNotices, // Manual commands search for open editors, page previews and Canvas cards included
-    });
 
     const currentName = file.basename;
-    const contentWithoutFrontmatter = this.stripFrontmatterFromContent(
-      content,
-      file
-    );
-    const lines = contentWithoutFrontmatter.split('\n');
-    let firstNonEmptyLine = '';
-    for (const line of lines) {
-      if (line.trim() !== '') {
-        firstNonEmptyLine = line;
-        break;
-      }
-    }
 
-    // If first line is empty (no content after frontmatter)
-    if (firstNonEmptyLine === '') {
-      // Check if file had previous content
-      const previousContentWithoutFrontmatter = previousFileContent
-        ? this.stripFrontmatterFromContent(previousFileContent, file)
-        : '';
-      const hadPreviousContent =
-        previousContentWithoutFrontmatter.trim() !== '';
-
-      if (hadPreviousContent) {
+    // No non-empty line after the properties block
+    let contentBecameEmpty = false;
+    if (titleSource === null) {
+      if (cacheManager.hadBody(file.path)) {
         // Content was deleted - rename to Untitled
         verboseLog(
           this.plugin,
           `Content became empty - renaming to ${t('untitled')}: ${file.path}`
         );
-        firstNonEmptyLine = t('untitled');
+        contentBecameEmpty = true;
+        titleSource = {
+          firstNonEmptyLine: t('untitled'),
+          text: t('untitled'),
+          lineIndex: -1,
+          raw: false,
+          tagsIndexed: false,
+        };
       } else {
         // File was always empty - retain current filename
-        cacheManager?.setContent(file.path, content);
+        cacheManager.setHadBody(file.path, false);
 
-        // First line property handling moved to processFile - called via updateFirstLinePropertyWithCoordination
-        // which will remove stale first line property values when content is empty
-
+        // A distinct outcome rather than a refusal: processFile's first line property step still runs for it and removes a stale plugin value from the empty note
         verboseLog(
           this.plugin,
           `Skipping rename for empty file - retaining current filename: ${file.path}`
@@ -777,12 +870,12 @@ export class RenameEngine {
       }
     }
 
-    // Check if only headings should be processed
+    // Check if only headings should be processed. The title source decides, so a `# Title` after a rule or comment block passes and a fenced `# comment` (code, not a heading) does not.
     if (this.plugin.settings.core.onlyRenameIfHeading) {
-      // Skip validation for the "Untitled" fallback (when content became empty)
+      // Only the content-became-empty fallback is exempt, so deleting a note's text still renames it Untitled; synthetic titles such as Table or a card link's are no heading and stay refused.
       if (
-        firstNonEmptyLine !== t('untitled') &&
-        !isValidHeading(firstNonEmptyLine)
+        !contentBecameEmpty &&
+        (titleSource.raw || !isValidHeading(titleSource.text))
       ) {
         verboseLog(
           this.plugin,
@@ -790,7 +883,7 @@ export class RenameEngine {
         );
 
         // Show notice if requested and not in batch operation
-        if (showNotices && !isBatchOperation) {
+        if (isManualCommand && !isBatchOperation) {
           new Notice(
             t('notifications.notRenamedNoHeading', { filename: file.basename })
           );
@@ -800,286 +893,16 @@ export class RenameEngine {
       }
     }
 
-    // Determine titleSourceLine using shared utility function
-    // This handles special cases like card links, code blocks, and Markdown tables
-    const titleSourceLine = findTitleSourceLine(
-      lines,
-      this.plugin.settings,
-      this.plugin
-    );
-
-    // Store current content for next check in cache (only if not handled above)
-    // Don't update cache if content became empty and we're renaming to Untitled (prevents cache poisoning)
-    const contentBecameEmpty =
-      contentWithoutFrontmatter.trim() === '' &&
-      firstNonEmptyLine === t('untitled');
+    // Recorded for the next pass, which reads it when the body comes up empty; not when the content became empty, whose synthetic Untitled is no body
     if (!contentBecameEmpty) {
-      cacheManager?.setContent(file.path, content);
+      cacheManager.setHadBody(file.path, true);
     }
 
-    // Use the stripped content for processing
-    content = contentWithoutFrontmatter;
-
-    // Check for self-referencing links BEFORE custom replacements to prevent character mismatch
-    const escapedName = currentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pathWithoutExt = file.path.replace(/\.md$/, '');
-    const escapedPath = pathWithoutExt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-    // Match [[filename]], [[filename#heading]], [[filename#^block]], [[path/filename#heading]], with optional |alias
-    // Need to check both basename and full path (some users link with path)
-    const wikiLinkRegex = new RegExp(
-      `\\[\\[(${escapedName}|${escapedPath})(#[^\\]|]*?)?(\\|.*?)?\\]\\]`
-    );
-    // Match Markdown links including empty link text: [text](url) or [](url)
-    // Regex is ReDoS-safe: uses negated character classes [^\]] and [^)] which don't backtrack
-    const markdownLinkRegex = /\[([^\]]*)\]\(([^)]+)\)/g;
-
-    let isSelfReferencing = false;
-
-    // Check for self-referencing wikilink in titleSourceLine (before custom replacements)
-    if (wikiLinkRegex.test(titleSourceLine)) {
-      isSelfReferencing = true;
-      verboseLog(
-        this.plugin,
-        `Found self-referencing wikilink in ${file.path} before custom replacements`
-      );
-    }
-
-    // Check for self-referencing Markdown link by parsing the actual URL (ignoring link text)
-    let match;
-    while ((match = markdownLinkRegex.exec(titleSourceLine)) !== null) {
-      const url = match[2];
-
-      // Decode percent-encoding for comparison
-      let decodedUrl = url;
-      try {
-        decodedUrl = decodeURIComponent(url);
-      } catch {
-        // Invalid encoding, use original
-      }
-
-      // Check various self-reference patterns:
-      // 1. Fragment-only: #heading
-      // 2. Relative path with .md: filename.md or path/filename.md
-      // 3. Relative path without extension: filename
-      if (url.startsWith('#') && url.includes(currentName)) {
-        isSelfReferencing = true;
-        verboseLog(
-          this.plugin,
-          `Found self-referencing Markdown link (fragment) in ${file.path} before custom replacements`
-        );
-        break;
-      }
-
-      // Check if decoded URL matches current file (with or without .md extension)
-      const urlWithoutFragment = decodedUrl.split('#')[0];
-      if (
-        urlWithoutFragment &&
-        (urlWithoutFragment === `${currentName}.md` ||
-          urlWithoutFragment === currentName ||
-          urlWithoutFragment === `${pathWithoutExt}.md` ||
-          urlWithoutFragment === pathWithoutExt)
-      ) {
-        isSelfReferencing = true;
-        verboseLog(
-          this.plugin,
-          `Found self-referencing Markdown link (percent-encoded) in ${file.path} before custom replacements`
-        );
-        break;
-      }
-    }
-
-    // Check Obsidian's cached links for self-reference (catches mid-edit states
-    // where regex fails on malformed links but cache still has valid link)
-    if (!isSelfReferencing) {
-      const cache = this.plugin.app.metadataCache.getFileCache(file);
-      if (cache?.links) {
-        // Calculate absolute title line number (including frontmatter)
-        const titleLineIndexInStripped = lines.findIndex(
-          (l) => l === titleSourceLine
-        );
-
-        // Skip if titleSourceLine not found in stripped content
-        if (titleLineIndexInStripped >= 0) {
-          const frontmatterLineCount =
-            cache.frontmatterPosition?.end?.line !== undefined
-              ? cache.frontmatterPosition.end.line + 1
-              : 0;
-          const absoluteTitleLine =
-            frontmatterLineCount + titleLineIndexInStripped;
-
-          // currentName includes .md extension, get basename without it
-          const basenameWithoutExt = currentName.replace(/\.md$/, '');
-
-          for (const link of cache.links) {
-            // Check if link is on title line
-            if (link.position.start.line === absoluteTitleLine) {
-              // Compare resolved link to current file (handles URL-encoded paths)
-              // link.link is the resolved target (e.g., "note" or "folder/note")
-              const linkTarget = link.link.replace(/\.md$/, '');
-              if (
-                linkTarget === basenameWithoutExt ||
-                linkTarget === pathWithoutExt ||
-                link.link === file.path ||
-                link.link === pathWithoutExt
-              ) {
-                isSelfReferencing = true;
-                verboseLog(
-                  this.plugin,
-                  `Found cached self-referencing link in ${file.path}`
-                );
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Apply custom replacements and markup stripping in the correct order
-    let newTitle = titleSourceLine;
-    verboseLog(
-      this.plugin,
-      `Custom replacements count: ${this.plugin.settings.customReplacements.rules?.length || 0}`
-    );
-
-    const applyCustomReplacements = () => {
-      for (const replacement of this.plugin.settings.customReplacements.rules) {
-        if (replacement.searchText === '') continue;
-
-        verboseLog(this.plugin, `Checking custom replacement:`, {
-          searchText: replacement.searchText,
-          replaceText: replacement.replaceText,
-          onlyWholeLine: replacement.onlyWholeLine,
-          onlyAtStart: replacement.onlyAtStart,
-          currentLine: newTitle,
-        });
-
-        let tempLine = newTitle;
-
-        if (replacement.onlyWholeLine) {
-          // Only replace if the entire line matches
-          if (newTitle.trim() === replacement.searchText.trim()) {
-            tempLine = replacement.replaceText;
-            verboseLog(this.plugin, `Applied whole line replacement:`, {
-              from: newTitle,
-              to: tempLine,
-            });
-          }
-        } else if (replacement.onlyAtStart) {
-          if (tempLine.startsWith(replacement.searchText)) {
-            tempLine =
-              replacement.replaceText +
-              tempLine.slice(replacement.searchText.length);
-            verboseLog(this.plugin, `Applied start replacement:`, {
-              from: newTitle,
-              to: tempLine,
-            });
-          }
-        } else {
-          const beforeReplace = tempLine;
-          // Replacer function so `$&` and `$$` in the user's replacement text stay literal.
-          tempLine = tempLine.replaceAll(
-            replacement.searchText,
-            () => replacement.replaceText
-          );
-          if (beforeReplace !== tempLine) {
-            verboseLog(this.plugin, `Applied general replacement:`, {
-              from: beforeReplace,
-              to: tempLine,
-            });
-          }
-        }
-
-        newTitle = tempLine;
-      }
-
-      // If custom replacements resulted in empty string or whitespace only, use "Untitled"
-      if (newTitle.trim() === '') {
-        newTitle = t('untitled');
-      }
-    };
-
-    verboseLog(
-      this.plugin,
-      isSelfReferencing
-        ? `Self-reference found in ${file.path}`
-        : `No self-reference found in ${file.path}`
-    );
-
-    // Define forbidden char replacement function
-    const applyForbiddenCharReplacement = () => {
-      newTitle = processForbiddenChars(newTitle, this.plugin.settings, {
-        maxLength: this.plugin.settings.core.charCount,
-      });
-
-      // Check if filename is empty or a forbidden name
-      const forbiddenNames: string[] = [
-        'CON',
-        'PRN',
-        'AUX',
-        'NUL',
-        'COM1',
-        'COM2',
-        'COM3',
-        'COM4',
-        'COM5',
-        'COM6',
-        'COM7',
-        'COM8',
-        'COM9',
-        'COM0',
-        'LPT1',
-        'LPT2',
-        'LPT3',
-        'LPT4',
-        'LPT5',
-        'LPT6',
-        'LPT7',
-        'LPT8',
-        'LPT9',
-        'LPT0',
-      ];
-
-      const isForbiddenName =
-        newTitle === '' || forbiddenNames.includes(newTitle.toUpperCase());
-      if (isForbiddenName) {
-        newTitle = t('untitled');
-        verboseLog(
-          this.plugin,
-          `Using fallback name \`${t('untitled')}\` for ${file.path}`
-        );
-      }
-    };
-
-    // Apply operations in correct order based on settings
-    if (this.plugin.settings.customReplacements.applyAfterForbiddenChars) {
-      // Apply markup stripping, then forbidden chars, then custom replacements
-      newTitle = extractTitle(newTitle, this.plugin.settings);
-      applyForbiddenCharReplacement();
-      applyCustomReplacements();
-      // A rule's replacement text can reintroduce path separators and blow past the char limit, so re-sanitize
-      applyForbiddenCharReplacement();
-    } else {
-      // Apply custom replacements and markup stripping based on other setting, then forbidden chars
-      if (
-        this.plugin.settings.markupStripping
-          .applyCustomReplacementsAfterMarkupStripping
-      ) {
-        // Markup stripping → custom replacements → forbidden chars
-        newTitle = extractTitle(newTitle, this.plugin.settings);
-        applyCustomReplacements();
-      } else {
-        // Custom replacements → markup stripping → forbidden chars
-        applyCustomReplacements();
-        newTitle = extractTitle(newTitle, this.plugin.settings);
-      }
-      applyForbiddenCharReplacement();
-    }
-
+    const newTitle = buildTitleFromSource(titleSource, this.plugin);
     verboseLog(this.plugin, `Extracted title from ${file.path}`, {
-      firstNonEmptyLine: firstNonEmptyLine,
-      titleSourceLine: titleSourceLine,
+      firstNonEmptyLine: titleSource.firstNonEmptyLine,
+      titleSource: titleSource.text,
+      raw: titleSource.raw,
       extracted: newTitle,
     });
 
@@ -1091,44 +914,26 @@ export class RenameEngine {
       this.plugin,
       `Initial target path: ${newPath} for file: ${file.path}`
     );
-    if (file.path == newPath) {
+    if (file.path === newPath) {
       verboseLog(
         this.plugin,
         `No rename needed for ${file.path} - already has correct name`
       );
-      // First line property handling moved to processFile - single code path for all outcomes
-
-      if (showNotices && !isBatchOperation) {
-        const finalFileName =
-          newPath.replace(/\.md$/, '').split('/').pop() || newTitle;
-        const titleChanged = currentName !== finalFileName;
-        const shouldShowNotice =
-          this.plugin.settings.core.manualNotificationMode === 'Always' ||
-          (this.plugin.settings.core.manualNotificationMode ===
-            'On title change' &&
-            titleChanged);
-
-        if (shouldShowNotice) {
-          verboseLog(
-            this.plugin,
-            `Showing notice: Title unchanged: ${finalFileName}`
-          );
-          new Notice(
-            t('notifications.renamedTo').replace(
-              '{{filename}}',
-              () => finalFileName
-            )
-          );
-        }
-      }
+      this.showManualRenameNotice(
+        currentName,
+        newPath,
+        newTitle,
+        isManualCommand,
+        isBatchOperation
+      );
       return { success: true, reason: 'no-rename-needed' };
     }
 
-    // Skip rename if file was recently renamed AND reading from disk (not fresh editor content)
-    // Fresh editor content is always safe; only disk reads may be stale after rename
+    // Only text read from disk can trail a rename this recent; editor text is always current
+    // The vacated path is not needed: the renamed note's own `TFile.path` is the new one, and a note found at the vacated path is a different note whose disk text cannot trail this rename
     if (
       !providedContent &&
-      this.plugin.fileStateManager.wasRecentlyRenamed(file.path, 100)
+      this.plugin.fileStateManager.wasRecentlyRenamedInto(file.path)
     ) {
       verboseLog(
         this.plugin,
@@ -1138,7 +943,7 @@ export class RenameEngine {
     }
 
     let counter: number = 0;
-    let fileExists: boolean = this.isRenameTargetTaken(newPath);
+    let fileExists: boolean = this.isRenameTargetTaken(newPath, file);
 
     verboseLog(
       this.plugin,
@@ -1150,59 +955,17 @@ export class RenameEngine {
         `Found conflicts for ${newPath}, starting counter loop`
       );
       let conflictCount = 0;
-      const MAX_CONFLICT_ITERATIONS = 10000;
-      while (fileExists && conflictCount < MAX_CONFLICT_ITERATIONS) {
+      while (fileExists && conflictCount < LIMITS.MAX_CONFLICT_ITERATIONS) {
         conflictCount++;
-        // Check if we're about to create a path that matches current file (with counter)
-        if (file.path == newPath) {
-          if (conflictCount > 1) {
-            verboseLog(
-              this.plugin,
-              `Checked ${conflictCount} conflicts for ${newPath}`
-            );
-          }
-          verboseLog(
-            this.plugin,
-            `No rename needed for ${file.path} - already has correct name with counter`
-          );
-          // First line property handling moved to processFile - single code path for all outcomes
-
-          if (showNotices && !isBatchOperation) {
-            // Extract actual final filename from newPath (includes counter)
-            const finalFileName =
-              newPath.replace(/\.md$/, '').split('/').pop() || newTitle;
-            const titleChanged = currentName !== finalFileName;
-            const shouldShowNotice =
-              this.plugin.settings.core.manualNotificationMode === 'Always' ||
-              (this.plugin.settings.core.manualNotificationMode ===
-                'On title change' &&
-                titleChanged);
-
-            if (shouldShowNotice) {
-              verboseLog(
-                this.plugin,
-                `Showing notice: Updated title: ${currentName} → ${finalFileName}`
-              );
-              new Notice(
-                t('notifications.renamedTo').replace(
-                  '{{filename}}',
-                  () => finalFileName
-                )
-              );
-            }
-          }
-
-          return { success: true, reason: 'no-rename-needed' };
-        }
         counter += 1;
         newPath = `${parentPath}${newTitle} ${counter}.md`;
-        fileExists = this.isRenameTargetTaken(newPath, false); // Don't log individual conflicts
+        fileExists = this.isRenameTargetTaken(newPath, file, false); // Don't log individual conflicts
       }
 
-      // Check if we hit the safety limit
-      if (conflictCount >= MAX_CONFLICT_ITERATIONS) {
+      // Still taken after the last candidate: the limit stopped the loop, not a free name
+      if (fileExists) {
         console.error(
-          `Max conflict iterations (${MAX_CONFLICT_ITERATIONS}) reached for ${file.path}. Aborting rename to prevent infinite loop.`
+          `Max conflict iterations (${LIMITS.MAX_CONFLICT_ITERATIONS}) reached for ${file.path}. Aborting rename to prevent infinite loop.`
         );
         return { success: false, reason: 'max-conflicts-exceeded' };
       }
@@ -1217,7 +980,24 @@ export class RenameEngine {
         `No conflicts found for ${newPath}, proceeding without counter`
       );
     }
-    if (isSelfReferencing) {
+
+    // The note's own path never counts as taken, so a note already holding the first free counter name (`Foo 1.md` beside `Foo.md`) lands back on its own path; renaming it there would report `renamed` and arm the recently-renamed guards on every pass.
+    if (newPath === file.path) {
+      verboseLog(
+        this.plugin,
+        `No rename needed for ${file.path} - already has correct name with counter`
+      );
+      this.showManualRenameNotice(
+        currentName,
+        newPath,
+        newTitle,
+        isManualCommand,
+        isBatchOperation
+      );
+      return { success: true, reason: 'no-rename-needed' };
+    }
+
+    if (this.isTitleSourceSelfReferencing(file, titleSource)) {
       if (!isBatchOperation) {
         // Rate limit: show notice max once per 2 seconds per file
         if (this.plugin.fileStateManager.canShowSelfRefNotice(file.path)) {
@@ -1226,10 +1006,9 @@ export class RenameEngine {
             `Showing notice: File not renamed due to self-referential link in first line: ${file.basename}`
           );
           new Notice(
-            t('notifications.notRenamedSelfReference').replace(
-              '{{filename}}',
-              () => file.basename
-            )
+            t('notifications.notRenamedSelfReference', {
+              filename: file.basename,
+            })
           );
           this.plugin.fileStateManager.setLastSelfRefNotice(file.path);
         }
@@ -1238,117 +1017,212 @@ export class RenameEngine {
       return { success: false, reason: 'self-referential' };
     }
 
-    // Claims the destination for the window between here and the vault index
-    // catching up, so a sibling rename resolving to the same title inside the
-    // same batch takes a counter suffix instead of colliding.
-    if (noDelay) {
-      cacheManager?.reservePath(newPath);
-    }
+    // Claims the destination until the vault index catches up, so a sibling rename resolving to the same title in the same batch takes a counter suffix instead of colliding
+    cacheManager.reservePath(newPath);
 
+    const oldPath = file.path;
+    const renameReport = {
+      oldPath,
+      newPath,
+      currentName,
+      newTitle,
+      startTime,
+      isManualCommand,
+      isBatchOperation,
+    };
     try {
-      const oldPath = file.path;
       await this.plugin.app.fileManager.renameFile(file, newPath);
-      const processingTime = Date.now() - startTime;
+    } catch (error) {
+      if (
+        newPath.toLowerCase() === oldPath.toLowerCase() &&
+        (await this.renameCaseOnlyThroughTemporaryName(
+          file,
+          oldPath,
+          newPath,
+          parentPath
+        ))
+      ) {
+        verboseLog(
+          this.plugin,
+          `Direct case-only rename of ${oldPath} to ${newPath} was rejected, renamed through a temporary name instead:`,
+          error
+        );
+        return this.completeRename(renameReport);
+      }
+      // The rename never took the path and only notifyFileRenamed releases reservations, so keeping this one would wedge the title for the rest of the session outside a modal batch
+      cacheManager.releasePath(newPath);
+      console.error(`Failed to rename file ${oldPath} to ${newPath}:`, error);
+      return { success: false, reason: 'error' };
+    }
+    return this.completeRename(renameReport);
+  }
+
+  /**
+   * Record a finished rename everywhere that tracks notes by path, and show the manual command's notice.
+   * @param report - The rename's paths, the names the notice compares, and how the pass was started
+   * @returns The `renamed` outcome
+   */
+  private completeRename(report: {
+    oldPath: string;
+    newPath: string;
+    currentName: string;
+    newTitle: string;
+    startTime: number;
+    isManualCommand: boolean;
+    isBatchOperation: boolean;
+  }): RenameOutcome {
+    const { oldPath, newPath } = report;
+    verboseLog(
+      this.plugin,
+      `Successfully renamed ${oldPath} to ${newPath} (${Date.now() - report.startTime}ms)`
+    );
+
+    // Only the rename's own record is left to write: the vault `rename` event fires before `renameFile` resolves (desktop and Android, Obsidian 1.14.4, measured), so its handler has already moved every per-path state to the new path
+    // The new path only: a late event for this note carries its `TFile`, whose path is already the new one, and a note created at the vacated path (Cmd+N reusing `Untitled`, a click on a link to the old name) is new to both guards
+    this.plugin.fileStateManager.markRecentlyRenamedInto(newPath);
+
+    this.showManualRenameNotice(
+      report.currentName,
+      newPath,
+      report.newTitle,
+      report.isManualCommand,
+      report.isBatchOperation
+    );
+
+    return { success: true, reason: 'renamed' };
+  }
+
+  /**
+   * True when the title source holds a link to the note itself. Checked on the title source as typed, so custom replacements cannot change the characters the link is compared by.
+   * @param file - Note being renamed
+   * @param titleSource - Where the title comes from
+   */
+  private isTitleSourceSelfReferencing(
+    file: TFile,
+    titleSource: TitleSource
+  ): boolean {
+    const kind: SelfReferenceKind | null =
+      findSelfReferenceInText(titleSource.text, file) ??
+      (cachedLinkOnLinePointsAtNote(
+        this.plugin.app.metadataCache.getFileCache(file),
+        file,
+        titleSource.lineIndex
+      )
+        ? 'cached link'
+        : null);
+    verboseLog(
+      this.plugin,
+      kind
+        ? `Self-reference found in ${file.path}: ${kind}`
+        : `No self-reference found in ${file.path}`
+    );
+    return kind !== null;
+  }
+
+  /**
+   * Show the notice a manual command reports its result with, as the notification mode setting allows.
+   * @param currentName - The note's name before the pass
+   * @param finalPath - Path the note ends the pass at
+   * @param newTitle - Title the pass derived, the fallback when the path yields no name
+   * @param isManualCommand - Whether a manual command started the pass
+   * @param isBatchOperation - Whether the pass is one of a bulk run, which reports on its own
+   */
+  private showManualRenameNotice(
+    currentName: string,
+    finalPath: string,
+    newTitle: string,
+    isManualCommand: boolean,
+    isBatchOperation: boolean
+  ): void {
+    if (!isManualCommand || isBatchOperation) {
+      return;
+    }
+    // Extract actual final filename from the path (includes counter if added)
+    const finalFileName =
+      finalPath.replace(/\.md$/, '').split('/').pop() || newTitle;
+    const titleChanged = currentName !== finalFileName;
+    const shouldShowNotice =
+      this.plugin.settings.core.manualNotificationMode === 'Always' ||
+      (this.plugin.settings.core.manualNotificationMode === 'On title change' &&
+        titleChanged);
+
+    if (shouldShowNotice) {
       verboseLog(
         this.plugin,
-        `Successfully renamed ${oldPath} to ${newPath} (${processingTime}ms)`
+        `Showing notice: ${currentName} → ${finalFileName}`
       );
-
-      // Track rename to prevent stale CREATE events from processing this file
-      this.plugin.recentlyRenamedPaths.add(oldPath);
-      this.plugin.recentlyRenamedPaths.add(newPath);
-      window.setTimeout(() => {
-        this.plugin.recentlyRenamedPaths.delete(oldPath);
-        this.plugin.recentlyRenamedPaths.delete(newPath);
-      }, 1000);
-
-      // Mark file as recently renamed to prevent processFile with stale content
-      // After rename, Obsidian events may trigger processFile before editor content stabilizes
-      // 100ms delay allows editor to catch up with user's rapid typing
-      this.plugin.fileStateManager.markRecentlyRenamed(newPath);
-      const lastContent =
-        this.plugin.fileStateManager.getLastEditorContent(oldPath);
-      if (lastContent !== undefined) {
-        this.plugin.fileStateManager.deleteLastEditorContent(oldPath);
-        this.plugin.fileStateManager.setLastEditorContent(newPath, lastContent);
-      }
-      this.updateTitleRegionCacheKey(oldPath, newPath);
-      cacheManager?.notifyFileRenamed(oldPath, newPath);
-
-      // First line property handling moved to processFile - single code path for all outcomes
-
-      if (showNotices && !isBatchOperation) {
-        // Extract actual final filename from newPath (includes counter if added)
-        const finalFileName =
-          newPath.replace(/\.md$/, '').split('/').pop() || newTitle;
-        const titleChanged = currentName !== finalFileName;
-        const shouldShowNotice =
-          this.plugin.settings.core.manualNotificationMode === 'Always' ||
-          (this.plugin.settings.core.manualNotificationMode ===
-            'On title change' &&
-            titleChanged);
-
-        if (shouldShowNotice) {
-          verboseLog(
-            this.plugin,
-            `Showing notice: Updated title: ${currentName} → ${finalFileName}`
-          );
-          new Notice(
-            t('notifications.renamedTo').replace(
-              '{{filename}}',
-              () => finalFileName
-            )
-          );
-        }
-      }
-
-      return { success: true, reason: 'renamed' };
-    } catch (error) {
-      // The rename never took the path and only notifyFileRenamed releases
-      // reservations, so keeping this one would wedge the title for the rest of
-      // the session in every flow that is not a modal batch.
-      if (noDelay) {
-        cacheManager?.releasePath(newPath);
-      }
-      console.error(`Failed to rename file ${file.path} to ${newPath}:`, error);
-      return { success: false, reason: 'error' };
+      new Notice(t('notifications.renamedTo', { filename: finalFileName }));
     }
   }
 
   /**
-   * True when `path` is unavailable as a rename destination: a file already sits
-   * there, or a rename already in flight has reserved it.
-   *
-   * Reservations are checked alongside the vault scan rather than through
-   * cacheManager.hasPathConflict, whose existence half resolves against a path
-   * set rebuilt on a 5s timer that nothing repopulates on file creation — a note
-   * created since the last rebuild is invisible to it under a differing case.
+   * Retry a case-only rename the direct call rejected, as two `vault.rename` steps through an unused temporary name.
+   * Obsidian's mobile adapter never marks itself case-insensitive and rejects a destination whose stat succeeds, which Android's case-folding storage reports for a case variant of the note's own name.
+   * `vault.rename` skips link updates, which a case-only change does not need because Obsidian resolves links ignoring case (Canvas rewrites its card paths from the vault `rename` event itself).
+   * @param file - Note to rename
+   * @param oldPath - The note's path before the attempt
+   * @param newPath - Case variant of `oldPath` to arrive at
+   * @param parentPath - The note's folder path with a trailing slash, empty at the vault root
+   * @returns True when the note now sits at `newPath`
+   */
+  private async renameCaseOnlyThroughTemporaryName(
+    file: TFile,
+    oldPath: string,
+    newPath: string,
+    parentPath: string
+  ): Promise<boolean> {
+    const temporaryPath = `${parentPath}${file.basename}.flit-case-${Date.now()}.md`;
+    if (this.plugin.app.vault.getAbstractFileByPath(temporaryPath)) {
+      console.error(
+        `Case-only rename of ${oldPath} skipped - temporary path already exists: ${temporaryPath}`
+      );
+      return false;
+    }
+
+    try {
+      await this.plugin.app.vault.rename(file, temporaryPath);
+    } catch (error) {
+      console.error(
+        `Case-only rename of ${oldPath} failed at its first step:`,
+        error
+      );
+      return false;
+    }
+
+    try {
+      await this.plugin.app.vault.rename(file, newPath);
+      return true;
+    } catch (error) {
+      console.error(
+        `Case-only rename of ${oldPath} failed at its second step, restoring the name:`,
+        error
+      );
+      try {
+        await this.plugin.app.vault.rename(file, oldPath);
+      } catch (restoreError) {
+        // The next pass renames the temporary name straight to the title: it is no case variant of the title, and the caller's error branch releases the title's reservation.
+        console.error(
+          `Could not restore ${oldPath}, the note stays at ${temporaryPath}:`,
+          restoreError
+        );
+      }
+      return false;
+    }
+  }
+
+  /**
+   * True when `path` is unavailable as a rename destination for `file`: another
+   * file already sits there or differs from it only by case, or a rename
+   * already in flight has reserved it. The note itself never counts.
    */
   private isRenameTargetTaken(
     path: string,
-    logConflict: boolean = true
-  ): boolean {
-    if (this.checkFileExistsCaseInsensitive(path, logConflict)) {
-      return true;
-    }
-
-    if (this.plugin.cacheManager?.isPathReserved(path)) {
-      if (logConflict) {
-        verboseLog(this.plugin, `Reserved path conflict found: ${path}`);
-      }
-      return true;
-    }
-
-    return false;
-  }
-
-  checkFileExistsCaseInsensitive(
-    path: string,
+    file: TFile,
     logConflict: boolean = true
   ): boolean {
     // Performance: Fast path for exact match (O(1) hash lookup)
     const exactMatch = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (exactMatch !== null) {
+    if (exactMatch !== null && exactMatch !== file) {
       if (logConflict) {
         verboseLog(
           this.plugin,
@@ -1358,37 +1232,48 @@ export class RenameEngine {
       return true;
     }
 
-    // Performance: Fallback for case-insensitive match (O(n) iteration)
-    // Only triggered when exact match fails, which is the common case
-    // Early return on match minimizes iteration cost
-    const lowerPath = path.toLowerCase();
-    const allFiles = this.plugin.app.vault.getAllLoadedFiles();
+    if (this.hasSiblingCaseClash(path, file, logConflict)) {
+      return true;
+    }
 
-    for (const file of allFiles) {
-      if (file.path.toLowerCase() === lowerPath) {
-        if (logConflict) {
-          verboseLog(
-            this.plugin,
-            `Case-insensitive file conflict found: ${path} (existing file: ${file.path})`
-          );
-        }
-        return true;
+    // A case variant of the note's own path is reserved by the note itself: `notifyFileRenamed` reserves every path a rename arrives at, and reservations ignore case.
+    if (
+      path.toLowerCase() !== file.path.toLowerCase() &&
+      this.plugin.cacheManager.isPathReserved(path)
+    ) {
+      if (logConflict) {
+        verboseLog(this.plugin, `Reserved path conflict found: ${path}`);
       }
+      return true;
     }
 
     return false;
   }
 
-  clearTitleRegionCache(): void {
-    this.plugin.fileStateManager.clearAllTitleRegionCaches();
-    verboseLog(this.plugin, 'Cleared title region cache');
-  }
-
-  updateTitleRegionCacheKey(oldPath: string, newPath: string): void {
-    this.plugin.fileStateManager.updateTitleRegionCacheKey(oldPath, newPath);
-    verboseLog(
-      this.plugin,
-      `Updated title region cache key: ${oldPath} → ${newPath}`
-    );
+  /**
+   * True when a note's sibling other than the note itself has the target's name under a different case, which a case-insensitive file system treats as the same file.
+   * Siblings are the only possible clash, since every rename target is built from `file.parent.path`.
+   * @param path - Rename target
+   * @param file - Note being renamed
+   * @param logConflict - Whether to log a clash
+   */
+  private hasSiblingCaseClash(
+    path: string,
+    file: TFile,
+    logConflict: boolean
+  ): boolean {
+    const targetName = (path.split('/').pop() ?? path).toLowerCase();
+    for (const child of file.parent?.children ?? []) {
+      if (child !== file && child.name.toLowerCase() === targetName) {
+        if (logConflict) {
+          verboseLog(
+            this.plugin,
+            `Case-insensitive file conflict found: ${path} (existing file: ${child.path})`
+          );
+        }
+        return true;
+      }
+    }
+    return false;
   }
 }

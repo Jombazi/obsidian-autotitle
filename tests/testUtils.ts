@@ -3,11 +3,9 @@
  */
 
 import { vi, type MockedFunction } from 'vitest';
-import { TFile, TFolder, App } from './mockObsidian';
+import { TFile, TFolder, App, Setting } from './mockObsidian';
 import { DeepPartial, PluginSettings } from '../src/types';
 import { DEFAULT_SETTINGS } from '../src/constants';
-// Imported from the leaf module, not the utils barrel: several suites `vi.mock` the
-// barrel, which would strip deepMerge out from under every fixture built here.
 import { deepMerge } from '../src/utils/deep-merge';
 
 /**
@@ -77,49 +75,145 @@ export const mockFileContent = {
   withTags: '#tag in title\n\nBody',
 };
 
+// Lives in mockObsidian.ts, which uses it as `getFrontMatterInfo`'s default; re-exported so suites keep importing it from here without an import cycle.
+export { splitFrontMatter } from './mockObsidian';
+
 /**
- * Stand-in for Obsidian's `getFrontMatterInfo` so fixtures can be written as raw
- * note content instead of pre-split offsets.
- *
- * A port of Obsidian 1.14.4's implementation, so it returns exactly what the app
- * does: `to` and `frontmatter` end at the closing `---` and keep the newline
- * before it, and `contentStart` falls after the closing line's newline.
+ * Make an editor show `text` through every read the plugin makes: the whole note
+ * (`getValue`) and the line-by-line reads of the title walk (`lineCount`, `getLine`),
+ * split the way CodeMirror splits a document.
  */
-export function splitFrontMatter(content: string) {
-  const notFound = {
-    exists: false,
-    frontmatter: '',
-    from: 0,
-    to: 0,
-    contentStart: 0,
-  };
-  const opener = /^---(\r?\n)/.exec(content);
-  if (!opener) return notFound;
-
-  const from = opener[0].length;
-  // A closing `---` counts only at the start of a line, and only when the line ends there.
-  const closer = /---(\r?\n|$)/g;
-  closer.lastIndex = from;
-  let match = closer.exec(content);
-  while (match && content.charAt(match.index - 1) !== '\n') {
-    match = closer.exec(content);
-  }
-  if (!match) return notFound;
-
-  return {
-    exists: true,
-    frontmatter: content.slice(from, match.index),
-    from,
-    to: match.index,
-    contentStart: closer.lastIndex,
-  };
+export function stubEditorText(
+  editor: { getValue: unknown; lineCount: unknown; getLine: unknown },
+  text: string
+): void {
+  const lines = text.split(/\r\n|\r|\n/);
+  editor.getValue = vi.fn(() => text);
+  editor.lineCount = vi.fn(() => lines.length);
+  editor.getLine = vi.fn((line: number) => lines[line] ?? '');
 }
 
-/**
- * Wait for a promise to resolve (useful for async tests)
- */
-export function waitFor(ms: number): Promise<void> {
+/** Lets awaited saves, deferred focus timers and confirmation buttons' async clicks settle; real timers only, since a fake-timer suite never reaches the timeout. */
+export function flush(ms = 5): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Clicks the extra button a row drew with `icon`, such as `lucide-pen-line` for Edit or `lucide-trash-2` for Delete. */
+export function clickExtraButton(setting: Setting, icon: string): void {
+  const button = setting.components.find(
+    (component) => component.setIcon.mock.calls[0]?.[0] === icon
+  );
+  (button.onClick.mock.calls[0][0] as () => void)();
+}
+
+/** Types into a real input the way the browser reports it: the value, then a bubbling `input` event. */
+export function typeInto(inputEl: HTMLInputElement, value: string): void {
+  inputEl.value = value;
+  inputEl.dispatchEvent(new window.Event('input', { bubbles: true }));
+}
+
+/** Presses Enter in an input; `isComposing` marks the Enter that confirms an IME composition. */
+export function pressEnter(
+  inputEl: HTMLInputElement,
+  isComposing = false
+): void {
+  inputEl.dispatchEvent(
+    new window.KeyboardEvent('keydown', { key: 'Enter', isComposing })
+  );
+}
+
+type EntryEditModalModule = typeof import('../src/modals/entry-edit-modal');
+
+/** The entry dialog module with its dialog recording every instance in `openedModals`, for a `vi.mock` factory to return; the base Modal mock declares `onOpen` as an instance field, so a test opens a recorded instance through the real prototype. */
+export function withRecordedEntryEditModals(
+  actual: EntryEditModalModule,
+  openedModals: unknown[]
+): EntryEditModalModule {
+  class RecordingEntryEditModal<
+    V extends Record<string, string | boolean>,
+  > extends actual.EntryEditModal<V> {
+    constructor(
+      ...args: ConstructorParameters<typeof actual.EntryEditModal<V>>
+    ) {
+      super(...args);
+      openedModals.push(this);
+    }
+  }
+  return { ...actual, EntryEditModal: RecordingEntryEditModal };
+}
+
+type ExclusionEntryModalModule =
+  typeof import('../src/modals/exclusion-entry-modal');
+type ExclusionEntryModal = InstanceType<
+  ExclusionEntryModalModule['ExclusionEntryModal']
+>;
+
+/** The exclusion entry dialog module with its dialog recording every instance in `openedModals`, for a `vi.mock` factory to return; open a recorded instance with `openLatestExclusionEntryDialog`. */
+export function withRecordedExclusionEntryModals(
+  actual: ExclusionEntryModalModule,
+  openedModals: unknown[]
+): ExclusionEntryModalModule {
+  class RecordingExclusionEntryModal extends actual.ExclusionEntryModal {
+    constructor(
+      ...args: ConstructorParameters<typeof actual.ExclusionEntryModal>
+    ) {
+      super(...args);
+      openedModals.push(this);
+    }
+  }
+  return { ...actual, ExclusionEntryModal: RecordingExclusionEntryModal };
+}
+
+/** An exclusion entry dialog opened by `openLatestExclusionEntryDialog`. */
+export interface OpenedExclusionEntryDialog {
+  modal: ExclusionEntryModal;
+  /** One per field, in field order. */
+  inputs: HTMLInputElement[];
+  labels: string[];
+  helps: string[];
+  buttonContainer: HTMLElement | null;
+  doneButton: HTMLButtonElement;
+  cancelButton: HTMLButtonElement;
+  /** The close then submit button phones put in the header. */
+  headerButtons: HTMLElement[];
+}
+
+/** Opens the most recently recorded exclusion entry dialog inside a connected dialog element, so focus can be observed; through the class's own `onOpen`, which the base Modal mock's `onOpen` instance field shadows. */
+export function openLatestExclusionEntryDialog(
+  openedModals: unknown[]
+): OpenedExclusionEntryDialog {
+  const modal = openedModals[openedModals.length - 1] as ExclusionEntryModal;
+  // The mock leaves the title detached, while Obsidian nests it in the header that phones add their buttons to
+  modal.modalEl.createDiv('modal-header').appendChild(modal.titleEl);
+  document.body.appendChild(modal.modalEl);
+  modal.modalEl.appendChild(modal.contentEl);
+  (Object.getPrototypeOf(modal) as { onOpen(): void }).onOpen.call(modal);
+  const fieldEls = Array.from(
+    modal.contentEl.querySelectorAll<HTMLElement>('p.form-field')
+  );
+  const buttons = modal.modalEl.querySelectorAll<HTMLButtonElement>(
+    '.modal-button-container button'
+  );
+  return {
+    modal,
+    inputs: fieldEls.map(
+      (fieldEl) => fieldEl.querySelector('input') as HTMLInputElement
+    ),
+    labels: fieldEls.map(
+      (fieldEl) => fieldEl.querySelector('label')?.textContent ?? ''
+    ),
+    helps: fieldEls.map(
+      (fieldEl) => fieldEl.querySelector('.form-field-help')?.textContent ?? ''
+    ),
+    buttonContainer: modal.modalEl.querySelector('.modal-button-container'),
+    doneButton: buttons[0],
+    cancelButton: buttons[1],
+    headerButtons: Array.from(
+      modal.modalEl.querySelectorAll<HTMLElement>(
+        '.modal-header .modal-header-button'
+      )
+    ),
+  };
 }
 
 /** What a rendered menu item asked its MenuItem for. */

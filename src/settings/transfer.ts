@@ -7,9 +7,18 @@
  * the terms of the GNU General Public License as published by the Free Software
  * Foundation, either version 3 of the License, or (at your option) any later version.
  */
+// Import and export behavior and styles are ported from Notebook Navigator and aim to match it as closely as possible, so users of both plugins get the same familiar experience.
 
 import { CURRENT_DATA_SCHEMA_VERSION, DEFAULT_SETTINGS } from '../constants';
-import { PluginSettings } from '../types';
+import {
+  CONTENT_READ_METHODS,
+  EXCLUSION_STRATEGY,
+  NOTIFICATION_MODES,
+  PluginSettings,
+  PROPERTY_HIDING_OPTIONS,
+  TAG_MATCHING_MODES,
+  TITLE_CASES,
+} from '../types';
 
 /** Envelope marker, so a settings file from another plugin is refused rather than merged. */
 export const SETTINGS_TRANSFER_PLUGIN = 'first-line-is-title';
@@ -50,7 +59,7 @@ export function isPlainObject(
 
 /**
  * Structural equality over the pure-JSON shapes settings are made of. Compares by
- * structure rather than by serialised text, so a key-order difference inside a stored
+ * structure rather than by serialized text, so a key-order difference inside a stored
  * rule object cannot masquerade as a changed setting.
  */
 function isDeepEqual(left: unknown, right: unknown): boolean {
@@ -91,9 +100,71 @@ function hasMatchingShape(base: unknown, override: unknown): boolean {
   );
 }
 
+type LeafValidator = (value: unknown) => boolean;
+
+function isStringList(value: unknown): boolean {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === 'string')
+  );
+}
+
+function isExcludedPropertyList(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        isPlainObject(item) &&
+        typeof item.key === 'string' &&
+        typeof item.value === 'string'
+    )
+  );
+}
+
+function isCustomReplacementList(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        isPlainObject(item) &&
+        typeof item.searchText === 'string' &&
+        typeof item.replaceText === 'string' &&
+        typeof item.onlyAtStart === 'boolean' &&
+        typeof item.onlyWholeLine === 'boolean'
+    )
+  );
+}
+
+function isOneOf(values: readonly string[]): LeafValidator {
+  return (value) => typeof value === 'string' && values.includes(value);
+}
+
+/**
+ * Per-path checks a leaf must pass, after the shape check, for the merge to keep it.
+ *
+ * The shape check stops a string where a list belongs, but not a list of the wrong things
+ * (on load, a non-string tag would throw in `normalizeExclusionLists` on every start) or a
+ * string that is none of its option's values.
+ */
+const LEAF_VALIDATORS: Record<string, LeafValidator> = {
+  'core.titleCase': isOneOf(TITLE_CASES),
+  'core.manualNotificationMode': isOneOf(NOTIFICATION_MODES),
+  'core.contentReadMethod': isOneOf(CONTENT_READ_METHODS),
+  'exclusions.fileScopeStrategy': isOneOf(Object.values(EXCLUSION_STRATEGY)),
+  'exclusions.tagScopeStrategy': isOneOf(Object.values(EXCLUSION_STRATEGY)),
+  'exclusions.propertyScopeStrategy': isOneOf(
+    Object.values(EXCLUSION_STRATEGY)
+  ),
+  'exclusions.excludedFiles': isStringList,
+  'exclusions.excludedTags': isStringList,
+  'exclusions.excludedProperties': isExcludedPropertyList,
+  'exclusions.tagMatchingMode': isOneOf(TAG_MATCHING_MODES),
+  'customReplacements.rules': isCustomReplacementList,
+  'firstLineProperty.hideProperty': isOneOf(PROPERTY_HIDING_OPTIONS),
+};
+
 /**
  * Walks `defaults` leaf by leaf and keeps only what `current` changed. Arrays are compared
- * and copied whole, matching what `deepMerge` does on load.
+ * and copied whole, matching what the merge does with them.
  *
  * Iterates the defaults' keys, so a key absent from the current defaults is never visited
  * — which is exactly why the 4.0.0 reset backup must stay a verbatim copy of the prior
@@ -130,20 +201,24 @@ function createTransferableSettingsSnapshot(
 }
 
 /**
- * Merges a transfer payload over `defaults`. A key the payload omits takes its default,
- * so applying a transfer is a reset-and-apply rather than a patch.
+ * Merges stored or transferred settings over `defaults`. A key the overrides omit takes its
+ * default, so applying a transfer is a reset-and-apply rather than a patch, and a key the
+ * defaults lack is dropped.
  *
- * Per leaf the override is kept only when its shape matches the default's; otherwise the
- * default survives. That guard is what stops `{"exclusions": {"excludedFiles": "x"}}`
- * from reaching a downstream read that expects an array.
+ * Per leaf the override is kept only when its shape matches the default's and it passes
+ * its `LEAF_VALIDATORS` entry, if any; otherwise the default survives. That guard is what
+ * stops `{"exclusions": {"excludedFiles": "x"}}` from reaching a downstream read that
+ * expects an array. `pathPrefix` is the dot-path of `defaults`, empty at the root.
  */
 function mergeTransferableSettings(
   defaults: Record<string, unknown>,
-  overrides: Record<string, unknown>
+  overrides: Record<string, unknown>,
+  pathPrefix: string
 ): Record<string, unknown> {
   const merged: Record<string, unknown> = {};
 
   for (const key of Object.keys(defaults)) {
+    const path = pathPrefix ? `${pathPrefix}.${key}` : key;
     const defaultValue = defaults[key];
     const overrideValue = NON_TRANSFERABLE_KEYS.has(key)
       ? undefined
@@ -156,14 +231,16 @@ function mergeTransferableSettings(
 
     if (isPlainObject(defaultValue)) {
       merged[key] = isPlainObject(overrideValue)
-        ? mergeTransferableSettings(defaultValue, overrideValue)
+        ? mergeTransferableSettings(defaultValue, overrideValue, path)
         : structuredClone(defaultValue);
       continue;
     }
 
-    merged[key] = hasMatchingShape(defaultValue, overrideValue)
-      ? structuredClone(overrideValue)
-      : structuredClone(defaultValue);
+    const isValid = LEAF_VALIDATORS[path]?.(overrideValue) ?? true;
+    merged[key] =
+      hasMatchingShape(defaultValue, overrideValue) && isValid
+        ? structuredClone(overrideValue)
+        : structuredClone(defaultValue);
   }
 
   return merged;
@@ -206,14 +283,26 @@ export function createSettingsTransferFilename(date: Date): string {
 }
 
 /**
+ * Pure: merges `stored` over `DEFAULT_SETTINGS` through the validated merge and returns a
+ * fresh `PluginSettings` that shares nothing with either. Used for `data.json` on load as
+ * well as for imports, so a hand-edited file of either kind falls back per key.
+ */
+export function mergeSettingsOverDefaults(
+  stored: Record<string, unknown>
+): PluginSettings {
+  return mergeTransferableSettings(
+    DEFAULT_SETTINGS as unknown as Record<string, unknown>,
+    stored,
+    ''
+  ) as unknown as PluginSettings;
+}
+
+/**
  * Pure: merges the payload over `DEFAULT_SETTINGS` and returns a fresh `PluginSettings`,
  * leaving the caller's current settings untouched so a failed save can roll back.
  */
 export function applySettingsTransfer(
   transfer: SettingsTransfer
 ): PluginSettings {
-  return mergeTransferableSettings(
-    DEFAULT_SETTINGS as unknown as Record<string, unknown>,
-    transfer.settings
-  ) as unknown as PluginSettings;
+  return mergeSettingsOverDefaults(transfer.settings);
 }

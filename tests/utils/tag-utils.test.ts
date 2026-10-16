@@ -1,29 +1,14 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { CachedMetadata } from 'obsidian';
+import { describe, it, expect } from 'vitest';
 import {
   normalizeTag,
-  parseTagsFromYAML,
-  stripFrontmatter,
-  fileHasTargetTags,
-  getFrontmatterTagsFromCache,
+  tagKey,
+  excludedTagEntryKey,
+  isBlankTagEntry,
+  hasExcludedTagEntry,
+  hasDuplicateTagEntry,
 } from '../../src/utils/tag-utils';
-import {
-  createTestSettings,
-  createMockFile,
-  createMockApp,
-} from '../testUtils';
-import { PluginSettings } from '../../src/types';
-import { App, TFile, getFrontMatterInfo, parseYaml } from '../mockObsidian';
 
 describe('tag-utils', () => {
-  let settings: PluginSettings;
-  let app: App;
-
-  beforeEach(() => {
-    settings = createTestSettings();
-    app = createMockApp();
-  });
-
   describe('normalizeTag', () => {
     it('should remove leading # from tag', () => {
       expect(normalizeTag('#tag')).toBe('tag');
@@ -60,454 +45,97 @@ describe('tag-utils', () => {
     });
   });
 
-  describe('parseTagsFromYAML', () => {
-    beforeEach(() => {
-      // Mock getFrontMatterInfo to return no frontmatter by default
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: false,
-        frontmatter: '',
-        contentStart: 0,
-        from: 0,
-        to: 0,
-      });
+  describe('tagKey', () => {
+    it('should give one key to a tag with and without its "#"', () => {
+      expect(tagKey('#project')).toBe(tagKey('project'));
     });
 
-    it('should return empty array when no frontmatter exists', () => {
-      const content = 'Just some content without frontmatter';
-      const result = parseTagsFromYAML(content);
-      expect(result).toEqual([]);
+    it('should fold case', () => {
+      expect(tagKey('#Project/Alpha')).toBe('#project/alpha');
     });
 
-    it('should parse tags from array in frontmatter', () => {
-      const content = '---\ntags: [tag1, tag2, tag3]\n---\nContent';
-
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: true,
-        frontmatter: 'tags: [tag1, tag2, tag3]',
-        contentStart: 30,
-        from: 0,
-        to: 0,
-      });
-
-      vi.mocked(parseYaml).mockReturnValue({
-        tags: ['tag1', 'tag2', 'tag3'],
-      });
-
-      const result = parseTagsFromYAML(content);
-      expect(result).toEqual(['tag1', 'tag2', 'tag3']);
+    it('should trim before dropping the "#"', () => {
+      expect(tagKey('  #project ')).toBe('#project');
     });
 
-    it('should parse single tag from frontmatter', () => {
-      const content = '---\ntags: important\n---\nContent';
-
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: true,
-        frontmatter: 'tags: important',
-        contentStart: 25,
-        from: 0,
-        to: 0,
-      });
-
-      vi.mocked(parseYaml).mockReturnValue({
-        tags: 'important',
-      });
-
-      const result = parseTagsFromYAML(content);
-      expect(result).toEqual(['important']);
-    });
-
-    it('should handle YAML parse errors', () => {
-      const content = '---\ntags: [invalid yaml\n---\nContent';
-
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: true,
-        frontmatter: 'tags: [invalid yaml',
-        contentStart: 25,
-        from: 0,
-        to: 0,
-      });
-
-      vi.mocked(parseYaml).mockImplementation(() => {
-        throw new Error('YAML parse error');
-      });
-
-      const result = parseTagsFromYAML(content);
-      expect(result).toEqual([]);
-    });
-
-    it('should return empty array when tags property does not exist', () => {
-      const content = '---\ntitle: My Note\n---\nContent';
-
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: true,
-        frontmatter: 'title: My Note',
-        contentStart: 20,
-        from: 0,
-        to: 0,
-      });
-
-      vi.mocked(parseYaml).mockReturnValue({
-        title: 'My Note',
-      });
-
-      const result = parseTagsFromYAML(content);
-      expect(result).toEqual([]);
-    });
-
-    it('should handle numeric tags', () => {
-      const content = '---\ntags: [1, 2, 3]\n---\nContent';
-
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: true,
-        frontmatter: 'tags: [1, 2, 3]',
-        contentStart: 20,
-        from: 0,
-        to: 0,
-      });
-
-      vi.mocked(parseYaml).mockReturnValue({
-        tags: [1, 2, 3],
-      });
-
-      const result = parseTagsFromYAML(content);
-      expect(result).toEqual(['1', '2', '3']);
-    });
-
-    it('should handle null/undefined frontmatter object', () => {
-      const content = '---\n---\nContent';
-
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: true,
-        frontmatter: '',
-        contentStart: 10,
-        from: 0,
-        to: 0,
-      });
-
-      vi.mocked(parseYaml).mockReturnValue(null as any);
-
-      const result = parseTagsFromYAML(content);
-      expect(result).toEqual([]);
+    it('should read a slash-wrapped tag as a tag, never as a pattern', () => {
+      expect(tagKey('#/X/')).toBe('#/x/');
     });
   });
 
-  describe('stripFrontmatter', () => {
-    beforeEach(() => {
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: false,
-        frontmatter: '',
-        contentStart: 0,
-        from: 0,
-        to: 0,
-      });
+  describe('excludedTagEntryKey', () => {
+    it('should fold a plain entry as a tag', () => {
+      expect(excludedTagEntryKey(' Project ')).toBe(tagKey('#project'));
     });
 
-    it('should return content unchanged when no frontmatter', () => {
-      const content = 'Just some content';
-      const result = stripFrontmatter(content);
-      expect(result).toBe(content);
+    it("should keep a pattern entry's case, so patterns differing only by case stay apart", () => {
+      expect(excludedTagEntryKey(' /\\D/ ')).toBe('/\\D/');
+      expect(excludedTagEntryKey('/\\d/')).not.toBe(
+        excludedTagEntryKey('/\\D/')
+      );
     });
 
-    it('should strip frontmatter and return remaining content', () => {
-      const content = '---\ntitle: My Note\n---\nThis is the content';
-
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: true,
-        frontmatter: 'title: My Note',
-        contentStart: 23,
-        from: 0,
-        to: 0,
-      });
-
-      const result = stripFrontmatter(content);
-      expect(result).toBe('This is the content');
-    });
-
-    it('should handle empty content after frontmatter', () => {
-      const content = '---\ntitle: My Note\n---\n';
-
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: true,
-        frontmatter: 'title: My Note',
-        contentStart: 23,
-        from: 0,
-        to: 0,
-      });
-
-      const result = stripFrontmatter(content);
-      expect(result).toBe('');
-    });
-
-    it('should handle empty string', () => {
-      const result = stripFrontmatter('');
-      expect(result).toBe('');
-    });
-
-    it('should preserve leading newlines after frontmatter', () => {
-      const content = '---\ntitle: My Note\n---\n\n\nContent';
-
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: true,
-        frontmatter: 'title: My Note',
-        contentStart: 23,
-        from: 0,
-        to: 0,
-      });
-
-      const result = stripFrontmatter(content);
-      expect(result).toBe('\n\nContent');
+    // Obsidian accepts a tag written `#/x/`, so one shared key would let the tag stand for the pattern
+    it('should never give a pattern entry the key of a tag', () => {
+      expect(tagKey('#/x/')).not.toBe(excludedTagEntryKey('/x/'));
     });
   });
 
-  describe('fileHasTargetTags', () => {
-    let file: TFile;
-
-    beforeEach(() => {
-      file = createMockFile('test.md');
-      settings.exclusions.excludedTags = ['work', 'important'];
-      settings.exclusions.tagMatchingMode = 'In Properties and note body';
-      settings.exclusions.matchSubtags = true;
+  describe('isBlankTagEntry', () => {
+    it.each(['', '   ', '#', ' # '])('should treat %j as blank', (entry) => {
+      expect(isBlankTagEntry(entry)).toBe(true);
     });
 
-    it('should return false when no target tags configured', () => {
-      settings.exclusions.excludedTags = [];
+    it.each(['project', '#project', '/x/'])(
+      'should not treat %j as blank',
+      (entry) => {
+        expect(isBlankTagEntry(entry)).toBe(false);
+      }
+    );
+  });
 
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(false);
+  describe('hasExcludedTagEntry', () => {
+    it('should find an entry written without the "#" the menu adds', () => {
+      expect(hasExcludedTagEntry(['project'], '#project')).toBe(true);
     });
 
-    it('should return false when only empty tags configured', () => {
-      settings.exclusions.excludedTags = ['', '  '];
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(false);
+    it('should find an entry written in another case', () => {
+      expect(hasExcludedTagEntry(['#Project'], 'project')).toBe(true);
     });
 
-    it('should detect tag in frontmatter', () => {
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: { tags: ['work', 'project'] },
-        tags: [],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(true);
+    it('should not treat a parent entry as holding its subtag', () => {
+      expect(hasExcludedTagEntry(['#project'], '#project/alpha')).toBe(false);
     });
 
-    it('should detect single tag in frontmatter', () => {
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: { tags: 'important' },
-        tags: [],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(true);
+    it('should report an empty list as not holding the tag', () => {
+      expect(hasExcludedTagEntry([], '#project')).toBe(false);
     });
 
-    it('should detect inline tag', () => {
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: null,
-        tags: [
-          {
-            tag: '#work',
-            position: {
-              start: { line: 0, col: 0, offset: 0 },
-              end: { line: 0, col: 5, offset: 5 },
-            },
-          },
-        ],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(true);
-    });
-
-    it('should detect subtags when matchSubtags is true', () => {
-      settings.exclusions.matchSubtags = true;
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: { tags: ['work/project/backend'] },
-        tags: [],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(true);
-    });
-
-    it('should not detect subtags when matchSubtags is false', () => {
-      settings.exclusions.matchSubtags = false;
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: { tags: ['work/project'] },
-        tags: [],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(false);
-    });
-
-    it('should normalize tags with # prefix', () => {
-      settings.exclusions.excludedTags = ['#work'];
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: { tags: ['work'] },
-        tags: [],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(true);
-    });
-
-    it('should only check frontmatter when mode is "In Properties only"', () => {
-      settings.exclusions.tagMatchingMode = 'In Properties only';
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: null,
-        tags: [
-          {
-            tag: '#work',
-            position: {
-              start: { line: 0, col: 0, offset: 0 },
-              end: { line: 0, col: 5, offset: 5 },
-            },
-          },
-        ],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(false);
-    });
-
-    it('should only check inline tags when mode is "In note body only"', () => {
-      settings.exclusions.tagMatchingMode = 'In note body only';
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: { tags: ['work'] },
-        tags: [],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(false);
-    });
-
-    it('should parse tags from provided content', () => {
-      const content = '---\ntags: [work]\n---\nContent';
-
-      vi.mocked(getFrontMatterInfo).mockReturnValue({
-        exists: true,
-        frontmatter: 'tags: [work]',
-        contentStart: 20,
-        from: 0,
-        to: 0,
-      });
-
-      vi.mocked(parseYaml).mockReturnValue({
-        tags: ['work'],
-      });
-
-      const result = fileHasTargetTags(file, settings, app, content);
-      expect(result).toBe(true);
-    });
-
-    it('should return false when file has no cache', () => {
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue(null);
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(false);
-    });
-
-    it('should handle numeric tags in frontmatter', () => {
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: { tags: [1, 2, 3] },
-        tags: [],
-      });
-
-      settings.exclusions.excludedTags = ['1'];
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(true);
-    });
-
-    it('should detect exact match before subtag check', () => {
-      settings.exclusions.excludedTags = ['work'];
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: { tags: ['work'] },
-        tags: [],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(true);
-    });
-
-    it('should handle tags in both frontmatter and inline', () => {
-      settings.exclusions.tagMatchingMode = 'In Properties and note body';
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: { tags: ['project'] },
-        tags: [
-          {
-            tag: '#work',
-            position: {
-              start: { line: 0, col: 0, offset: 0 },
-              end: { line: 0, col: 5, offset: 5 },
-            },
-          },
-        ],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(true);
-    });
-
-    it('should match frontmatter tags case-insensitively', () => {
-      settings.exclusions.excludedTags = ['Work'];
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: { tags: ['WORK'] },
-        tags: [],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(true);
-    });
-
-    it('should match inline subtags case-insensitively', () => {
-      settings.exclusions.excludedTags = ['WORK'];
-      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
-        frontmatter: null,
-        tags: [
-          {
-            tag: '#Work/Project',
-            position: {
-              start: { line: 0, col: 0, offset: 0 },
-              end: { line: 0, col: 13, offset: 13 },
-            },
-          },
-        ],
-      });
-
-      const result = fileHasTargetTags(file, settings, app);
-      expect(result).toBe(true);
+    it('should not treat a pattern entry as holding the tag it is written like', () => {
+      expect(hasExcludedTagEntry(['/x/'], '#/x/')).toBe(false);
     });
   });
 
-  describe('getFrontmatterTagsFromCache', () => {
-    it('should return an empty array when there is no cache', () => {
-      expect(getFrontmatterTagsFromCache(null)).toEqual([]);
+  describe('hasDuplicateTagEntry', () => {
+    it('should find a plain entry written with or without "#", in any case', () => {
+      expect(hasDuplicateTagEntry(['project'], '#Project')).toBe(true);
+      expect(hasDuplicateTagEntry(['#PROJECT'], 'project')).toBe(true);
     });
 
-    it('should return an empty array when frontmatter has no tags', () => {
-      expect(
-        getFrontmatterTagsFromCache({ frontmatter: {} } as CachedMetadata)
-      ).toEqual([]);
+    it('should count a pattern entry, unlike the tag menus', () => {
+      expect(hasDuplicateTagEntry(['/^draft/'], '/^draft/')).toBe(true);
     });
 
-    it('should wrap a single string tag in an array', () => {
-      expect(
-        getFrontmatterTagsFromCache({
-          frontmatter: { tags: 'work' },
-        } as unknown as CachedMetadata)
-      ).toEqual(['work']);
+    it('should keep patterns that differ only in case apart', () => {
+      expect(hasDuplicateTagEntry(['/\\d/'], '/\\D/')).toBe(false);
     });
 
-    it('should stringify list entries', () => {
-      expect(
-        getFrontmatterTagsFromCache({
-          frontmatter: { tags: ['work', 2024] },
-        } as unknown as CachedMetadata)
-      ).toEqual(['work', '2024']);
+    it('should not take a pattern for the tag it is written like', () => {
+      expect(hasDuplicateTagEntry(['/x/'], '#/x/')).toBe(false);
+    });
+
+    it('should not treat a parent entry as holding its subtag', () => {
+      expect(hasDuplicateTagEntry(['project'], 'project/alpha')).toBe(false);
     });
   });
 });

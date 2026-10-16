@@ -29,8 +29,15 @@ global.MutationObserver = dom.window.MutationObserver as any;
 // Title extraction decodes character references through the platform's HTML parser.
 global.DOMParser = dom.window.DOMParser as any;
 
+// jsdom has no `CSS`; a minimal stand-in covering the two characters that break a quoted attribute selector
+if (typeof globalThis.CSS === 'undefined') {
+  globalThis.CSS = {
+    escape: (value: string) => String(value).replace(/["\\]/g, '\\$&'),
+  } as any;
+}
+
 // Obsidian's runtime patches HTMLElement.prototype with DOM helpers like addClass;
-// jsdom doesn't have this, so tests that call it on real elements (e.g. Notice.containerEl) need it polyfilled.
+// jsdom doesn't have this, so tests that call it on real elements (e.g., Notice.containerEl) need it polyfilled.
 global.HTMLElement.prototype.addClass = function (...classNames: string[]) {
   this.classList.add(...classNames);
 };
@@ -48,14 +55,14 @@ global.HTMLElement.prototype.toggleClass = function (
   }
 };
 
-// Obsidian's `trigger` dispatches a plain event of the given type; FolderSuggest fires `input` through it
+// Obsidian's `trigger` dispatches a plain event of the given type; the exclusion entry dialog fires `input` through it
 global.HTMLElement.prototype.trigger = function (eventType: string) {
   this.dispatchEvent(new dom.window.Event(eventType));
 };
 
 // Obsidian also patches Node.prototype with element factories and exposes createFragment globally;
 // jsdom has neither, so a settings builder whose `desc` is a fragment cannot be called at all without them.
-// Only the DomElementInfo fields src/settings/ actually passes are honoured: cls, text, attr, href, type.
+// Only the DomElementInfo fields src/settings/ actually passes are honored: cls, text, attr, href, type.
 function applyElementInfo(
   el: HTMLElement,
   info?: DomElementInfo | string

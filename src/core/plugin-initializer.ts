@@ -5,52 +5,17 @@ import {
   hasExcludedFileEntry,
 } from '../utils/file-exclusions';
 import { FirstLineIsTitlePlugin } from '../settings/settings-base';
-import { FIRST_ENABLE_CHAR_KEYS } from '../types/char-replacement';
 
 /**
  * PluginInitializer
  *
- * Handles plugin initialization logic including:
- * - First-enable logic for settings
- *
- * Responsibilities:
- * - Initialize first-enable states for forbidden chars
- * - Handle settings defaults
+ * Runs the one-time setup a fresh install gets: auto-detected exclusions for template folders and Excalidraw files.
  */
 export class PluginInitializer {
   constructor(private plugin: FirstLineIsTitlePlugin) {}
 
   get settings() {
     return this.plugin.settings;
-  }
-
-  /**
-   * Initialize first-enable logic for sections
-   * Ensures that when features are enabled for the first time, their items are enabled
-   */
-  async initializeFirstEnableLogic(): Promise<void> {
-    let settingsChanged = false;
-
-    // Forbidden chars first-enable logic
-    if (
-      this.settings.characterReplacements.enableForbiddenCharReplacements &&
-      !this.settings.core.hasEnabledForbiddenChars
-    ) {
-      FIRST_ENABLE_CHAR_KEYS.forEach((key) => {
-        this.settings.characterReplacements.charReplacements[key].enabled =
-          true;
-      });
-      this.settings.core.hasEnabledForbiddenChars = true;
-      settingsChanged = true;
-      verboseLog(
-        this.plugin,
-        'Initialized forbidden char replacements on first enable'
-      );
-    }
-
-    if (settingsChanged) {
-      await this.plugin.saveSettings();
-    }
   }
 
   /**

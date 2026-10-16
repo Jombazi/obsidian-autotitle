@@ -5,62 +5,103 @@
  * - Success notification only shown when no errors (Issue #6 from audit)
  * - Error notification shown when errors occur
  * - No duplicate notifications (both error and success shown together)
- * - renameEngine/propertyManager null checks
  * - Bulk rename scope: subfolders, subtags, exclusions, and one list behind the preview and the run
  * - A notice in place of a dialog with nothing to rename
  * - Confirmation dialogs: primary and Cancel buttons, initial focus, Enter
+ * - Singular and plural wording, outcome notice tint and persistence, and the counts the dialogs state
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as mockObsidian from './mockObsidian';
 import { App, TFile, TFolder } from './mockObsidian';
-import { createTestSettings } from './testUtils';
-import { shouldProcessFile, canModifyFile } from '../src/utils';
+import { createTestSettings, flush, pressEnter } from './testUtils';
+import { shouldProcessFile } from '../src/utils/file-exclusions';
+import { canModifyFile } from '../src/utils/disable-property';
 
 // Track Notice calls via spy
-const noticeInstances: { message: string; timeout?: number }[] = [];
+const noticeInstances: {
+  message: string;
+  timeout?: number;
+  containerEl: HTMLElement;
+}[] = [];
 
 /** Index arithmetic rather than `.at(-1)`, which is outside the lib target. */
 function lastNoticeMessage(): string | undefined {
   return noticeInstances[noticeInstances.length - 1]?.message;
 }
 
-// Mock i18n
-vi.mock('../src/i18n', () => ({
-  t: vi.fn((key: string) => {
-    const translations: Record<string, string> = {
-      'notifications.renamedNotes': 'Renamed {{renamed}}/{{total}} notes',
-      'notifications.renamedNotesWithErrors':
-        'Renamed {{renamed}}/{{total}} notes ({{errors}} errors)',
-      'notifications.processingNNotes': 'Processing {{count}} notes...',
-      'notifications.processedNotesWithErrors':
-        'Processed {{processed}}/{{total}} notes ({{errors}} errors)',
-      'notifications.renameEngineNotInitialized':
-        'Rename engine not initialized',
-      'notifications.propertyManagerNotInitialized':
-        'Property manager not initialized',
-      'notifications.disabledRenamingForNNotes':
-        'Disabled renaming for {{count}} notes',
-      'notifications.enabledRenamingForNNotes':
-        'Enabled renaming for {{count}} notes',
-      'modals.renameNotes': 'Rename notes',
-      'modals.processingFiles': 'Processing {{count}} files...',
-    };
-    return translations[key] || key;
-  }),
-  getPluralForm: vi.fn(
-    (count: number, one: string, _few: string, many: string) =>
-      count === 1 ? one : many
-  ),
-  tpSplit: vi.fn(() => ({ before: '', noun: 'notes', after: '' })),
-}));
+// Mock i18n: English-like strings with the placeholders and plural groups of the real locale, so each test reads the count and variables a modal passed
+vi.mock('../src/i18n', () => {
+  const translations: Record<string, string | { one: string; many: string }> = {
+    'notifications.renamingNotes': {
+      one: 'Renaming {{count}} note...',
+      many: 'Renaming {{count}} notes...',
+    },
+    'notifications.renamedNotes': 'Renamed {{renamed}}/{{total}} notes',
+    'notifications.renamedNotesWithNErrors': {
+      one: 'Renamed {{renamed}}/{{total}} notes ({{count}} error)',
+      many: 'Renamed {{renamed}}/{{total}} notes ({{count}} errors)',
+    },
+    'notifications.processingNotes': {
+      one: 'Processing {{count}} note...',
+      many: 'Processing {{count}} notes...',
+    },
+    'notifications.processedNotesWithNErrors': {
+      one: 'Processed {{processed}}/{{total}} notes ({{count}} error)',
+      many: 'Processed {{processed}}/{{total}} notes ({{count}} errors)',
+    },
+    'notifications.disabledRenamingForNNotes': {
+      one: 'Disabled renaming for {{count}} note',
+      many: 'Disabled renaming for {{count}} notes',
+    },
+    'notifications.enabledRenamingForNNotes': {
+      one: 'Enabled renaming for {{count}} note',
+      many: 'Enabled renaming for {{count}} notes',
+    },
+    'modals.renameNotes': 'Rename notes',
+  };
+  const fill = (template: string, variables: Record<string, unknown> = {}) =>
+    template.replace(/\{\{(\w+)\}\}/g, (placeholder, name: string) =>
+      name in variables ? String(variables[name]) : placeholder
+    );
+  return {
+    t: vi.fn((key: string, variables?: Record<string, unknown>) => {
+      const value = translations[key];
+      return typeof value === 'string' ? fill(value, variables) : key;
+    }),
+    tp: vi.fn(
+      (key: string, count: number, variables?: Record<string, unknown>) => {
+        const value = translations[key];
+        if (value === undefined) return key;
+        const form =
+          typeof value === 'string'
+            ? value
+            : count === 1
+              ? value.one
+              : value.many;
+        return fill(form, { ...variables, count });
+      }
+    ),
+    tpSplit: vi.fn((key: string, count: number) => ({
+      before: `${key}: `,
+      noun: count === 1 ? 'note' : 'notes',
+      after: '.',
+    })),
+  };
+});
 
-// Mock utils
+// Mock the gates the bulk dialogs apply
 vi.mock('../src/utils', () => ({
   verboseLog: vi.fn(),
+  verboseLogger: vi.fn(() => vi.fn()),
+}));
+vi.mock('../src/utils/file-exclusions', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/utils/file-exclusions')>()),
   shouldProcessFile: vi.fn(() => true),
+}));
+vi.mock('../src/utils/disable-property', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/utils/disable-property')>()),
   canModifyFile: vi.fn(() => ({ canModify: true })),
-  normalizeTag: vi.fn((tag: string) => tag),
 }));
 
 describe('Modal Error Notifications', () => {
@@ -79,13 +120,14 @@ describe('Modal Error Notifications', () => {
       message: string,
       timeout?: number
     ) {
-      noticeInstances.push({ message, timeout });
+      const containerEl = document.createElement('div');
+      noticeInstances.push({ message, timeout, containerEl });
       return {
         message,
         timeout,
         setMessage: vi.fn(),
         hide: vi.fn(),
-        containerEl: document.createElement('div'),
+        containerEl,
       } as any;
     } as any);
 
@@ -100,8 +142,7 @@ describe('Modal Error Notifications', () => {
       propertyManager: {
         ensurePropertyTypeIsCheckbox: vi.fn().mockResolvedValue(undefined),
       },
-      disableRenamingForNote: vi.fn().mockResolvedValue(undefined),
-      enableRenamingForNote: vi.fn().mockResolvedValue(undefined),
+      cacheManager: { clearReservedPaths: vi.fn() },
     };
 
     // Mock vault methods
@@ -117,12 +158,33 @@ describe('Modal Error Notifications', () => {
   });
 
   describe('DisableEnableModal notification behavior', () => {
+    it('warns only about backups, since adding or removing the property ignores exclusions', async () => {
+      const { DisableEnableModal } = await import('../src/modals');
+      const modal = new DisableEnableModal(
+        mockApp,
+        mockPlugin,
+        [new TFile('test1.md'), new TFile('test2.md')],
+        'disable'
+      );
+
+      // The mock Modal's own `onOpen` field shadows the prototype method
+      DisableEnableModal.prototype.onOpen.call(modal);
+
+      const paragraphs = Array.from(
+        modal.contentEl.querySelectorAll('p'),
+        (el) => el.textContent
+      );
+      expect(paragraphs[paragraphs.length - 1]).toBe(
+        'modals.bulkBackupCaution'
+      );
+      expect(paragraphs).not.toContain('modals.bulkCaution');
+    });
+
     it('should show success notice only when no errors occur', async () => {
       // Import the modal
       const { DisableEnableModal } = await import('../src/modals');
 
       const files = [new TFile('test1.md'), new TFile('test2.md')];
-      mockPlugin.disableRenamingForNote = vi.fn().mockResolvedValue(undefined);
 
       const modal = new DisableEnableModal(
         mockApp,
@@ -142,7 +204,7 @@ describe('Modal Error Notifications', () => {
 
       // Should NOT have error notice
       const errorNotices = noticeInstances.filter((n) =>
-        n.message.includes('errors')
+        n.message.includes('error')
       );
       expect(errorNotices.length).toBe(0);
     });
@@ -151,7 +213,7 @@ describe('Modal Error Notifications', () => {
       const { DisableEnableModal } = await import('../src/modals');
 
       const files = [new TFile('test1.md'), new TFile('test2.md')];
-      // processFiles uses fileManager.processFrontMatter, not disableRenamingForNote
+      // processFiles writes the property through fileManager.processFrontMatter
       mockApp.fileManager.processFrontMatter = vi
         .fn()
         .mockRejectedValue(new Error('Test error'));
@@ -167,7 +229,7 @@ describe('Modal Error Notifications', () => {
 
       // Should have error notice
       const errorNotices = noticeInstances.filter((n) =>
-        n.message.includes('errors')
+        n.message.includes('error')
       );
       expect(errorNotices.length).toBe(1);
 
@@ -200,7 +262,7 @@ describe('Modal Error Notifications', () => {
       const allResultNotices = noticeInstances.filter(
         (n) =>
           n.message.includes('Disabled') ||
-          n.message.includes('errors') ||
+          n.message.includes('error') ||
           n.message.includes('Renamed')
       );
 
@@ -234,11 +296,10 @@ describe('Modal Error Notifications', () => {
       ]);
     });
 
-    it('processes every note when the batch spans several chunks', async () => {
+    it('processes every note when the batch outnumbers the workers', async () => {
       const { DisableEnableModal } = await import('../src/modals');
 
-      // 20 files is larger than the internal chunk size, so this covers the
-      // boundary between chunks as well as a partial trailing chunk.
+      // 20 files is more than the worker pool holds, so each worker goes on to pull further notes
       const files = Array.from(
         { length: 20 },
         (_, index) => new TFile(`note${index}.md`)
@@ -261,7 +322,7 @@ describe('Modal Error Notifications', () => {
       expect(lastNoticeMessage()).toBe('Disabled renaming for 20 notes');
     });
 
-    it('keeps going after a failure mid-chunk', async () => {
+    it('keeps going after a failure mid-batch', async () => {
       const { DisableEnableModal } = await import('../src/modals');
 
       const files = Array.from(
@@ -281,51 +342,11 @@ describe('Modal Error Notifications', () => {
 
       await modal['processFiles']();
 
-      expect(lastNoticeMessage()).toBe('Processed 11/12 notes (1 errors)');
-    });
-
-    it('should show notice when propertyManager is null for disable action', async () => {
-      const { DisableEnableModal } = await import('../src/modals');
-
-      mockPlugin.propertyManager = null;
-      const files = [new TFile('test1.md')];
-
-      const modal = new DisableEnableModal(
-        mockApp,
-        mockPlugin,
-        files,
-        'disable'
-      );
-
-      await modal['processFiles']();
-
-      // Should show "not initialized" notice
-      const initNotices = noticeInstances.filter((n) =>
-        n.message.includes('not initialized')
-      );
-      expect(initNotices.length).toBe(1);
+      expect(lastNoticeMessage()).toBe('Processed 11/12 notes (1 error)');
     });
   });
 
   describe('RenameAllFilesModal notification behavior', () => {
-    it('should show notice when renameEngine is null', async () => {
-      const { RenameAllFilesModal } = await import('../src/modals');
-
-      mockPlugin.renameEngine = null;
-      mockApp.vault.getMarkdownFiles = vi
-        .fn()
-        .mockReturnValue([new TFile('test.md')]);
-
-      const modal = new RenameAllFilesModal(mockApp, mockPlugin);
-
-      await modal['renameFilesToProcess']();
-
-      const initNotices = noticeInstances.filter((n) =>
-        n.message.includes('not initialized')
-      );
-      expect(initNotices.length).toBe(1);
-    });
-
     it('should show success notice only when no errors', async () => {
       const { RenameAllFilesModal } = await import('../src/modals');
 
@@ -339,17 +360,17 @@ describe('Modal Error Notifications', () => {
       await modal['renameFilesToProcess']();
 
       const successNotices = noticeInstances.filter(
-        (n) => n.message.includes('Renamed') && !n.message.includes('errors')
+        (n) => n.message.includes('Renamed') && !n.message.includes('error')
       );
       expect(successNotices.length).toBe(1);
 
       const errorNotices = noticeInstances.filter((n) =>
-        n.message.includes('errors')
+        n.message.includes('error')
       );
       expect(errorNotices.length).toBe(0);
     });
 
-    it('should rename in concurrent chunks without losing count', async () => {
+    it('should rename concurrently without losing count', async () => {
       const { RenameAllFilesModal } = await import('../src/modals');
 
       const files = Array.from(
@@ -371,9 +392,98 @@ describe('Modal Error Notifications', () => {
       const modal = new RenameAllFilesModal(mockApp, mockPlugin);
       await modal['renameFilesToProcess']();
 
-      // One full chunk runs at once, and every note still lands in the total
+      // A full pool of eight runs at once, and every note still lands in the total
       expect(peakInFlight).toBe(8);
       expect(lastNoticeMessage()).toBe('Renamed 10/10 notes');
+    });
+
+    it('lets every other note start and finish while one slow rename is still pending', async () => {
+      const { RenameAllFilesModal } = await import('../src/modals');
+
+      const files = Array.from(
+        { length: 20 },
+        (_, index) => new TFile(`test${index}.md`)
+      );
+      mockApp.vault.getMarkdownFiles = vi.fn().mockReturnValue(files);
+
+      let releaseSlowNote = (): void => {};
+      const slowNoteReleased = new Promise<void>((resolve) => {
+        releaseSlowNote = resolve;
+      });
+      const started: string[] = [];
+      const finished: string[] = [];
+      mockPlugin.renameEngine.processFile = vi.fn(async (file: TFile) => {
+        started.push(file.path);
+        if (file.path === 'test0.md') {
+          await slowNoteReleased;
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        finished.push(file.path);
+        return { success: true };
+      });
+
+      const modal = new RenameAllFilesModal(mockApp, mockPlugin);
+      const run = modal['renameFilesToProcess']();
+
+      await vi.waitFor(() => expect(finished).toHaveLength(19));
+      expect(started).toHaveLength(20);
+      expect(finished).not.toContain('test0.md');
+
+      releaseSlowNote();
+      await run;
+
+      expect(finished).toHaveLength(20);
+      expect(lastNoticeMessage()).toBe('Renamed 20/20 notes');
+    });
+
+    it('keeps renaming the other notes after one rename throws', async () => {
+      const { RenameAllFilesModal } = await import('../src/modals');
+
+      const files = Array.from(
+        { length: 20 },
+        (_, index) => new TFile(`test${index}.md`)
+      );
+      mockApp.vault.getMarkdownFiles = vi.fn().mockReturnValue(files);
+      mockPlugin.renameEngine.processFile = vi.fn(async (file: TFile) => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        if (file.path === 'test2.md') throw new Error('Rename failed');
+        return { success: true };
+      });
+
+      const modal = new RenameAllFilesModal(mockApp, mockPlugin);
+      await modal['renameFilesToProcess']();
+
+      expect(mockPlugin.renameEngine.processFile).toHaveBeenCalledTimes(20);
+      expect(lastNoticeMessage()).toBe('Renamed 19/20 notes (1 error)');
+    });
+
+    it('never runs more than eight renames at once, however uneven their durations', async () => {
+      const { RenameAllFilesModal } = await import('../src/modals');
+
+      const files = Array.from(
+        { length: 30 },
+        (_, index) => new TFile(`test${index}.md`)
+      );
+      mockApp.vault.getMarkdownFiles = vi.fn().mockReturnValue(files);
+
+      let inFlight = 0;
+      let peakInFlight = 0;
+      mockPlugin.renameEngine.processFile = vi.fn(async (file: TFile) => {
+        inFlight++;
+        peakInFlight = Math.max(peakInFlight, inFlight);
+        const index = Number(file.basename.replace('test', ''));
+        await new Promise((resolve) => setTimeout(resolve, index % 5));
+        inFlight--;
+        return { success: true };
+      });
+
+      const modal = new RenameAllFilesModal(mockApp, mockPlugin);
+      await modal['renameFilesToProcess']();
+
+      expect(peakInFlight).toBe(8);
+      expect(mockPlugin.renameEngine.processFile).toHaveBeenCalledTimes(30);
+      expect(lastNoticeMessage()).toBe('Renamed 30/30 notes');
     });
 
     it('should show error notice when errors occur', async () => {
@@ -389,35 +499,19 @@ describe('Modal Error Notifications', () => {
       await modal['renameFilesToProcess']();
 
       const errorNotices = noticeInstances.filter((n) =>
-        n.message.includes('errors')
+        n.message.includes('error')
       );
       expect(errorNotices.length).toBe(1);
 
       // Success notice should NOT be shown when errors occur
       const successNotices = noticeInstances.filter(
-        (n) => n.message.includes('Renamed') && !n.message.includes('errors')
+        (n) => n.message.includes('Renamed') && !n.message.includes('error')
       );
       expect(successNotices.length).toBe(0);
     });
   });
 
   describe('RenameModal notification behavior', () => {
-    it('should show notice when renameEngine is null', async () => {
-      const { RenameModal } = await import('../src/modals');
-
-      mockPlugin.renameEngine = null;
-      const files = [new TFile('test.md')];
-
-      const modal = new RenameModal(mockApp, mockPlugin, files);
-
-      await modal['renameFilesToProcess']();
-
-      const initNotices = noticeInstances.filter((n) =>
-        n.message.includes('not initialized')
-      );
-      expect(initNotices.length).toBe(1);
-    });
-
     it('should show success notice only when no errors', async () => {
       const { RenameModal } = await import('../src/modals');
 
@@ -430,7 +524,7 @@ describe('Modal Error Notifications', () => {
       await modal['renameFilesToProcess']();
 
       const successNotices = noticeInstances.filter(
-        (n) => n.message.includes('Renamed') && !n.message.includes('errors')
+        (n) => n.message.includes('Renamed') && !n.message.includes('error')
       );
       expect(successNotices.length).toBe(1);
     });
@@ -447,10 +541,210 @@ describe('Modal Error Notifications', () => {
       await modal['renameFilesToProcess']();
 
       const errorNotices = noticeInstances.filter((n) =>
-        n.message.includes('errors')
+        n.message.includes('error')
       );
       expect(errorNotices.length).toBe(1);
     });
+  });
+
+  describe('bulk run wording and outcome notices', () => {
+    it('words a one-note rename in the singular', async () => {
+      const { RenameModal } = await import('../src/modals');
+
+      const modal = new RenameModal(mockApp, mockPlugin, [new TFile('a.md')]);
+      await modal['renameFilesToProcess']();
+
+      expect(noticeInstances.map((n) => n.message)).toEqual([
+        'Renaming 1 note...',
+        'Renamed 1/1 notes',
+      ]);
+    });
+
+    it.each([
+      ['disable', 'Disabled renaming for 1 note'],
+      ['enable', 'Enabled renaming for 1 note'],
+    ] as const)(
+      'words a one-note %s run in the singular',
+      async (action, outcome) => {
+        const { DisableEnableModal } = await import('../src/modals');
+
+        const modal = new DisableEnableModal(
+          mockApp,
+          mockPlugin,
+          [new TFile('a.md')],
+          action
+        );
+        await modal['processFiles']();
+
+        expect(noticeInstances.map((n) => n.message)).toEqual([
+          'Processing 1 note...',
+          outcome,
+        ]);
+      }
+    );
+
+    it('keeps the rename success and every error up until dismissed, tinted, while the disable success fades untinted', async () => {
+      const { RenameModal, DisableEnableModal } = await import('../src/modals');
+      const lastNotice = () => noticeInstances[noticeInstances.length - 1];
+
+      await new RenameModal(mockApp, mockPlugin, [new TFile('a.md')])[
+        'renameFilesToProcess'
+      ]();
+      const renamed = lastNotice();
+      await new DisableEnableModal(
+        mockApp,
+        mockPlugin,
+        [new TFile('a.md')],
+        'disable'
+      )['processFiles']();
+      const disabled = lastNotice();
+      mockApp.fileManager.processFrontMatter = vi
+        .fn()
+        .mockRejectedValue(new Error('Test error'));
+      await new DisableEnableModal(
+        mockApp,
+        mockPlugin,
+        [new TFile('a.md')],
+        'enable'
+      )['processFiles']();
+      const failed = lastNotice();
+
+      expect(
+        [renamed, disabled, failed].map((notice) => [
+          notice.timeout,
+          notice.containerEl.className,
+        ])
+      ).toEqual([
+        [0, 'mod-success'],
+        [undefined, ''],
+        [0, 'mod-warning'],
+      ]);
+    });
+
+    it('clears the rename reservations once the run settles', async () => {
+      const { RenameModal } = await import('../src/modals');
+
+      mockPlugin.cacheManager = { clearReservedPaths: vi.fn() };
+      mockPlugin.renameEngine.processFile = vi
+        .fn()
+        .mockRejectedValue(new Error('Rename failed'));
+      await new RenameModal(mockApp, mockPlugin, [
+        new TFile('a.md'),
+        new TFile('b.md'),
+      ])['renameFilesToProcess']();
+
+      expect(mockPlugin.cacheManager.clearReservedPaths).toHaveBeenCalledTimes(
+        1
+      );
+    });
+  });
+
+  describe('nothing to rename', () => {
+    it('says every selected note is excluded when exclusions skip the whole selection', async () => {
+      const { RenameModal } = await import('../src/modals');
+      vi.mocked(shouldProcessFile).mockImplementation(() => false);
+
+      const modal = new RenameModal(mockApp, mockPlugin, [
+        new TFile('a.md'),
+        new TFile('b.md'),
+      ]);
+      // The mock Modal's own `open` field shadows the prototype method
+      RenameModal.prototype.open.call(modal);
+
+      expect(noticeInstances.map((n) => n.message)).toEqual([
+        'notifications.allSelectedNotesExcluded',
+      ]);
+    });
+  });
+
+  describe('dialog text', () => {
+    /** The dialog's first paragraph and the bold runs inside it. */
+    function readMessage(modal: { contentEl: HTMLElement }) {
+      const paragraph = modal.contentEl.querySelector('p') as HTMLElement;
+      return {
+        text: paragraph.textContent,
+        bold: Array.from(paragraph.querySelectorAll('strong')).map(
+          (el) => el.textContent
+        ),
+      };
+    }
+
+    function filesWithOneBlocked(): TFile[] {
+      vi.mocked(canModifyFile).mockImplementation((file) =>
+        file.path === 'blocked.md'
+          ? { canModify: false, reason: 'disable-property' }
+          : { canModify: true }
+      );
+      return [new TFile('a.md'), new TFile('b.md'), new TFile('blocked.md')];
+    }
+
+    it('counts every selected note in a multi-selection, renamable or not', async () => {
+      const { RenameModal } = await import('../src/modals');
+
+      const modal = new RenameModal(mockApp, mockPlugin, filesWithOneBlocked());
+      RenameModal.prototype.onOpen.call(modal);
+
+      expect(readMessage(modal)).toEqual({
+        text: 'modals.renameNNotes: 3 notes.',
+        bold: ['3 notes'],
+      });
+      expect(modal['getFilesToProcess']()).toHaveLength(2);
+    });
+
+    it('counts every selected note in the progress and outcome notices too', async () => {
+      const { RenameModal } = await import('../src/modals');
+
+      const modal = new RenameModal(mockApp, mockPlugin, filesWithOneBlocked());
+      await modal['renameFilesToProcess']();
+
+      expect(noticeInstances.map((notice) => notice.message)).toEqual([
+        'Renaming 3 notes...',
+        'Renamed 2/3 notes',
+      ]);
+    });
+
+    it('counts only the notes it will rename everywhere else', async () => {
+      const { RenameAllFilesModal } = await import('../src/modals');
+
+      mockApp.vault.getMarkdownFiles = vi
+        .fn()
+        .mockReturnValue(filesWithOneBlocked());
+      const modal = new RenameAllFilesModal(mockApp, mockPlugin);
+      RenameAllFilesModal.prototype.onOpen.call(modal);
+
+      expect(readMessage(modal).bold).toEqual(['2 notes']);
+    });
+
+    it.each([
+      [
+        'disable',
+        'modals.disableEnableAddProperty',
+        'modals.addPropertyToNNotes',
+      ],
+      [
+        'enable',
+        'modals.disableEnableRemoveProperty',
+        'modals.removePropertyFromNNotes',
+      ],
+    ] as const)(
+      'names the property and the counted notes when asked to %s',
+      async (action, introKey, countKey) => {
+        const { DisableEnableModal } = await import('../src/modals');
+
+        const modal = new DisableEnableModal(
+          mockApp,
+          mockPlugin,
+          [new TFile('a.md')],
+          action
+        );
+        DisableEnableModal.prototype.onOpen.call(modal);
+
+        expect(readMessage(modal)).toEqual({
+          text: `${introKey}no rename: true${countKey}: 1 note.`,
+          bold: ['no rename: true', '1 note'],
+        });
+      }
+    );
   });
 
   describe('bulk rename scope', () => {
@@ -546,6 +840,59 @@ describe('Modal Error Notifications', () => {
       expect(processedPaths().sort()).toEqual(['exact.md', 'subtag.md']);
     });
 
+    it.each([
+      { dialogTag: '#Work', noteTag: 'work' },
+      { dialogTag: 'work', noteTag: '#Work' },
+    ])(
+      'finds a note tagged $noteTag from the dialog for $dialogTag',
+      async ({ dialogTag, noteTag }) => {
+        const { ProcessTagModal } = await import('../src/modals');
+
+        mockApp.vault.getMarkdownFiles = vi
+          .fn()
+          .mockReturnValue([new TFile('tagged.md'), new TFile('inline.md')]);
+        mockApp.metadataCache.getFileCache = vi.fn((file: TFile) =>
+          file.path === 'tagged.md'
+            ? { frontmatter: { tags: [noteTag] }, tags: [] }
+            : {
+                frontmatter: {},
+                tags: [
+                  {
+                    tag: `#${noteTag.replace(/^#/, '')}`,
+                    position: {
+                      start: { line: 0, col: 0, offset: 0 },
+                      end: { line: 0, col: 5, offset: 5 },
+                    },
+                  },
+                ],
+              }
+        );
+
+        const modal = new ProcessTagModal(mockApp, mockPlugin, dialogTag);
+
+        expect(modal['getFilesToProcess']().map((f) => f.path)).toEqual([
+          'tagged.md',
+          'inline.md',
+        ]);
+      }
+    );
+
+    it('finds a note whose properties use a Tags key in another case', async () => {
+      const { ProcessTagModal } = await import('../src/modals');
+
+      mockApp.vault.getMarkdownFiles = vi
+        .fn()
+        .mockReturnValue([new TFile('tagged.md')]);
+      mockApp.metadataCache.getFileCache = vi.fn(() => ({
+        frontmatter: { Tags: 'project' },
+        tags: [],
+      }));
+
+      const modal = new ProcessTagModal(mockApp, mockPlugin, 'project');
+
+      expect(modal['getFilesToProcess']()).toHaveLength(1);
+    });
+
     it('leaves out notes the exclusions or the rename-blocking property skip', async () => {
       const { RenameAllFilesModal } = await import('../src/modals');
 
@@ -558,9 +905,11 @@ describe('Modal Error Notifications', () => {
       vi.mocked(shouldProcessFile).mockImplementation(
         (file) => file.path !== 'excluded.md'
       );
-      vi.mocked(canModifyFile).mockImplementation((file) => ({
-        canModify: file.path !== 'blocked.md',
-      }));
+      vi.mocked(canModifyFile).mockImplementation((file) =>
+        file.path === 'blocked.md'
+          ? { canModify: false, reason: 'disable-property' }
+          : { canModify: true }
+      );
       const modal = new RenameAllFilesModal(mockApp, mockPlugin);
       const previewCount = modal['getFilesToProcess']().length;
       await modal['renameFilesToProcess']();
@@ -579,9 +928,9 @@ describe('Modal Error Notifications', () => {
       await modal['renameFilesToProcess']();
 
       expect(mockPlugin.renameEngine.processFile).toHaveBeenCalledTimes(1);
-      expect(mockPlugin.renameEngine.processFile.mock.calls[0][5]).toBe(
-        undefined
-      );
+      expect(
+        mockPlugin.renameEngine.processFile.mock.calls[0][1].exclusionOverrides
+      ).toBe(undefined);
     });
 
     it('scans the vault once for both the preview and the run', async () => {
@@ -690,9 +1039,6 @@ describe('Modal Error Notifications', () => {
 
   describe('confirmation dialogs', () => {
     type ConfirmationMock = InstanceType<typeof mockObsidian.ConfirmationModal>;
-
-    /** Lets a confirmation button's async click finish. */
-    const flushClicks = () => new Promise((resolve) => setTimeout(resolve, 0));
 
     const buttonEls = (modal: object): HTMLButtonElement[] =>
       Array.from(
@@ -831,7 +1177,7 @@ describe('Modal Error Notifications', () => {
         openBulk(modal, prototype);
 
         buttonEls(modal)[0].click();
-        await flushClicks();
+        await flush();
 
         expect(rename).toHaveBeenCalledTimes(1);
         expect(modal.close).toHaveBeenCalledTimes(1);
@@ -845,7 +1191,7 @@ describe('Modal Error Notifications', () => {
         openBulk(modal, prototype);
 
         buttonEls(modal)[1].click();
-        await flushClicks();
+        await flush();
 
         expect(rename).not.toHaveBeenCalled();
         expect(modal.close).toHaveBeenCalledTimes(1);
@@ -873,9 +1219,10 @@ describe('Modal Error Notifications', () => {
         const enable = await openDisableEnable('enable');
 
         expect(disable.modal).toBeInstanceOf(mockObsidian.ConfirmationModal);
+        // Cancel carries no label of FLIT's, so it reads as Obsidian's own; "Cancel" is the mock's stand-in for it
         expect(disable.buttons.map((b) => b.textContent)).toEqual([
           'modals.buttons.disable',
-          'modals.buttons.cancel',
+          'Cancel',
         ]);
         expect(disable.buttons[0].classList.contains('mod-cta')).toBe(true);
         expect(disable.buttons[1].classList.contains('mod-cancel')).toBe(true);
@@ -893,7 +1240,7 @@ describe('Modal Error Notifications', () => {
           await openDisableEnable('disable');
 
         buttons[0].click();
-        await flushClicks();
+        await flush();
 
         expect(processFiles).toHaveBeenCalledTimes(1);
         expect(modal.close).toHaveBeenCalledTimes(1);
@@ -904,7 +1251,7 @@ describe('Modal Error Notifications', () => {
           await openDisableEnable('enable');
 
         buttons[1].click();
-        await flushClicks();
+        await flush();
 
         expect(processFiles).not.toHaveBeenCalled();
         expect(modal.close).toHaveBeenCalledTimes(1);
@@ -912,17 +1259,15 @@ describe('Modal Error Notifications', () => {
     });
 
     describe('InternalLinkModal', () => {
-      async function openInternalLink(withDisplayText = false) {
+      async function openInternalLink() {
         const { InternalLinkModal } = await import('../src/modals');
         const onSubmit = vi.fn();
-        const modal = new InternalLinkModal(
-          mockApp,
-          mockPlugin,
-          onSubmit,
-          withDisplayText
-        );
+        const modal = new InternalLinkModal(mockApp, onSubmit);
         // The mock leaves the title detached, while Obsidian nests it in the header that phones add their buttons to
         modal.modalEl.createDiv('modal-header').appendChild(modal.titleEl);
+        // Connected, with the content inside the dialog, so focus can be observed
+        document.body.appendChild(modal.modalEl);
+        modal.modalEl.appendChild(modal.contentEl);
         InternalLinkModal.prototype.onOpen.call(modal);
         return {
           modal,
@@ -937,10 +1282,9 @@ describe('Modal Error Notifications', () => {
         };
       }
 
-      const pressEnter = (input: HTMLInputElement) =>
-        input.dispatchEvent(
-          new window.KeyboardEvent('keydown', { key: 'Enter' })
-        );
+      afterEach(() => {
+        document.body.replaceChildren();
+      });
 
       it('uses the native title and keeps the full-width input', async () => {
         const { modal, input } = await openInternalLink();
@@ -961,15 +1305,14 @@ describe('Modal Error Notifications', () => {
       });
 
       it('adds the link and closes on Add', async () => {
-        const { modal, onSubmit, input, buttons } =
-          await openInternalLink(true);
+        const { modal, onSubmit, input, buttons } = await openInternalLink();
 
         expect(buttons[0].textContent).toBe('modals.buttons.add');
         expect(buttons[0].classList.contains('mod-cta')).toBe(true);
         input.value = ' Target ';
         buttons[0].click();
 
-        expect(onSubmit).toHaveBeenCalledWith('Target', 'Target');
+        expect(onSubmit).toHaveBeenCalledWith('Target');
         // Add closes the dialog itself; the async click's second close is a no-op in Obsidian
         expect(modal.close).toHaveBeenCalledTimes(1);
       });
@@ -978,7 +1321,7 @@ describe('Modal Error Notifications', () => {
         const { modal, onSubmit, buttons } = await openInternalLink();
 
         buttons[0].click();
-        await flushClicks();
+        await flush();
 
         expect(onSubmit).not.toHaveBeenCalled();
         expect(modal.close).not.toHaveBeenCalled();
@@ -990,7 +1333,7 @@ describe('Modal Error Notifications', () => {
         input.value = 'Target';
         pressEnter(input);
 
-        expect(onSubmit).toHaveBeenCalledWith('Target', undefined);
+        expect(onSubmit).toHaveBeenCalledWith('Target');
         expect(modal.close).toHaveBeenCalledTimes(1);
       });
 
@@ -999,7 +1342,7 @@ describe('Modal Error Notifications', () => {
 
         input.value = 'Target';
         buttons[1].click();
-        await flushClicks();
+        await flush();
 
         expect(buttons[1].classList.contains('mod-cancel')).toBe(true);
         expect(onSubmit).not.toHaveBeenCalled();
@@ -1009,14 +1352,37 @@ describe('Modal Error Notifications', () => {
       it('keeps Add and Cancel at the bottom on desktop, with nothing in the header', async () => {
         const { modal, buttons, headerButtons } = await openInternalLink();
 
+        // Obsidian's own Cancel label, which the mock stands in for with "Cancel"
         expect(buttons.map((button) => button.textContent)).toEqual([
           'modals.buttons.add',
-          'modals.buttons.cancel',
+          'Cancel',
         ]);
         expect(headerButtons).toEqual([]);
         expect(modal.modalEl.classList.contains('flit-header-actions')).toBe(
           false
         );
+      });
+
+      it('leaves focus alone on desktop, where Obsidian focuses the input as the first focusable element', async () => {
+        const { input } = await openInternalLink();
+
+        expect(document.activeElement).not.toBe(input);
+      });
+
+      describe('on mobile', () => {
+        beforeEach(() => {
+          mockObsidian.Platform.isMobile = true;
+        });
+
+        afterEach(() => {
+          mockObsidian.Platform.isMobile = false;
+        });
+
+        it('focuses the input as the dialog opens, inside the opening tap', async () => {
+          const { input } = await openInternalLink();
+
+          expect(document.activeElement).toBe(input);
+        });
       });
 
       describe('on tablets', () => {
@@ -1035,7 +1401,7 @@ describe('Modal Error Notifications', () => {
 
           expect(buttons.map((button) => button.textContent)).toEqual([
             'modals.buttons.add',
-            'modals.buttons.cancel',
+            'Cancel',
           ]);
           expect(headerButtons).toEqual([]);
         });
@@ -1079,12 +1445,12 @@ describe('Modal Error Notifications', () => {
 
         it('adds the link and closes on the submit button', async () => {
           const { modal, onSubmit, input, headerButtons } =
-            await openInternalLink(true);
+            await openInternalLink();
 
           input.value = ' Target ';
           headerButtons[1].click();
 
-          expect(onSubmit).toHaveBeenCalledWith('Target', 'Target');
+          expect(onSubmit).toHaveBeenCalledWith('Target');
           expect(modal.close).toHaveBeenCalledTimes(1);
         });
 
@@ -1092,7 +1458,7 @@ describe('Modal Error Notifications', () => {
           const { modal, onSubmit, headerButtons } = await openInternalLink();
 
           headerButtons[1].click();
-          await flushClicks();
+          await flush();
 
           expect(onSubmit).not.toHaveBeenCalled();
           expect(modal.close).not.toHaveBeenCalled();
@@ -1104,7 +1470,7 @@ describe('Modal Error Notifications', () => {
 
           input.value = 'Target';
           headerButtons[0].click();
-          await flushClicks();
+          await flush();
 
           expect(onSubmit).not.toHaveBeenCalled();
           expect(modal.close).toHaveBeenCalledTimes(1);
@@ -1116,7 +1482,7 @@ describe('Modal Error Notifications', () => {
           input.value = 'Target';
           pressEnter(input);
 
-          expect(onSubmit).toHaveBeenCalledWith('Target', undefined);
+          expect(onSubmit).toHaveBeenCalledWith('Target');
           expect(modal.close).toHaveBeenCalledTimes(1);
         });
       });

@@ -1,9 +1,21 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { FileStateManager } from '../../src/core/file-state-manager';
+import { Text } from '@codemirror/state';
+import { FileState, FileStateManager } from '../../src/core/file-state-manager';
+import { TIMING } from '../../src/constants/timing';
 
 // Mock plugin
 function createMockPlugin() {
   return {} as any;
+}
+
+/** Read a path's whole state from the private map, which no public getter exposes, to check what moves and maintenance leave behind */
+function stateAt(
+  manager: FileStateManager,
+  path: string
+): FileState | undefined {
+  return (
+    manager as unknown as { fileStates: Map<string, FileState> }
+  ).fileStates.get(path);
 }
 
 describe('FileStateManager', () => {
@@ -40,6 +52,54 @@ describe('FileStateManager', () => {
       expect(() =>
         manager.deleteLastEditorContent('nonexistent.md')
       ).not.toThrow();
+    });
+
+    // An unchanged first-line keystroke stores the editor's document instead of joining the whole note.
+    describe('CodeMirror document baseline', () => {
+      it('stores a document without converting it and reads it back as a string', () => {
+        const doc = Text.of(['Title', 'Body']);
+        const toString = vi.spyOn(doc, 'toString');
+
+        manager.setLastEditorContent('test.md', doc);
+
+        expect(toString).not.toHaveBeenCalled();
+        expect(manager.getLastEditorContent('test.md')).toBe('Title\nBody');
+      });
+
+      it('answers presence without converting the document', () => {
+        const doc = Text.of(['Title', 'Body']);
+        const toString = vi.spyOn(doc, 'toString');
+        manager.setLastEditorContent('test.md', doc);
+
+        expect(manager.hasLastEditorContent('test.md')).toBe(true);
+        expect(manager.hasLastEditorContent('other.md')).toBe(false);
+        expect(toString).not.toHaveBeenCalled();
+      });
+
+      it('counts an empty string as present', () => {
+        manager.setLastEditorContent('test.md', '');
+
+        expect(manager.hasLastEditorContent('test.md')).toBe(true);
+      });
+
+      it('answers false once the content is deleted', () => {
+        manager.setLastEditorContent('test.md', 'content');
+        manager.deleteLastEditorContent('test.md');
+
+        expect(manager.hasLastEditorContent('test.md')).toBe(false);
+      });
+
+      it('moves the stored document to a renamed note’s path without converting it', () => {
+        const doc = Text.of(['Title', 'Body']);
+        const toString = vi.spyOn(doc, 'toString');
+        manager.setLastEditorContent('old.md', doc);
+
+        manager.notifyFileRenamed('old.md', 'new.md');
+
+        expect(toString).not.toHaveBeenCalled();
+        expect(manager.hasLastEditorContent('old.md')).toBe(false);
+        expect(stateAt(manager, 'new.md')?.lastEditorContent).toBe(doc);
+      });
     });
   });
 
@@ -118,6 +178,7 @@ describe('FileStateManager', () => {
     const cache = {
       firstNonEmptyLine: 'Title',
       titleSourceLine: 'Title',
+      raw: false,
       lastUpdated: Date.now(),
     };
 
@@ -126,25 +187,9 @@ describe('FileStateManager', () => {
       expect(manager.getTitleRegionCache('test.md')).toEqual(cache);
     });
 
-    it('should delete title region cache', () => {
-      manager.setTitleRegionCache('test.md', cache);
-      manager.deleteTitleRegionCache('test.md');
-      expect(manager.getTitleRegionCache('test.md')).toBeUndefined();
-    });
-
-    it('should clear all title region caches', () => {
-      manager.setTitleRegionCache('test1.md', cache);
-      manager.setTitleRegionCache('test2.md', cache);
-
-      manager.clearAllTitleRegionCaches();
-
-      expect(manager.getTitleRegionCache('test1.md')).toBeUndefined();
-      expect(manager.getTitleRegionCache('test2.md')).toBeUndefined();
-    });
-
-    it('should update cache key on rename', () => {
+    it('should move to the new path on rename', () => {
       manager.setTitleRegionCache('old.md', cache);
-      manager.updateTitleRegionCacheKey('old.md', 'new.md');
+      manager.notifyFileRenamed('old.md', 'new.md');
 
       expect(manager.getTitleRegionCache('old.md')).toBeUndefined();
       expect(manager.getTitleRegionCache('new.md')).toEqual(cache);
@@ -173,16 +218,6 @@ describe('FileStateManager', () => {
       manager.releaseLock('test.md');
       expect(manager.acquireLock('test.md')).toBe(true);
     });
-
-    it('should clear all locks', () => {
-      manager.acquireLock('test1.md');
-      manager.acquireLock('test2.md');
-
-      manager.clearAllLocks();
-
-      expect(manager.isLocked('test1.md')).toBe(false);
-      expect(manager.isLocked('test2.md')).toBe(false);
-    });
   });
 
   describe('pending first line property recheck', () => {
@@ -199,16 +234,26 @@ describe('FileStateManager', () => {
 
       expect(manager.hasPendingFirstLinePropertyRecheck('test.md')).toBe(false);
     });
+  });
 
-    it('should get files with pending first line property recheck', () => {
-      manager.markPendingFirstLinePropertyRecheck('test1.md');
-      manager.markPendingFirstLinePropertyRecheck('test2.md');
-      manager.setLastEditorContent('test3.md', 'no recheck');
+  describe('pending metadata update', () => {
+    it('should mark, check and clear a pending metadata update', () => {
+      expect(manager.hasPendingMetadataUpdate('test.md')).toBe(false);
 
-      const files = manager.getFilesWithPendingFirstLinePropertyRecheck();
-      expect(files).toContain('test1.md');
-      expect(files).toContain('test2.md');
-      expect(files).not.toContain('test3.md');
+      manager.markPendingMetadataUpdate('test.md');
+      expect(manager.hasPendingMetadataUpdate('test.md')).toBe(true);
+
+      manager.clearPendingMetadataUpdate('test.md');
+      expect(manager.hasPendingMetadataUpdate('test.md')).toBe(false);
+    });
+
+    it('should move to the new path on rename', () => {
+      manager.markPendingMetadataUpdate('old.md');
+
+      manager.notifyFileRenamed('old.md', 'new.md');
+
+      expect(manager.hasPendingMetadataUpdate('old.md')).toBe(false);
+      expect(manager.hasPendingMetadataUpdate('new.md')).toBe(true);
     });
   });
 
@@ -230,25 +275,52 @@ describe('FileStateManager', () => {
 
   describe('recently renamed', () => {
     it('should mark and check recently renamed', () => {
-      expect(manager.wasRecentlyRenamed('test.md')).toBe(false);
+      expect(manager.wasRecentlyRenamedInto('test.md')).toBe(false);
 
-      manager.markRecentlyRenamed('test.md');
-      expect(manager.wasRecentlyRenamed('test.md')).toBe(true);
+      manager.markRecentlyRenamedInto('test.md');
+      expect(manager.wasRecentlyRenamedInto('test.md')).toBe(true);
     });
 
     it('should return false after time window expires', () => {
-      manager.markRecentlyRenamed('test.md');
+      manager.markRecentlyRenamedInto('test.md');
 
       vi.advanceTimersByTime(150);
-      expect(manager.wasRecentlyRenamed('test.md')).toBe(false);
+      expect(manager.wasRecentlyRenamedInto('test.md')).toBe(false);
     });
 
     it('should use custom time window', () => {
-      manager.markRecentlyRenamed('test.md');
+      manager.markRecentlyRenamedInto('test.md');
 
       vi.advanceTimersByTime(50);
-      expect(manager.wasRecentlyRenamed('test.md', 100)).toBe(true);
-      expect(manager.wasRecentlyRenamed('test.md', 30)).toBe(false);
+      expect(manager.wasRecentlyRenamedInto('test.md', 100)).toBe(true);
+      expect(manager.wasRecentlyRenamedInto('test.md', 30)).toBe(false);
+    });
+
+    it('answers each window from the one record, the stale-create guard’s longer one included', () => {
+      manager.markRecentlyRenamedInto('test.md');
+
+      vi.advanceTimersByTime(500);
+
+      expect(manager.wasRecentlyRenamedInto('test.md')).toBe(false);
+      expect(
+        manager.wasRecentlyRenamedInto('test.md', TIMING.STALE_CREATE_WINDOW_MS)
+      ).toBe(true);
+    });
+
+    // The sequence of a plugin rename: the vault `rename` handler moves the state, then the engine marks the new path
+    it('matches the path a rename moved the note into in either window, never the path it vacated', () => {
+      manager.setLastSavedContent('A.md', 'A');
+      manager.notifyFileRenamed('A.md', 'B.md');
+      manager.markRecentlyRenamedInto('B.md');
+
+      expect(manager.wasRecentlyRenamedInto('B.md')).toBe(true);
+      expect(
+        manager.wasRecentlyRenamedInto('B.md', TIMING.STALE_CREATE_WINDOW_MS)
+      ).toBe(true);
+      expect(manager.wasRecentlyRenamedInto('A.md')).toBe(false);
+      expect(
+        manager.wasRecentlyRenamedInto('A.md', TIMING.STALE_CREATE_WINDOW_MS)
+      ).toBe(false);
     });
   });
 
@@ -280,6 +352,37 @@ describe('FileStateManager', () => {
       expect(manager.getLastSavedContent('test.md')).toBeUndefined();
     });
 
+    it('drops an aged title region cache, and the state it alone kept', () => {
+      manager.setTitleRegionCache('Intermediate name.md', {
+        firstNonEmptyLine: 'Intermediate name',
+        titleSourceLine: 'Intermediate name',
+        raw: false,
+        lastUpdated: Date.now(),
+      });
+
+      vi.advanceTimersByTime(11 * 60 * 1000);
+      manager.runMaintenance();
+
+      expect(
+        manager.getTitleRegionCache('Intermediate name.md')
+      ).toBeUndefined();
+      expect(stateAt(manager, 'Intermediate name.md')).toBeUndefined();
+    });
+
+    it('keeps a fresh title region cache', () => {
+      manager.setTitleRegionCache('test.md', {
+        firstNonEmptyLine: 'Title',
+        titleSourceLine: 'Title',
+        raw: false,
+        lastUpdated: Date.now(),
+      });
+
+      vi.advanceTimersByTime(5 * 60 * 1000);
+      manager.runMaintenance();
+
+      expect(manager.getTitleRegionCache('test.md')).toBeDefined();
+    });
+
     it('should cleanup stale locks', () => {
       manager.acquireLock('test.md');
 
@@ -297,7 +400,7 @@ describe('FileStateManager', () => {
       manager.runMaintenance();
 
       // State entry should be removed when empty
-      expect(manager.getState('test.md')).toBeUndefined();
+      expect(stateAt(manager, 'test.md')).toBeUndefined();
     });
 
     it('removes a state whose lock, recheck and syncing flags were all cleared', () => {
@@ -310,7 +413,7 @@ describe('FileStateManager', () => {
 
       manager.runMaintenance();
 
-      expect(manager.getState('test.md')).toBeUndefined();
+      expect(stateAt(manager, 'test.md')).toBeUndefined();
     });
 
     it('removes a state whose lock went stale', () => {
@@ -319,17 +422,17 @@ describe('FileStateManager', () => {
       vi.advanceTimersByTime(65 * 1000);
       manager.runMaintenance();
 
-      expect(manager.getState('test.md')).toBeUndefined();
+      expect(stateAt(manager, 'test.md')).toBeUndefined();
     });
 
     it('should cleanup lastRenamedTime after 1 second', () => {
-      manager.markRecentlyRenamed('test.md');
+      manager.markRecentlyRenamedInto('test.md');
 
       vi.advanceTimersByTime(2000);
       manager.runMaintenance();
 
-      // The wasRecentlyRenamed check should return false since timestamp is cleared
-      expect(manager.wasRecentlyRenamed('test.md')).toBe(false);
+      // The wasRecentlyRenamedInto check should return false since timestamp is cleared
+      expect(manager.wasRecentlyRenamedInto('test.md')).toBe(false);
     });
   });
 
@@ -409,7 +512,7 @@ describe('FileStateManager', () => {
         manager.clearThrottleTimer('test.md');
 
         expect(manager.hasDelayedThrottleTimer('test.md')).toBe(false);
-        expect(manager.getState('test.md')?.throttleTimerIsDelayed).toBe(
+        expect(stateAt(manager, 'test.md')?.throttleTimerIsDelayed).toBe(
           undefined
         );
       });
@@ -442,25 +545,8 @@ describe('FileStateManager', () => {
 
         manager.runMaintenance();
 
-        expect(manager.getState('test.md')).toBeUndefined();
+        expect(stateAt(manager, 'test.md')).toBeUndefined();
       });
-    });
-  });
-
-  describe('creation delay timers', () => {
-    it('should set and check creation delay', () => {
-      const timer = window.setTimeout(() => {}, 1000);
-      manager.setCreationDelayTimer('test.md', timer);
-
-      expect(manager.isFileInCreationDelay('test.md')).toBe(true);
-    });
-
-    it('should clear creation delay timer', () => {
-      const timer = window.setTimeout(() => {}, 1000);
-      manager.setCreationDelayTimer('test.md', timer);
-      manager.clearCreationDelayTimer('test.md');
-
-      expect(manager.isFileInCreationDelay('test.md')).toBe(false);
     });
   });
 
@@ -471,16 +557,11 @@ describe('FileStateManager', () => {
         'test.md',
         window.setTimeout(() => {}, 1000)
       );
-      manager.setCreationDelayTimer(
-        'test2.md',
-        window.setTimeout(() => {}, 1000)
-      );
 
       manager.dispose();
 
       expect(manager.getLastEditorContent('test.md')).toBeUndefined();
       expect(manager.hasThrottleTimer('test.md')).toBe(false);
-      expect(manager.isFileInCreationDelay('test2.md')).toBe(false);
     });
   });
 
@@ -494,24 +575,6 @@ describe('FileStateManager', () => {
       // Advance past TTL (SELF_REF_NOTICE_TTL_MS = 2000ms)
       vi.advanceTimersByTime(2100);
       expect(manager.canShowSelfRefNotice('test.md')).toBe(true);
-    });
-  });
-
-  describe('operation tracking', () => {
-    it('should get and set operation data', () => {
-      const data = { count: 5, lastContent: 'test', lastUpdate: Date.now() };
-      manager.setOperationData('test.md', data);
-
-      expect(manager.getOperationData('test.md')).toEqual(data);
-    });
-
-    it('should update operation count', () => {
-      manager.updateOperationCount('test.md', 'content1');
-      expect(manager.getOperationData('test.md')?.count).toBe(1);
-
-      manager.updateOperationCount('test.md', 'content2');
-      expect(manager.getOperationData('test.md')?.count).toBe(2);
-      expect(manager.getOperationData('test.md')?.lastContent).toBe('content2');
     });
   });
 });

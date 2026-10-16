@@ -20,6 +20,7 @@ function createMockPlugin(openLeaves: unknown[] = []) {
         // Obsidian runs the callback at once when the layout is already ready, as on a plugin reload
         onLayoutReady: vi.fn((callback: () => void) => callback()),
         getLeavesOfType: vi.fn(() => openLeaves),
+        iterateAllLeaves: vi.fn(),
       },
       vault: { on: vi.fn(), cachedRead: vi.fn().mockResolvedValue('') },
       metadataCache: {
@@ -42,13 +43,13 @@ function createMockPlugin(openLeaves: unknown[] = []) {
       },
     },
     editorLifecycle: {
-      isFileInCreationDelay: vi.fn(() => false),
+      isFileInCreationWindow: vi.fn((_file: TFile) => false),
       handleEditorChangeWithThrottle: vi.fn(),
     },
-    cacheManager: { isLocked: vi.fn(() => false) },
     fileStateManager: {
       getLastSavedContent: vi.fn(),
       setLastSavedContent: vi.fn(),
+      isLocked: vi.fn(() => false),
     },
     isFullyLoaded: true,
     renameEngine: {
@@ -119,7 +120,7 @@ describe('rename on turning the disable property off', () => {
     cacheChanges(note, UNCHECKED);
 
     expect(processFileOf(plugin)).toHaveBeenCalledTimes(1);
-    expect(processFileOf(plugin)).toHaveBeenCalledWith(note, true);
+    expect(processFileOf(plugin)).toHaveBeenCalledWith(note);
   });
 
   it('waits out a half-typed value, then renames once the key is removed', () => {
@@ -156,14 +157,19 @@ describe('rename on turning the disable property off', () => {
     expect(processFileOf(plugin)).not.toHaveBeenCalled();
   });
 
-  it('leaves a note in its creation delay to the new-note processing', () => {
+  it('leaves a note in its creation window to the new-note pipeline', () => {
     const note = new TFile('Fixtures/note.md');
     const { plugin, cacheChanges } = setUp();
     cacheChanges(note, BLOCKING);
-    plugin.editorLifecycle.isFileInCreationDelay.mockReturnValue(true);
+    plugin.editorLifecycle.isFileInCreationWindow.mockImplementation(
+      (file) => file === note
+    );
 
     cacheChanges(note, UNCHECKED);
 
+    expect(plugin.editorLifecycle.isFileInCreationWindow).toHaveBeenCalledWith(
+      note
+    );
     expect(processFileOf(plugin)).not.toHaveBeenCalled();
   });
 
@@ -172,7 +178,7 @@ describe('rename on turning the disable property off', () => {
     const note = new TFile('Fixtures/note.md');
     const { plugin, cacheChanges } = setUp();
     cacheChanges(note, BLOCKING);
-    plugin.cacheManager.isLocked.mockReturnValueOnce(true);
+    plugin.fileStateManager.isLocked.mockReturnValueOnce(true);
 
     cacheChanges(note, UNCHECKED);
     expect(processFileOf(plugin)).not.toHaveBeenCalled();
@@ -186,7 +192,7 @@ describe('rename on turning the disable property off', () => {
     const note = new TFile('Fixtures/note.md');
     const { plugin, cacheChanges } = setUp();
     cacheChanges(note, BLOCKING);
-    plugin.cacheManager.isLocked.mockReturnValue(true);
+    plugin.fileStateManager.isLocked.mockReturnValue(true);
 
     cacheChanges(note, UNCHECKED);
     vi.runAllTimers();

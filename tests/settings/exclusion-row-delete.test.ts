@@ -10,6 +10,7 @@ import type {
   SettingDefinitionList,
   SettingDefinitionRender,
 } from 'obsidian';
+import type { SettingPath } from '../../src/settings/settings-paths';
 import { Setting } from '../mockObsidian';
 
 vi.mock('../../src/i18n', () => ({
@@ -21,11 +22,7 @@ vi.mock('../../src/i18n', () => ({
 import { buildExclusionsPage } from '../../src/settings/exclusions';
 import type { FirstLineIsTitlePlugin } from '../../src/settings/settings-base';
 import { DEFAULT_SETTINGS } from '../../src/constants';
-
-/** Lets an awaited save settle. */
-async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
-}
+import { flush } from '../testUtils';
 
 function buildHarness() {
   const exclusions = structuredClone(DEFAULT_SETTINGS.exclusions);
@@ -45,14 +42,14 @@ function buildHarness() {
     update,
   } as unknown as PluginSettingTab);
   const lists = (page.items ?? []).filter(
-    (item): item is SettingDefinitionList =>
+    (item): item is SettingDefinitionList<SettingPath> =>
       (item as { type?: string }).type === 'list'
   );
   const disablePropertyGroup = (page.items ?? []).find(
     (item) =>
-      (item as SettingDefinitionGroup).heading ===
+      (item as SettingDefinitionGroup<SettingPath>).heading ===
       'settings.exclusions.disableProperty.title'
-  ) as SettingDefinitionGroup;
+  ) as SettingDefinitionGroup<SettingPath>;
   return {
     exclusions,
     saveSettings,
@@ -65,7 +62,10 @@ function buildHarness() {
   };
 }
 
-function renderRow(list: SettingDefinitionList, index: number): Setting {
+function renderRow(
+  list: SettingDefinitionList<SettingPath>,
+  index: number
+): Setting {
   const setting = new Setting(document.createElement('div'));
   (list.items?.[index] as SettingDefinitionRender).render(
     setting as never,
@@ -101,18 +101,30 @@ describe('Exclusion row Delete', () => {
     }
   );
 
-  it('keeps the inline tag field ahead of the Delete', () => {
-    const setting = renderRow(buildHarness().tags, 1);
+  it.each(['tags', 'properties'] as const)(
+    'draws each %s row with no text field, Edit ahead of the Delete',
+    (listName) => {
+      const setting = renderRow(buildHarness()[listName], 1);
 
-    expect(setting.addText).toHaveBeenCalledTimes(1);
-    expect(setting.addExtraButton).toHaveBeenCalledTimes(1);
-  });
+      expect(setting.addText).not.toHaveBeenCalled();
+      expect(setting.controlEl.querySelector('input')).toBeNull();
+      expect(
+        setting.components.map(
+          (component) => component.setIcon.mock.calls[0]?.[0] as string
+        )
+      ).toEqual(['lucide-pen-line', 'lucide-trash-2']);
+    }
+  );
 
-  it('gives the single disable-property row, which sits outside any list, no Delete', () => {
+  it('gives the single disable-property row, which sits outside any list, Edit but no Delete', () => {
     const setting = new Setting(document.createElement('div'));
     buildHarness().disablePropertyRow.render(setting as never, {} as never);
 
-    expect(setting.addExtraButton).not.toHaveBeenCalled();
+    expect(
+      setting.components.map(
+        (component) => component.setIcon.mock.calls[0]?.[0] as string
+      )
+    ).toEqual(['lucide-pen-line']);
   });
 
   it('deletes a tag, then persists and re-renders', async () => {
@@ -131,9 +143,6 @@ describe('Exclusion row Delete', () => {
     const [, second] = harness.exclusions.excludedProperties;
     const setting = renderRow(harness.properties, 0);
 
-    expect(
-      setting.controlEl.querySelector('.flit-property-key-input')
-    ).not.toBeNull();
     deleteButtonOf(setting).onClick.mock.calls[0][0]();
     await flush();
 

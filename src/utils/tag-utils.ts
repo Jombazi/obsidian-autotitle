@@ -1,12 +1,4 @@
-import {
-  TFile,
-  App,
-  CachedMetadata,
-  getFrontMatterInfo,
-  parseYaml,
-} from 'obsidian';
-import { PluginSettings } from '../types';
-import { filterNonEmpty } from './string-processing';
+import { isPatternEntry } from './exclusion-pattern';
 
 /**
  * Normalize tag by removing leading # if present
@@ -16,7 +8,38 @@ export function normalizeTag(tag: string): string {
   return tag.startsWith('#') ? tag.slice(1) : tag;
 }
 
-/** One tag-rule match, shared by the rename run and the tag context menu so the two cannot disagree; both sides must arrive without "#" and case-folded. */
+/** Match key for a tag from a note, the tag pane or the editor, never read as a pattern: `project`, `#project` and `#Project` are one tag, since rules match ignoring the "#" and case. Always "#"-prefixed, so it can never equal a pattern entry's key, which starts with "/": Obsidian accepts a tag written `#/x/`. */
+export function tagKey(tag: string): string {
+  return '#' + normalizeTag(tag.trim()).toLowerCase();
+}
+
+/** Duplicate and membership key for an Excluded tags entry: a pattern keeps its text as typed, because folding case would merge `/\d/` with `/\D/`; any other entry folds as a tag through `tagKey`. */
+export function excludedTagEntryKey(entry: string): string {
+  const trimmedEntry = entry.trim();
+  return isPatternEntry(trimmedEntry) ? trimmedEntry : tagKey(trimmedEntry);
+}
+
+/** A blank Excluded tags entry, a bare "#" included, names no tag and never counts. */
+export function isBlankTagEntry(entry: string): boolean {
+  return normalizeTag(entry.trim()) === '';
+}
+
+/** True when `entries` already holds `tag` as a plain entry; a pattern entry never counts, since the tag menus ignore patterns. */
+export function hasExcludedTagEntry(entries: string[], tag: string): boolean {
+  const key = tagKey(tag);
+  return entries.some((existing) => excludedTagEntryKey(existing) === key);
+}
+
+/** The Excluded tags dialog's duplicate test: true when `entries` already holds an entry with `entry`'s key; unlike `hasExcludedTagEntry`, a pattern counts. */
+export function hasDuplicateTagEntry(
+  entries: string[],
+  entry: string
+): boolean {
+  const key = excludedTagEntryKey(entry);
+  return entries.some((existing) => excludedTagEntryKey(existing) === key);
+}
+
+/** One tag-rule match, shared by the rename run, the tag context menu and the tag rename dialog so they cannot disagree; both sides must arrive folded through `tagKey`. */
 export function tagMatchesTargetTag(
   foldedTag: string,
   foldedTargetTag: string,
@@ -26,168 +49,4 @@ export function tagMatchesTargetTag(
     foldedTag === foldedTargetTag ||
     (matchSubtags && foldedTag.startsWith(foldedTargetTag + '/'))
   );
-}
-
-/**
- * Parse tags from YAML frontmatter
- * Returns array of tag strings (without # prefix)
- */
-export function parseTagsFromYAML(content: string): string[] {
-  const tags: string[] = [];
-
-  // Get frontmatter info using Obsidian API
-  const frontmatterInfo = getFrontMatterInfo(content);
-  if (!frontmatterInfo.exists) {
-    return tags;
-  }
-
-  // Parse YAML using Obsidian API
-  let frontmatter: Record<string, unknown>;
-  try {
-    frontmatter = parseYaml(frontmatterInfo.frontmatter) as Record<
-      string,
-      unknown
-    >;
-  } catch {
-    return tags;
-  }
-
-  if (!frontmatter || typeof frontmatter !== 'object') {
-    return tags;
-  }
-
-  // Extract tags property
-  const tagsValue = frontmatter.tags;
-  if (!tagsValue) {
-    return tags;
-  }
-
-  // Handle array of tags
-  if (Array.isArray(tagsValue)) {
-    for (const tag of tagsValue) {
-      tags.push(String(tag));
-    }
-  } else if (typeof tagsValue === 'string' || typeof tagsValue === 'number') {
-    // Handle single tag value (string or number)
-    tags.push(String(tagsValue));
-  }
-  // Ignore objects/other types that can't be meaningfully converted to tag strings
-
-  return tags;
-}
-
-/**
- * Read tag values out of a metadata cache entry's frontmatter, as raw strings.
- * cache.tags is inline-only, so frontmatter tags have to be read separately.
- */
-export function getFrontmatterTagsFromCache(
-  cache: CachedMetadata | null
-): string[] {
-  const frontmatterTags: unknown = cache?.frontmatter?.tags;
-  if (frontmatterTags === undefined || frontmatterTags === null) {
-    return [];
-  }
-  const rawTags: unknown[] = Array.isArray(frontmatterTags)
-    ? (frontmatterTags as unknown[])
-    : [frontmatterTags];
-  return rawTags.map((tag) => String(tag as string | number | boolean));
-}
-
-/**
- * Remove YAML frontmatter from content
- * Returns content after frontmatter
- */
-export function stripFrontmatter(content: string): string {
-  // Use Obsidian API to get frontmatter info
-  const frontmatterInfo = getFrontMatterInfo(content);
-
-  if (!frontmatterInfo.exists) {
-    return content;
-  }
-
-  // Return content after frontmatter using contentStart offset
-  return content.substring(frontmatterInfo.contentStart);
-}
-
-/**
- * Check if file has any of the target tags
- * Supports frontmatter and inline tags based on settings
- * @param file The file to check
- * @param settings Plugin settings containing tag list and strategy
- * @param app The Obsidian app instance
- * @param content Optional file content for real-time checking
- * @returns true if file has any of the target tags
- */
-export function fileHasTargetTags(
-  file: TFile,
-  settings: PluginSettings,
-  app: App,
-  content?: string
-): boolean {
-  const nonEmptyTags = filterNonEmpty(settings.exclusions.excludedTags);
-  if (nonEmptyTags.length === 0) return false;
-
-  const fileCache = app.metadataCache.getFileCache(file);
-
-  // Check YAML frontmatter tags (unless mode is 'In note body only')
-  if (settings.exclusions.tagMatchingMode !== 'In note body only') {
-    let fileTags: string[] = [];
-
-    // Parse tags from content if provided, otherwise use cache
-    if (content) {
-      fileTags = parseTagsFromYAML(content);
-    } else {
-      fileTags = getFrontmatterTagsFromCache(fileCache);
-    }
-
-    for (const targetTag of nonEmptyTags) {
-      // Normalize both sides: remove # prefix and fold case for comparison
-      const normalizedTargetTag = normalizeTag(targetTag).toLowerCase();
-
-      for (const fileTag of fileTags) {
-        const normalizedFileTag = normalizeTag(String(fileTag)).toLowerCase();
-        if (
-          tagMatchesTargetTag(
-            normalizedFileTag,
-            normalizedTargetTag,
-            settings.exclusions.matchSubtags
-          )
-        ) {
-          return true;
-        }
-      }
-    }
-  }
-
-  // Check inline tags based on matching mode (using metadata cache to avoid false positives)
-  if (settings.exclusions.tagMatchingMode !== 'In Properties only') {
-    let inlineTagsInContent: string[] = [];
-
-    // Use metadata cache for accurate tag detection (avoids false positives from code blocks, YAML comments, etc.)
-    // Note: fileCache.tags only contains inline tags from Markdown body, never from frontmatter
-    if (fileCache && fileCache.tags) {
-      inlineTagsInContent = fileCache.tags.map((tagCache) =>
-        normalizeTag(tagCache.tag).toLowerCase()
-      );
-    }
-
-    for (const targetTag of nonEmptyTags) {
-      // Normalize target tag: remove # prefix and fold case for comparison
-      const normalizedTargetTag = normalizeTag(targetTag).toLowerCase();
-
-      for (const inlineTag of inlineTagsInContent) {
-        if (
-          tagMatchesTargetTag(
-            inlineTag,
-            normalizedTargetTag,
-            settings.exclusions.matchSubtags
-          )
-        ) {
-          return true;
-        }
-      }
-    }
-  }
-
-  return false;
 }

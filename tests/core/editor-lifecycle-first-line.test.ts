@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getFrontMatterInfo } from 'obsidian';
+import { Text } from '@codemirror/state';
 import { EditorLifecycleManager } from '../../src/core/editor-lifecycle';
 import { App, Editor, TFile } from '../mockObsidian';
 import {
   createMockApp,
   createTestSettings,
-  splitFrontMatter,
+  stubEditorText,
 } from '../testUtils';
 import type FirstLineIsTitle from '../../main';
 
@@ -32,10 +32,6 @@ describe('EditorLifecycleManager first-line extraction', () => {
   }
 
   beforeEach(() => {
-    vi.mocked(getFrontMatterInfo).mockImplementation(
-      splitFrontMatter as unknown as typeof getFrontMatterInfo
-    );
-
     app = createMockApp();
 
     file = new TFile('Notes/Body title.md');
@@ -52,20 +48,15 @@ describe('EditorLifecycleManager first-line extraction', () => {
     } as unknown as FirstLineIsTitle);
   });
 
-  afterEach(() => {
-    vi.mocked(getFrontMatterInfo).mockReset();
-  });
-
   it('returns the first body line when the cached frontmatter is one line longer than the editor’s', () => {
     // A property line was just deleted; the cache still counts it.
     mockCachedFrontmatterEndLine(3);
-    editor.getValue = vi
-      .fn()
-      .mockReturnValue(
-        '---\naliases: [Body title]\n---\nBody title\nMore text'
-      );
+    stubEditorText(
+      editor,
+      '---\naliases: [Body title]\n---\nBody title\nMore text'
+    );
 
-    expect(lifecycle.extractFirstLineFromEditor(editor, file)).toBe(
+    expect(lifecycle.extractFirstLineFromEditor(editor, file)?.text).toBe(
       'Body title'
     );
   });
@@ -73,16 +64,122 @@ describe('EditorLifecycleManager first-line extraction', () => {
   it('returns the first body line when the cached frontmatter is one line shorter than the editor’s', () => {
     // A property line was just added; the cache does not know it yet.
     mockCachedFrontmatterEndLine(2);
-    // The stale offset lands on the closing `---`, which horizontal-rule skipping would otherwise step over.
+    // A boundary read from the stale cache would land on the closing `---`, which horizontal-rule skipping would otherwise step over.
     settings.markupStripping.stripHorizontalRuleMarkup = false;
-    editor.getValue = vi
-      .fn()
-      .mockReturnValue(
-        '---\naliases: [Body title]\nstatus: draft\n---\nBody title\nMore text'
-      );
+    stubEditorText(
+      editor,
+      '---\naliases: [Body title]\nstatus: draft\n---\nBody title\nMore text'
+    );
 
-    expect(lifecycle.extractFirstLineFromEditor(editor, file)).toBe(
+    expect(lifecycle.extractFirstLineFromEditor(editor, file)?.text).toBe(
       'Body title'
     );
+  });
+});
+
+/**
+ * The editor-change gate schedules a rename only when the title source changes, `raw` included:
+ * removing code's indentation or its fence can leave the text the same while it stops being code.
+ */
+describe('EditorLifecycleManager first-line gate', () => {
+  let editor: Editor;
+  let file: TFile;
+  let setThrottleTimer: ReturnType<typeof vi.fn>;
+  let setLastEditorContent: ReturnType<typeof vi.fn>;
+  let lifecycle: EditorLifecycleManager;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+
+    const app = createMockApp();
+    app.metadataCache.getFileCache = vi.fn().mockReturnValue(null);
+
+    file = new TFile('Notes/Code.md');
+    file.basename = 'Code';
+    file.extension = 'md';
+
+    editor = new Editor();
+    setThrottleTimer = vi.fn();
+    setLastEditorContent = vi.fn();
+
+    const settings = createTestSettings();
+    settings.core.checkInterval = 0;
+
+    lifecycle = new EditorLifecycleManager({
+      app,
+      settings,
+      isFullyLoaded: true,
+      fileStateManager: {
+        isEditorSyncing: vi.fn().mockReturnValue(false),
+        hasThrottleTimer: vi.fn().mockReturnValue(false),
+        hasDelayedThrottleTimer: vi.fn().mockReturnValue(false),
+        setThrottleTimer,
+        clearThrottleTimer: vi.fn(),
+        hasLastEditorContent: vi.fn().mockReturnValue(false),
+        setLastEditorContent,
+      },
+      renameEngine: {
+        processEditorChange: vi.fn().mockResolvedValue(undefined),
+      },
+    } as unknown as FirstLineIsTitle);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('skips an edit that leaves the title source unchanged', () => {
+    stubEditorText(editor, 'Title\nBody');
+    lifecycle.handleEditorChangeWithThrottle(editor, file);
+    stubEditorText(editor, 'Title\nBody edited');
+    lifecycle.handleEditorChangeWithThrottle(editor, file);
+
+    expect(setThrottleTimer).toHaveBeenCalledTimes(1);
+  });
+
+  // A keystroke that leaves the first line alone keeps the compared text current without joining the whole note.
+  it('stores the CodeMirror document as the baseline when the first line is unchanged', () => {
+    stubEditorText(editor, 'Title\nBody');
+    lifecycle.handleEditorChangeWithThrottle(editor, file);
+    stubEditorText(editor, 'Title\nBody edited');
+    const doc = Text.of(['Title', 'Body edited']);
+    (editor as unknown as { cm: unknown }).cm = { state: { doc } };
+    vi.mocked(editor.getValue).mockClear();
+
+    lifecycle.handleEditorChangeWithThrottle(editor, file);
+
+    expect(setLastEditorContent).toHaveBeenLastCalledWith(file.path, doc);
+    expect(editor.getValue).not.toHaveBeenCalled();
+  });
+
+  it('stores the editor text when the editor has no CodeMirror view', () => {
+    stubEditorText(editor, 'Title\nBody');
+    lifecycle.handleEditorChangeWithThrottle(editor, file);
+    stubEditorText(editor, 'Title\nBody edited');
+
+    lifecycle.handleEditorChangeWithThrottle(editor, file);
+
+    expect(setLastEditorContent).toHaveBeenLastCalledWith(
+      file.path,
+      'Title\nBody edited'
+    );
+  });
+
+  it('schedules a rename when code loses its indentation but keeps its text', () => {
+    stubEditorText(editor, '---\n    *foo*');
+    lifecycle.handleEditorChangeWithThrottle(editor, file);
+    stubEditorText(editor, '---\n*foo*');
+    lifecycle.handleEditorChangeWithThrottle(editor, file);
+
+    expect(setThrottleTimer).toHaveBeenCalledTimes(2);
+  });
+
+  it('schedules a rename when the opening fence line is deleted', () => {
+    stubEditorText(editor, '```\n*foo*\n```');
+    lifecycle.handleEditorChangeWithThrottle(editor, file);
+    stubEditorText(editor, '*foo*\n```');
+    lifecycle.handleEditorChangeWithThrottle(editor, file);
+
+    expect(setThrottleTimer).toHaveBeenCalledTimes(2);
   });
 });

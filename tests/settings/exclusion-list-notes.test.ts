@@ -10,10 +10,14 @@ import type {
   SettingDefinitionList,
   SettingDefinitionRender,
 } from 'obsidian';
+import type { SettingPath } from '../../src/settings/settings-paths';
 import { Setting } from '../mockObsidian';
 
 vi.mock('../../src/i18n', () => ({
-  t: vi.fn((key: string) => key),
+  // Variables are shown after the key, so a test can see which label filled a placeholder
+  t: vi.fn((key: string, variables?: Record<string, string>) =>
+    variables ? `${key}(${Object.values(variables).join(', ')})` : key
+  ),
   tp: vi.fn((key: string) => key),
   getCurrentLocale: vi.fn(() => 'en'),
 }));
@@ -41,18 +45,18 @@ function buildPage() {
   } as unknown as PluginSettingTab);
   const items = page.items ?? [];
   const lists = items.filter(
-    (item): item is SettingDefinitionList =>
+    (item): item is SettingDefinitionList<SettingPath> =>
       (item as { type?: string }).type === 'list'
   );
   const groups = items.filter(
-    (item): item is SettingDefinitionGroup =>
+    (item): item is SettingDefinitionGroup<SettingPath> =>
       (item as { type?: string }).type === 'group'
   );
   return { files: lists[0], tags: lists[1], properties: lists[2], groups };
 }
 
 /** Renders the list's first row inside a rows container shaped like Obsidian's list group. */
-function renderFirstRow(list: SettingDefinitionList): HTMLElement {
+function renderFirstRow(list: SettingDefinitionList<SettingPath>): HTMLElement {
   const groupEl = document.createElement('div');
   groupEl.className = `setting-group mod-list ${list.cls ?? ''}`;
   const rowsEl = groupEl.createDiv({ cls: 'setting-items' });
@@ -84,16 +88,13 @@ describe('Exclusion list notes', () => {
     expect(rowsEl.getAttribute(LIST_NOTE_ATTRIBUTE)).toBe(note);
   });
 
-  it('puts the three property notes on separate lines, with the value label quoted', () => {
+  // The input hints moved into the add and edit dialogs, leaving the lists their warnings
+  it('puts only the renamed warning in the properties note', () => {
     const rowsEl = renderFirstRow(buildPage().properties);
 
-    expect(rowsEl.getAttribute(LIST_NOTE_ATTRIBUTE)?.split('\n')).toEqual([
-      'settings.exclusions.properties.renamedWarning',
-      'settings.exclusions.properties.leaveBlank.part1' +
-        '“settings.exclusions.properties.leaveBlank.value”' +
-        'settings.exclusions.properties.leaveBlank.part2',
-      'settings.exclusions.properties.caseInsensitive',
-    ]);
+    expect(rowsEl.getAttribute(LIST_NOTE_ATTRIBUTE)).toBe(
+      'settings.exclusions.properties.renamedWarning'
+    );
   });
 
   it('leaves no description row at the top of the files, tags or properties group', () => {

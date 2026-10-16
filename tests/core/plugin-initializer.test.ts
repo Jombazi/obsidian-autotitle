@@ -1,18 +1,11 @@
 /**
- * Tests for PluginInitializer.
- *
- * The forbidden-char first-enable cascade also exists in the settings tab, and
- * both latch on `core.hasEnabledForbiddenChars` — whichever fires first locks
- * the other out permanently. Parity between the two is asserted in
- * tests/settings/settings-main.test.ts; this file pins the load-time side.
+ * Tests for PluginInitializer's first-load exclusion setup.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { App } from '../mockObsidian';
 import { DEFAULT_SETTINGS } from '../../src/constants';
-import { processForbiddenChars } from '../../src/utils/string-processing';
 import type { PluginSettings } from '../../src/types';
-import type { CharKey } from '../../src/types/char-replacement';
 
 vi.mock('../../src/utils', () => ({
   verboseLog: vi.fn(),
@@ -35,13 +28,6 @@ function makePlugin(): TestPlugin {
   };
 }
 
-function enabledCharKeys(settings: PluginSettings): CharKey[] {
-  const { charReplacements } = settings.characterReplacements;
-  return (Object.keys(charReplacements) as CharKey[]).filter(
-    (key) => charReplacements[key].enabled
-  );
-}
-
 describe('PluginInitializer', () => {
   let plugin: TestPlugin;
   let initializer: PluginInitializer;
@@ -52,81 +38,6 @@ describe('PluginInitializer', () => {
     initializer = new PluginInitializer(
       plugin as unknown as FirstLineIsTitlePlugin
     );
-  });
-
-  describe('initializeFirstEnableLogic — forbidden chars', () => {
-    beforeEach(() => {
-      plugin.settings.characterReplacements.enableForbiddenCharReplacements = true;
-      plugin.settings.core.hasEnabledForbiddenChars = false;
-    });
-
-    it('enables every forbidden char, backslash included', async () => {
-      await initializer.initializeFirstEnableLogic();
-
-      expect(enabledCharKeys(plugin.settings).sort()).toEqual(
-        [
-          'asterisk',
-          'backslash',
-          'caret',
-          'colon',
-          'dot',
-          'greaterThan',
-          'hash',
-          'leftBracket',
-          'lessThan',
-          'pipe',
-          'question',
-          'quote',
-          'rightBracket',
-          'slash',
-        ].sort()
-      );
-    });
-
-    it('replaces rather than drops a Windows/Android-only character', async () => {
-      await initializer.initializeFirstEnableLogic();
-
-      // A forbidden char whose toggle is off is deleted outright, so the
-      // Windows/Android keys have to be part of the cascade on every OS.
-      expect(processForbiddenChars('What? Yes', plugin.settings)).toBe(
-        'What？Yes'
-      );
-    });
-
-    it('sets the latch and persists once', async () => {
-      await initializer.initializeFirstEnableLogic();
-
-      expect(plugin.settings.core.hasEnabledForbiddenChars).toBe(true);
-      expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
-    });
-
-    it('does nothing once the latch is set', async () => {
-      plugin.settings.core.hasEnabledForbiddenChars = true;
-      const before = enabledCharKeys(plugin.settings);
-
-      await initializer.initializeFirstEnableLogic();
-
-      expect(enabledCharKeys(plugin.settings)).toEqual(before);
-      expect(plugin.saveSettings).not.toHaveBeenCalled();
-    });
-
-    it('does nothing while the master toggle is off', async () => {
-      plugin.settings.characterReplacements.enableForbiddenCharReplacements = false;
-      const before = enabledCharKeys(plugin.settings);
-
-      await initializer.initializeFirstEnableLogic();
-
-      expect(enabledCharKeys(plugin.settings)).toEqual(before);
-      expect(plugin.settings.core.hasEnabledForbiddenChars).toBe(false);
-    });
-  });
-
-  describe('initializeFirstEnableLogic — persistence', () => {
-    it('does not save when the cascade does not apply', async () => {
-      await initializer.initializeFirstEnableLogic();
-
-      expect(plugin.saveSettings).not.toHaveBeenCalled();
-    });
   });
 
   describe('checkFirstTimeExclusionsSetup', () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { getFrontMatterInfo } from 'obsidian';
 import { EventHandlerManager } from '../../src/core/event-handler-manager';
-import { FileStateManager } from '../../src/core/file-state-manager';
+import { FileState, FileStateManager } from '../../src/core/file-state-manager';
 import { MarkdownView, TFile } from '../mockObsidian';
 import { splitFrontMatter } from '../testUtils';
 
@@ -46,15 +46,13 @@ function createMockPlugin() {
       },
     },
     editorLifecycle: {
-      isFileInCreationDelay: vi.fn(() => false),
+      isFileInCreationWindow: vi.fn(() => false),
       handleEditorChangeWithThrottle: vi.fn(),
     },
-    cacheManager: { isLocked: vi.fn(() => false) },
     fileStateManager: new FileStateManager({} as any),
     firstLinePropertyManager: {
       updateFirstLinePropertyIfNeeded: vi.fn().mockResolvedValue(true),
     },
-    pendingMetadataUpdates: new Set<TFile>(),
     isFullyLoaded: true,
     renameEngine: { processFile: vi.fn() },
     registerEvent: vi.fn(),
@@ -127,13 +125,24 @@ describe('first line property update on a properties-only save', () => {
     vi.useRealTimers();
   });
 
+  // Read from the private state map, since no public getter exposes when the baseline was stored
   const savedTimestamp = () =>
-    plugin.fileStateManager.getState(note.path)?.lastSavedContentTimestamp;
+    (
+      plugin.fileStateManager as unknown as {
+        fileStates: Map<string, FileState>;
+      }
+    ).fileStates.get(note.path)?.lastSavedContentTimestamp;
 
   describe.each([
     ['modify', () => modify],
     ['metadata changed', () => metadataChanged],
   ])('%s handler', (_name, handler) => {
+    /** Fires the save handler as Obsidian does: `modify` reads the file, `changed` hands over the text it just indexed */
+    const save = async (text: string) => {
+      plugin.app.vault.read.mockResolvedValue(text);
+      await handler()(note, text, {});
+    };
+
     beforeEach(() => {
       plugin.app.workspace.getLeavesOfType.mockReturnValue([
         { view: { file: note } },
@@ -142,9 +151,7 @@ describe('first line property update on a properties-only save', () => {
 
     it('skips the first line property when only the properties changed since the baseline', async () => {
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
-      plugin.app.vault.read.mockResolvedValue(PROPERTIES_ONLY_EDIT);
-
-      await handler()(note);
+      await save(PROPERTIES_ONLY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
@@ -157,9 +164,7 @@ describe('first line property update on a properties-only save', () => {
     it('skips the first line property even when the baseline is six minutes old', async () => {
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
       vi.advanceTimersByTime(SIX_MINUTES_MS);
-      plugin.app.vault.read.mockResolvedValue(PROPERTIES_ONLY_EDIT);
-
-      await handler()(note);
+      await save(PROPERTIES_ONLY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
@@ -168,9 +173,7 @@ describe('first line property update on a properties-only save', () => {
 
     it('updates the first line property when the body changed', async () => {
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
-      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
-
-      await handler()(note);
+      await save(BODY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
@@ -181,9 +184,7 @@ describe('first line property update on a properties-only save', () => {
     });
 
     it('updates the first line property when there is no baseline', async () => {
-      plugin.app.vault.read.mockResolvedValue(PROPERTIES_ONLY_EDIT);
-
-      await handler()(note);
+      await save(PROPERTIES_ONLY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
@@ -194,9 +195,7 @@ describe('first line property update on a properties-only save', () => {
       const view = createSourceView(note, BODY_EDIT, true);
       plugin.app.workspace.getLeavesOfType.mockReturnValue([{ view }]);
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
-      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
-
-      await handler()(note);
+      await save(BODY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
@@ -212,9 +211,7 @@ describe('first line property update on a properties-only save', () => {
       plugin.app.workspace.getLeavesOfType.mockReturnValue([{ view }]);
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
       plugin.fileStateManager.setThrottleTimer(note.path, 1);
-      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
-
-      await handler()(note);
+      await save(BODY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
@@ -227,16 +224,13 @@ describe('first line property update on a properties-only save', () => {
     it('writes into the editor when it holds the text just read from the file', async () => {
       const view = createSourceView(note, BODY_EDIT, false);
       plugin.app.workspace.getLeavesOfType.mockReturnValue([{ view }]);
-      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
-
-      await handler()(note);
+      await save(BODY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
       ).toHaveBeenCalledWith(
         note,
         BODY_EDIT,
-        undefined,
         expect.objectContaining({ editor: view.editor })
       );
     });
@@ -244,13 +238,11 @@ describe('first line property update on a properties-only save', () => {
     it('writes the file when the editor has not loaded the file text yet', async () => {
       const view = createSourceView(note, SAVED, false);
       plugin.app.workspace.getLeavesOfType.mockReturnValue([{ view }]);
-      plugin.app.vault.read.mockResolvedValue(BODY_EDIT);
-
-      await handler()(note);
+      await save(BODY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
-      ).toHaveBeenCalledWith(note, BODY_EDIT, undefined, null);
+      ).toHaveBeenCalledWith(note, BODY_EDIT, null);
     });
   });
 
@@ -258,6 +250,12 @@ describe('first line property update on a properties-only save', () => {
     ['modify', () => modify],
     ['metadata changed', () => metadataChanged],
   ])('%s handler on a note not open in an editor', (_name, handler) => {
+    /** Fires the save handler as Obsidian does: `modify` reads the file, `changed` hands over the text it just indexed */
+    const save = async (text: string) => {
+      plugin.app.vault.read.mockResolvedValue(text);
+      await handler()(note, text, {});
+    };
+
     const editNoteInEditor = async () => {
       plugin.app.vault.cachedRead.mockResolvedValue(SAVED);
       editorChange({}, { file: note });
@@ -271,7 +269,7 @@ describe('first line property update on a properties-only save', () => {
     it('leaves the first line property alone and drops the baseline when the note was never edited', async () => {
       plugin.fileStateManager.setLastSavedContent(note.path, SAVED);
 
-      await handler()(note);
+      await save(BODY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
@@ -286,7 +284,7 @@ describe('first line property update on a properties-only save', () => {
         { view: { file: note } },
       ]);
 
-      await handler()(note);
+      await save(BODY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
@@ -297,7 +295,7 @@ describe('first line property update on a properties-only save', () => {
       await editNoteInEditor();
       vi.advanceTimersByTime(1000);
 
-      await handler()(note);
+      await save(BODY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
@@ -308,7 +306,7 @@ describe('first line property update on a properties-only save', () => {
       await editNoteInEditor();
       vi.advanceTimersByTime(6000);
 
-      await handler()(note);
+      await save(BODY_EDIT);
 
       expect(
         plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded
@@ -337,7 +335,7 @@ describe('first line property update on a properties-only save', () => {
     it('renames on save when no timer is scheduled', async () => {
       await modify(note);
 
-      expect(plugin.renameEngine.processFile).toHaveBeenCalledWith(note, true);
+      expect(plugin.renameEngine.processFile).toHaveBeenCalledWith(note);
     });
   });
 

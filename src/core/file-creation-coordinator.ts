@@ -1,32 +1,36 @@
 import {
   TFile,
   CachedMetadata,
-  EventRef,
   getAllTags,
   getFrontMatterInfo,
+  parseFrontMatterTags,
 } from 'obsidian';
 import FirstLineIsTitlePlugin from '../../main';
 import { TIMING } from '../constants/timing';
-import { verboseLog } from '../utils';
-// Leaf modules, not the '../utils' barrel: the coordinator suite mocks the barrel down to verboseLog
-import { shouldProcessFile } from '../utils/file-exclusions';
+import { verboseLog, verboseLogger } from '../utils';
 import {
+  shouldProcessFile,
   fileHasTargetTags,
-  getFrontmatterTagsFromCache,
-} from '../utils/tag-utils';
-import { filterNonEmpty } from '../utils/string-processing';
+  hasPropertyTargets,
+  hasTagTargets,
+  isListedPropertyKey,
+} from '../utils/file-exclusions';
 import { EXCLUSION_STRATEGY } from '../types';
-
-/**
- * Extended Workspace interface with custom events
- */
-interface WorkspaceWithCustomEvents {
-  on(
-    name: 'templater:new-note-from-template',
-    callback: (data: Record<string, unknown>) => void
-  ): EventRef;
-  offref(ref: EventRef): void;
-}
+import type { TitleCursorPlacement } from '../operations/file-operations';
+import {
+  fileRegexMatches,
+  folderTemplateMatches,
+  hasBodyForTemplater,
+  isFileRegexEnabled,
+  isFolderTemplatesEnabled,
+  isInTemplateFolder,
+  isInTemplaterIgnoredFolder,
+  isTemplaterOn,
+  isTemplaterTriggerOn,
+  templaterJumpedToCursor,
+  templaterWroteFile,
+  waitForTemplaterEvent,
+} from './templater-integration';
 
 /**
  * Context information for file creation decisions
@@ -43,7 +47,13 @@ export interface FileCreationActions {
   shouldMoveCursor: boolean;
   shouldInsertTitle: boolean;
   placeCursorAtEnd: boolean;
-  decisionPath: string; // e.g., "feature-enabled:Y → path-excluded:N → content-excluded:N → tag-property-exclusions:N → features:title → content-below-yaml:N"
+  /** Where title insertion leaves the cursor; the delayed cursor pass `shouldMoveCursor` schedules runs only when insertion placed none */
+  titleCursor: TitleCursorPlacement;
+  /** Text the decision judged, and title insertion starts from: the creation snapshot, or the note as Templater left it after templater-event:Y */
+  judgedContent: string;
+  /** True only after template-wrote-file:Y: the title goes into the file, since the view still shows older text, and the cursor waits for the view to reload it */
+  viewLagsFile: boolean;
+  decisionPath: string; // e.g., "feature-enabled:Y → … → folder-template-matches:Y → templater-event:Y → template-wrote-file:N → template-excluded:N → path-excluded-after-template:N → template-cursor:N → features:title → content-below-yaml:N"
 }
 
 /** Decision-tree node names, recorded into `decisionPath`. Names rather than numbers: nothing
@@ -53,26 +63,43 @@ type DecisionNode =
   | 'feature-enabled'
   | 'path-excluded'
   | 'content-excluded'
-  | 'tag-property-exclusions'
   | 'templater-enabled'
   | 'templater-trigger'
   | 'in-template-folder'
+  | 'in-ignored-folder'
+  | 'body-not-empty'
   | 'folder-templates-mode'
   | 'folder-template-matches'
   | 'regex-templates-mode'
   | 'regex-template-matches'
   | 'templater-event'
+  | 'template-wrote-file'
   | 'template-excluded'
   | 'path-excluded-after-template'
+  | 'template-cursor'
   | 'features'
   | 'content-below-yaml'
   | 'cursor-at-end';
 
 type DecisionOutcome = 'Y' | 'N' | 'title' | 'cursor' | 'both';
 
+/** The settings hub's mapping of the enabled features, before a template's own cursor is taken into account */
+interface SettingsHubPlan {
+  shouldInsertTitle: boolean;
+  shouldMoveCursor: boolean;
+  placeCursorAtEnd: boolean;
+  /** What the plan resolves to, for the decision-path log line */
+  resolution: string;
+}
+
+/** The `<node>:<outcome>` breadcrumbs of one `determineActions` call; per call rather than on the instance, because the Templater wait lets creations overlap */
+type DecisionTrail = string[];
+
 /**
  * Coordinates file creation behavior: decides whether to move the cursor and/or
  * insert a title when a note is created.
+ *
+ * Consulted only for a note an editor shows within the creation handler's wait (`TIMING.NEW_NOTE_VIEW_WAIT_MS`), one already shown, or one created while a canvas is active: a note created in the background gets no actions at all, by user decision.
  *
  * The node names below are the sole definition of the tree — they are not
  * shorthand for an external diagram — and they are load-bearing: every branch
@@ -83,26 +110,31 @@ type DecisionOutcome = 'Y' | 'N' | 'title' | 'cursor' | 'both';
  * - feature-enabled: Either feature enabled? No → do nothing.
  * - path-excluded: Path matched by the Excluded files rules? Yes → do nothing.
  * - content-excluded: Tag/property/disable-renaming excluded, judged on real-time content? Yes → do nothing.
- * - tag-property-exclusions: Any tag or property exclusions configured? No → settings hub.
  * - templater-enabled: Templater loaded? No → settings hub.
  * - templater-trigger: Templater's trigger on file creation on? No → settings hub.
- * - in-template-folder: File sits in Templater's template folder? Yes → settings hub.
+ * - in-template-folder: Path holds Templater's template folder, as Templater tests it? Yes → settings hub.
+ * - in-ignored-folder: Path starts with a folder Templater ignores on creation? Yes → settings hub.
+ * - body-not-empty: Creation snapshot holds any text below its properties, whitespace included? Yes → settings hub.
  * - folder-templates-mode: Folder templates on? Yes → folder-template-matches, else regex-templates-mode.
  * - folder-template-matches: A folder template matches this path? Yes → Templater wait, No → settings hub.
  * - regex-templates-mode: File regex templates on? No → settings hub.
  * - regex-template-matches: A file regex matches this path? Yes → Templater wait, No → settings hub.
  * - templater-event: Templater event arrived within the timeout? No → settings hub.
- * - template-excluded: Template carries an excluded tag/property? Yes → do nothing, No → settings hub.
+ * - template-wrote-file: Templater wrote the file rather than the editor, the note not being its active file? Yes → the event's text is judged instead of the view's, and the title goes in through the file.
+ * - template-excluded: Template carries an excluded tag/property, judged on Obsidian's parse of the judged text? Yes → do nothing.
  * - path-excluded-after-template: Path excluded once the template has run? Yes → do nothing.
+ * - template-cursor: Template placed the cursor itself (Templater's jump removed a cursor placeholder from the note)? Both → settings hub, Yes leaving the cursor where the template put it. Always N after template-wrote-file:Y.
+ *
+ * The Templater gates mirror the checks Templater's own creation handler makes before it applies a new-note template, so a note Templater will fill always waits for it, and a note it will not fill is never held for the timeout.
  *
  * Settings hub (features, cursor-at-end, content-below-yaml) then maps the
  * enabled features onto the final actions: `features:title`, `features:cursor`
  * or `features:both`, with `content-below-yaml` checking for existing content
  * below the YAML and `cursor-at-end` reading "Place cursor at line end".
+ * After templater-event:Y the hub judges the note as Templater left it, not the creation snapshot.
  */
 export class FileCreationCoordinator {
   private plugin: FirstLineIsTitlePlugin;
-  private decisionPath: string[] = [];
 
   constructor(plugin: FirstLineIsTitlePlugin) {
     this.plugin = plugin;
@@ -115,288 +147,334 @@ export class FileCreationCoordinator {
     file: TFile,
     context: FileCreationContext
   ): Promise<FileCreationActions> {
-    this.decisionPath = [];
+    const trail: DecisionTrail = [];
+    const snapshot = context.initialContent;
 
     // feature-enabled: Is either feature enabled?
     const featuresEnabled = this.isFeatureEnabled();
     if (featuresEnabled === 'neither') {
       this.recordDecisionAndLogOutcome(
+        trail,
         'feature-enabled',
         'N',
         'Do nothing (both features disabled)'
       );
-      return this.noActions(this.pathString());
+      return this.noActions(trail, snapshot);
     }
-    this.recordDecision('feature-enabled', 'Y');
+    this.recordDecision(trail, 'feature-enabled', 'Y');
 
     // path-excluded runs before content-excluded because a path test is far cheaper than the content gate, which parses YAML and reads the metadata cache
     // path-excluded: Is the path excluded?
     if (this.isPathExcluded(file)) {
       this.recordDecisionAndLogOutcome(
+        trail,
         'path-excluded',
         'Y',
         'Do nothing (path excluded)'
       );
-      return this.noActions(this.pathString());
+      return this.noActions(trail, snapshot);
     }
-    this.recordDecision('path-excluded', 'N');
+    this.recordDecision(trail, 'path-excluded', 'N');
 
     // content-excluded: Is file excluded by tag/property/disable-renaming (content-based, real-time)?
-    if (this.isContentExcluded(file, context.initialContent)) {
+    if (this.isContentExcluded(file, snapshot)) {
       this.recordDecisionAndLogOutcome(
+        trail,
         'content-excluded',
         'Y',
         'Do nothing (tag/property/disable-renaming excluded)'
       );
-      return this.noActions(this.pathString());
+      return this.noActions(trail, snapshot);
     }
-    this.recordDecision('content-excluded', 'N');
+    this.recordDecision(trail, 'content-excluded', 'N');
 
-    // tag-property-exclusions: Are there exclusions configured?
-    if (this.hasExclusions()) {
-      this.recordDecision('tag-property-exclusions', 'Y');
+    // The Templater gates run whatever the exclusion settings: a template's setSelection lands after an unwaited title insertion and leaves the cursor at the start of the title line
+    // templater-enabled: Is Templater enabled?
+    if (!isTemplaterOn(this.plugin.app)) {
+      this.recordDecision(trail, 'templater-enabled', 'N');
+      return this.proceedToSettingsHub(snapshot, trail);
+    }
+    this.recordDecision(trail, 'templater-enabled', 'Y');
 
-      // templater-enabled: Is Templater enabled?
-      if (!this.isTemplaterOn()) {
-        this.recordDecision('templater-enabled', 'N');
-        return this.proceedToSettingsHub(file, context, this.pathString());
+    // templater-trigger: Is Templater trigger on file creation enabled?
+    if (!isTemplaterTriggerOn(this.plugin.app)) {
+      this.recordDecision(trail, 'templater-trigger', 'N');
+      return this.proceedToSettingsHub(snapshot, trail);
+    }
+    this.recordDecision(trail, 'templater-trigger', 'Y');
+
+    // in-template-folder: Does path match Template folder location?
+    if (isInTemplateFolder(this.plugin.app, file)) {
+      this.recordDecision(trail, 'in-template-folder', 'Y');
+      return this.proceedToSettingsHub(snapshot, trail);
+    }
+    this.recordDecision(trail, 'in-template-folder', 'N');
+
+    // in-ignored-folder: Does Templater ignore new notes in this folder?
+    if (isInTemplaterIgnoredFolder(this.plugin.app, file)) {
+      this.recordDecision(trail, 'in-ignored-folder', 'Y');
+      return this.proceedToSettingsHub(snapshot, trail);
+    }
+    this.recordDecision(trail, 'in-ignored-folder', 'N');
+
+    // body-not-empty: Does the note already hold text Templater would keep?
+    if (hasBodyForTemplater(snapshot)) {
+      this.recordDecision(trail, 'body-not-empty', 'Y');
+      return this.proceedToSettingsHub(snapshot, trail);
+    }
+    this.recordDecision(trail, 'body-not-empty', 'N');
+
+    // folder-templates-mode: Is the trigger mode set to folder templates?
+    if (isFolderTemplatesEnabled(this.plugin.app)) {
+      this.recordDecision(trail, 'folder-templates-mode', 'Y');
+
+      // folder-template-matches: Do any Folder fields match current path?
+      if (folderTemplateMatches(this.plugin.app, file)) {
+        this.recordDecision(trail, 'folder-template-matches', 'Y');
+        // Wait for Templater event (templater-event)
+        return await this.handleTemplaterEvent(file, snapshot, trail);
       }
-      this.recordDecision('templater-enabled', 'Y');
+      this.recordDecision(trail, 'folder-template-matches', 'N');
+      // folder-template-matches:N skips regex-templates-mode: once folder templates are on, Templater resolves the folder template and never falls back to a file regex, so there is nothing left to match
+      return this.proceedToSettingsHub(snapshot, trail);
+    }
+    this.recordDecision(trail, 'folder-templates-mode', 'N');
 
-      // templater-trigger: Is Templater trigger on file creation enabled?
-      if (!this.isTemplaterTriggerOn()) {
-        this.recordDecision('templater-trigger', 'N');
-        return this.proceedToSettingsHub(file, context, this.pathString());
+    // regex-templates-mode: Is the trigger mode set to file regex templates? (only reached if folder-templates-mode:N)
+    if (isFileRegexEnabled(this.plugin.app)) {
+      this.recordDecision(trail, 'regex-templates-mode', 'Y');
+
+      // regex-template-matches: Do any File regex fields match?
+      if (fileRegexMatches(this.plugin.app, file)) {
+        this.recordDecision(trail, 'regex-template-matches', 'Y');
+        // Wait for Templater event (templater-event)
+        return await this.handleTemplaterEvent(file, snapshot, trail);
       }
-      this.recordDecision('templater-trigger', 'Y');
-
-      // in-template-folder: Does path match Template folder location?
-      if (this.isInTemplateFolder(file)) {
-        this.recordDecision('in-template-folder', 'Y');
-        return this.proceedToSettingsHub(file, context, this.pathString());
-      }
-      this.recordDecision('in-template-folder', 'N');
-
-      // folder-templates-mode: Is the trigger mode set to folder templates?
-      if (this.isFolderTemplatesEnabled()) {
-        this.recordDecision('folder-templates-mode', 'Y');
-
-        // folder-template-matches: Do any Folder fields match current path?
-        if (this.folderTemplateMatches(file)) {
-          this.recordDecision('folder-template-matches', 'Y');
-          // Wait for Templater event (templater-event)
-          return await this.handleTemplaterEvent(
-            file,
-            context,
-            this.pathString()
-          );
-        }
-        this.recordDecision('folder-template-matches', 'N');
-        // folder-template-matches:N skips regex-templates-mode: once folder templates are on, Templater resolves the folder template and never falls back to a file regex, so there is nothing left to match
-        return this.proceedToSettingsHub(file, context, this.pathString());
-      }
-      this.recordDecision('folder-templates-mode', 'N');
-
-      // regex-templates-mode: Is the trigger mode set to file regex templates? (only reached if folder-templates-mode:N)
-      if (this.isFileRegexEnabled()) {
-        this.recordDecision('regex-templates-mode', 'Y');
-
-        // regex-template-matches: Do any File regex fields match?
-        if (this.fileRegexMatches(file)) {
-          this.recordDecision('regex-template-matches', 'Y');
-          // Wait for Templater event (templater-event)
-          return await this.handleTemplaterEvent(
-            file,
-            context,
-            this.pathString()
-          );
-        }
-        this.recordDecision('regex-template-matches', 'N');
-      } else {
-        this.recordDecision('regex-templates-mode', 'N');
-      }
-
-      // No Templater template matched - proceed to settings hub
-      return this.proceedToSettingsHub(file, context, this.pathString());
+      this.recordDecision(trail, 'regex-template-matches', 'N');
     } else {
-      // tag-property-exclusions: No exclusions
-      this.recordDecision('tag-property-exclusions', 'N');
-      return this.proceedToSettingsHub(file, context, this.pathString());
+      this.recordDecision(trail, 'regex-templates-mode', 'N');
     }
+
+    // No Templater template matched - proceed to settings hub
+    return this.proceedToSettingsHub(snapshot, trail);
   }
 
   /**
-   * templater-event, template-excluded: Handle Templater event and template exclusion check
+   * templater-event, template-wrote-file, template-excluded, path-excluded-after-template, template-cursor: Wait for the template, then judge the note it left
+   * @param snapshot - The creation snapshot, judged instead when no event arrives
    */
   private async handleTemplaterEvent(
     file: TFile,
-    context: FileCreationContext,
-    pathSoFar: string
+    snapshot: string,
+    trail: DecisionTrail
   ): Promise<FileCreationActions> {
     // templater-event: Wait for Templater event
-    const eventFired = await this.waitForTemplaterEvent(
+    const templateOutput = await waitForTemplaterEvent(
+      this.plugin.app,
       file,
       TIMING.TEMPLATER_EVENT_TIMEOUT_MS,
-      file.stat.ctime
+      file.stat.ctime,
+      verboseLogger(this.plugin)
     );
 
-    if (!eventFired) {
-      this.recordDecision('templater-event', 'N');
-      return this.proceedToSettingsHub(
-        file,
-        context,
-        pathSoFar + ' → templater-event:N'
-      );
+    if (templateOutput === null) {
+      this.recordDecision(trail, 'templater-event', 'N');
+      return this.proceedToSettingsHub(snapshot, trail);
     }
-    this.recordDecision('templater-event', 'Y');
+    this.recordDecision(trail, 'templater-event', 'Y');
+
+    // template-wrote-file: Did Templater write the file rather than the editor showing the note?
+    const viewLagsFile = templaterWroteFile(this.plugin.app, file);
+    this.recordDecision(trail, 'template-wrote-file', viewLagsFile ? 'Y' : 'N');
+
+    // Read before the metadata parse below awaits, so the placeholder count sees the note as Templater's jumper left it; never after a file write, whose view still shows the text from before it
+    const noteAfterTemplate = viewLagsFile
+      ? null
+      : this.readNoteAfterTemplate(file);
+    // After a file write the event carries the merged note; otherwise the creation snapshot stands in when no view shows the note any more
+    const judgedContent = viewLagsFile
+      ? templateOutput
+      : (noteAfterTemplate ?? snapshot);
 
     // template-excluded: Does template have excluded tag/property?
-    if (this.templateHasExclusions(file)) {
+    const templateMetadata = await this.parseTemplateMetadata(
+      file,
+      judgedContent
+    );
+    if (this.templateHasExclusions(file, templateMetadata)) {
       this.recordDecisionAndLogOutcome(
+        trail,
         'template-excluded',
         'Y',
         'Do nothing (template has exclusions)'
       );
-      return this.noActions(
-        pathSoFar + ' → templater-event:Y → template-excluded:Y'
-      );
+      return this.noActions(trail, judgedContent, viewLagsFile);
     }
-    this.recordDecision('template-excluded', 'N');
+    this.recordDecision(trail, 'template-excluded', 'N');
 
     // path-excluded-after-template: Templater can rename or move the note across an entry during the templater-event wait, so the path that path-excluded cleared may no longer be the file's.
     // Not folded into template-excluded:Y: captured debug paths have to keep telling the two causes apart. The mirror case — excluded at creation, cleared by the template — is deliberately not re-opened, since path-excluded returns before the wait ever starts.
     if (this.isPathExcluded(file)) {
       this.recordDecisionAndLogOutcome(
+        trail,
         'path-excluded-after-template',
         'Y',
         'Do nothing (path excluded after template)'
       );
-      return this.noActions(
-        pathSoFar +
-          ' → templater-event:Y → template-excluded:N → path-excluded-after-template:Y'
-      );
+      return this.noActions(trail, judgedContent, viewLagsFile);
     }
-    this.recordDecision('path-excluded-after-template', 'N');
+    this.recordDecision(trail, 'path-excluded-after-template', 'N');
+
+    // template-cursor: Did the template put the cursor in place itself?
+    // Not counted after a file write: Templater's jumper runs only for its active file, which the note was not
+    const templateCursor =
+      !viewLagsFile &&
+      this.templatePlacedCursor(templateOutput, noteAfterTemplate);
+    this.recordDecision(trail, 'template-cursor', templateCursor ? 'Y' : 'N');
 
     return this.proceedToSettingsHub(
-      file,
-      context,
-      pathSoFar +
-        ' → templater-event:Y → template-excluded:N → path-excluded-after-template:N'
+      judgedContent,
+      trail,
+      templateCursor,
+      viewLagsFile
     );
   }
 
   /**
    * features, content-below-yaml, cursor-at-end: Process settings hub and determine final actions
+   * @param content - Text the hub judges, which title insertion then starts from
+   * @param templateCursor - True when the template placed the cursor itself, so no FLIT cursor move overrides it
+   * @param viewLagsFile - True after template-wrote-file:Y
    */
   private proceedToSettingsHub(
-    file: TFile,
-    context: FileCreationContext,
-    pathSoFar: string
+    content: string,
+    trail: DecisionTrail,
+    templateCursor = false,
+    viewLagsFile = false
   ): FileCreationActions {
+    const plan = this.planFromSettings(content, trail);
+    const cursorEndsOnTitleLine =
+      plan.shouldMoveCursor && plan.placeCursorAtEnd;
+
+    if (!templateCursor) {
+      this.logOutcome(trail, plan.resolution);
+      return {
+        shouldMoveCursor: plan.shouldMoveCursor,
+        shouldInsertTitle: plan.shouldInsertTitle,
+        placeCursorAtEnd: plan.placeCursorAtEnd,
+        // Title insertion places the cursor itself only where the delayed pass would put it at the line end anyway, which then skips
+        titleCursor: cursorEndsOnTitleLine ? 'line-end' : 'none',
+        judgedContent: content,
+        viewLagsFile,
+        decisionPath: this.pathString(trail),
+      };
+    }
+
+    // The title decision stands; only the cursor moves are dropped, so a plan without one keeps its own resolution
+    this.logOutcome(
+      trail,
+      plan.shouldMoveCursor
+        ? `${plan.shouldInsertTitle ? 'Insert title' : 'Do nothing'} (cursor left where the template put it)`
+        : plan.resolution
+    );
+    return {
+      shouldMoveCursor: false,
+      shouldInsertTitle: plan.shouldInsertTitle,
+      placeCursorAtEnd: false,
+      // A template cursor where the title goes is moved to the title line end only where FLIT's own placement would have put it there; otherwise it stays where CodeMirror maps it
+      titleCursor: cursorEndsOnTitleLine ? 'keep-template-cursor' : 'none',
+      judgedContent: content,
+      viewLagsFile,
+      decisionPath: this.pathString(trail),
+    };
+  }
+
+  /**
+   * features, content-below-yaml, cursor-at-end: Map the enabled features onto actions, recording each node without logging
+   * @param content - Text judged for content below the properties
+   */
+  private planFromSettings(
+    content: string,
+    trail: DecisionTrail
+  ): SettingsHubPlan {
     const featuresEnabled = this.isFeatureEnabled();
 
     if (featuresEnabled === 'title') {
       // Title only
-      this.recordDecision('features', 'title');
+      this.recordDecision(trail, 'features', 'title');
 
       // content-below-yaml: Has content below YAML?
-      if (this.hasContentBelowYaml(context.initialContent)) {
-        this.recordDecisionAndLogOutcome(
-          'content-below-yaml',
-          'Y',
-          'Do nothing (has content)'
-        );
-        return this.noActions(
-          pathSoFar + ' → features:title → content-below-yaml:Y'
-        );
+      if (this.hasContentBelowYaml(content)) {
+        this.recordDecision(trail, 'content-below-yaml', 'Y');
+        return {
+          shouldMoveCursor: false,
+          shouldInsertTitle: false,
+          placeCursorAtEnd: false,
+          resolution: 'Do nothing (has content)',
+        };
       }
-      this.recordDecisionAndLogOutcome(
-        'content-below-yaml',
-        'N',
-        'Insert title'
-      );
+      this.recordDecision(trail, 'content-below-yaml', 'N');
       return {
         shouldMoveCursor: false,
         shouldInsertTitle: true,
         placeCursorAtEnd: false,
-        decisionPath: pathSoFar + ' → features:title → content-below-yaml:N',
+        resolution: 'Insert title',
       };
     } else if (featuresEnabled === 'cursor') {
       // Cursor only
-      this.recordDecision('features', 'cursor');
+      this.recordDecision(trail, 'features', 'cursor');
 
       // cursor-at-end: Is Place cursor at line end ON?
       if (this.isPlaceCursorAtEndEnabled()) {
-        this.recordDecisionAndLogOutcome(
-          'cursor-at-end',
-          'Y',
-          'Move cursor + Place at end'
-        );
+        this.recordDecision(trail, 'cursor-at-end', 'Y');
         return {
           shouldMoveCursor: true,
           shouldInsertTitle: false,
           placeCursorAtEnd: true,
-          decisionPath: pathSoFar + ' → features:cursor → cursor-at-end:Y',
+          resolution: 'Move cursor + Place at end',
         };
       } else {
-        this.recordDecisionAndLogOutcome('cursor-at-end', 'N', 'Move cursor');
+        this.recordDecision(trail, 'cursor-at-end', 'N');
         return {
           shouldMoveCursor: true,
           shouldInsertTitle: false,
           placeCursorAtEnd: false,
-          decisionPath: pathSoFar + ' → features:cursor → cursor-at-end:N',
+          resolution: 'Move cursor',
         };
       }
     } else {
       // Both features enabled
-      this.recordDecision('features', 'both');
+      this.recordDecision(trail, 'features', 'both');
 
       // cursor-at-end: Is Place cursor at line end ON?
       if (this.isPlaceCursorAtEndEnabled()) {
-        this.recordDecision('cursor-at-end', 'Y');
+        this.recordDecision(trail, 'cursor-at-end', 'Y');
 
         // content-below-yaml: Has content below YAML?
-        if (this.hasContentBelowYaml(context.initialContent)) {
-          this.recordDecisionAndLogOutcome(
-            'content-below-yaml',
-            'Y',
-            'Move cursor + Place at end'
-          );
+        if (this.hasContentBelowYaml(content)) {
+          this.recordDecision(trail, 'content-below-yaml', 'Y');
           return {
             shouldMoveCursor: true,
             shouldInsertTitle: false,
             placeCursorAtEnd: true,
-            decisionPath:
-              pathSoFar +
-              ' → features:both → cursor-at-end:Y → content-below-yaml:Y',
+            resolution: 'Move cursor + Place at end',
           };
         } else {
-          this.recordDecisionAndLogOutcome(
-            'content-below-yaml',
-            'N',
-            'Insert title + Move cursor + Place at end'
-          );
+          this.recordDecision(trail, 'content-below-yaml', 'N');
           return {
             shouldMoveCursor: true,
             shouldInsertTitle: true,
             placeCursorAtEnd: true,
-            decisionPath:
-              pathSoFar +
-              ' → features:both → cursor-at-end:Y → content-below-yaml:N',
+            resolution: 'Insert title + Move cursor + Place at end',
           };
         }
       } else {
-        this.recordDecisionAndLogOutcome(
-          'cursor-at-end',
-          'N',
-          'Insert title + Move cursor'
-        );
+        this.recordDecision(trail, 'cursor-at-end', 'N');
         return {
           shouldMoveCursor: true,
           shouldInsertTitle: true,
           placeCursorAtEnd: false,
-          decisionPath: pathSoFar + ' → features:both → cursor-at-end:N',
+          resolution: 'Insert title + Move cursor',
         };
       }
     }
@@ -424,14 +502,13 @@ export class FileCreationCoordinator {
    */
   private isPathExcluded(file: TFile): boolean {
     // Path-only overrides on the shared gate: a local matcher drifted from it before
-    return !shouldProcessFile(
-      file,
-      this.plugin.settings,
-      this.plugin.app,
-      undefined,
-      { ignoreTag: true, ignoreProperty: true },
-      this.plugin
-    );
+    return !shouldProcessFile(file, this.plugin.settings, this.plugin.app, {
+      exclusionOverrides: {
+        ignoreExcludedTags: true,
+        ignoreExcludedProperties: true,
+      },
+      log: verboseLogger(this.plugin),
+    });
   }
 
   /**
@@ -444,245 +521,88 @@ export class FileCreationCoordinator {
       file,
       initialContent,
       // path-excluded already ran this same path check through this same gate: an optimization, not a semantic difference
-      { ignoreFiles: true }
+      { ignoreExcludedFiles: true }
     );
   }
 
   /**
-   * tag-property-exclusions: Check if any tags or properties are configured in Exclusions
-   * Note: Paths are checked separately in path-excluded
+   * Read the note as Templater left it, for every gate after templater-event:Y
+   * @returns The text the view showing the note holds, or null when none shows it any more
    */
-  private hasExclusions(): boolean {
-    const excl = this.plugin.settings.exclusions;
-    return (
-      excl.excludedTags.some((t) => t.trim() !== '') ||
-      excl.excludedProperties.some((p) => p.key?.trim() !== '')
+  private readNoteAfterTemplate(file: TFile): string | null {
+    // No view hint: the wait can outlast the leaf the creation handler resolved
+    const view = this.plugin.fileOperations.resolveMarkdownViewForFile(
+      file,
+      null
     );
+    return view ? view.getViewData() : null;
   }
 
   /**
-   * Templater's settings object, or undefined when Templater isn't loaded.
+   * template-cursor: Check whether Templater's jump to a cursor placeholder happened
+   * @param templateOutput - The text the event carries: the parsed template, or the merged note when Templater wrote the file rather than the editor
+   * @param noteAfterTemplate - The note as the view shows it after the event, or null when no view shows it
    */
-  private getTemplaterSettings(): Record<string, unknown> | undefined {
-    const templater = this.plugin.app.plugins.plugins['templater-obsidian'] as
-      Record<string, unknown> | undefined;
-    return templater?.settings as Record<string, unknown> | undefined;
-  }
-
-  /** Templater's template-matching mode. Replaced the `enable_folder_templates` and
-   * `enable_file_templates` booleans, which its settings migration deletes — reading those returns
-   * `undefined` on every current install, silently. Independent of the device-local trigger gate:
-   * this picks WHICH templates apply, not WHETHER Templater fires. */
-  private templaterTriggerMode(): 'folder' | 'regex' | 'none' {
-    const mode = this.getTemplaterSettings()?.trigger_on_file_creation_mode;
-    return mode === 'folder' || mode === 'regex' ? mode : 'none';
+  private templatePlacedCursor(
+    templateOutput: string,
+    noteAfterTemplate: string | null
+  ): boolean {
+    // The jumper needs the note in an editor, so with no view it cannot have run
+    if (noteAfterTemplate === null) return false;
+    return templaterJumpedToCursor(templateOutput, noteAfterTemplate);
   }
 
   /**
-   * templater-enabled: Check if Templater plugin is installed and enabled
+   * template-excluded: Parse the judged text's metadata as the metadata cache parses a note
+   * @param judgedContent - Text template-excluded judges
+   * @returns The parsed metadata, or the file's cache when the parse fails
    */
-  private isTemplaterOn(): boolean {
-    return 'templater-obsidian' in this.plugin.app.plugins.plugins;
-  }
-
-  /**
-   * templater-trigger: Check if Templater's "Trigger on new file creation" is enabled
-   */
-  private isTemplaterTriggerOn(): boolean {
-    // Device-local, NOT in `plugin.settings`: Templater moved this out of the synced settings so
-    // that syncing a vault cannot arm code execution on a device the user has not trusted. It
-    // gates `on_file_creation` ahead of the mode, so the mode alone does not mean Templater fires.
-    const local = this.plugin.app.loadLocalStorage(
-      'templater-local-settings'
-    ) as Record<string, unknown> | null;
-    return local?.trigger_on_file_creation === true;
-  }
-
-  /**
-   * in-template-folder: Check if file path matches Templater's template folder location
-   */
-  private isInTemplateFolder(file: TFile): boolean {
-    const templateFolder =
-      (this.getTemplaterSettings()?.templates_folder as string) || '';
-
-    if (!templateFolder || templateFolder === '/') return false;
-
-    return file.path.startsWith(templateFolder + '/');
-  }
-
-  /**
-   * folder-templates-mode: Check if Templater's trigger mode is set to folder templates
-   */
-  private isFolderTemplatesEnabled(): boolean {
-    return this.templaterTriggerMode() === 'folder';
-  }
-
-  /**
-   * folder-template-matches: Check if any Templater folder template matches current path
-   * Uses Templater's walk-up algorithm (deepest match wins)
-   */
-  private folderTemplateMatches(file: TFile): boolean {
-    const folderTemplates = this.getTemplaterSettings()?.folder_templates;
-    if (!Array.isArray(folderTemplates)) return false;
-
-    let folder = file.parent;
-    while (folder) {
-      const match = (folderTemplates as unknown[]).find(
-        (ft: unknown) =>
-          ft &&
-          typeof ft === 'object' &&
-          'folder' in ft &&
-          ft.folder === folder!.path
-      );
-      if (
-        match &&
-        typeof match === 'object' &&
-        'template' in match &&
-        match.template
-      ) {
-        return true;
-      }
-      folder = folder.parent;
-    }
-
-    return false;
-  }
-
-  /**
-   * regex-templates-mode: Check if Templater's trigger mode is set to file regex templates
-   */
-  private isFileRegexEnabled(): boolean {
-    return this.templaterTriggerMode() === 'regex';
-  }
-
-  /**
-   * regex-template-matches: Check if any Templater file regex matches current path
-   */
-  private fileRegexMatches(file: TFile): boolean {
-    const fileTemplates = this.getTemplaterSettings()?.file_templates;
-    if (!Array.isArray(fileTemplates)) return false;
-
-    for (const ft of fileTemplates as unknown[]) {
-      if (!ft || typeof ft !== 'object') continue;
-      try {
-        const regex =
-          'regex' in ft && typeof ft.regex === 'string'
-            ? new RegExp(ft.regex)
-            : null;
-        if (regex && regex.test(file.path)) {
-          return true;
-        }
-      } catch {
-        // Invalid regex - skip
-        continue;
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * templater-event: Wait for Templater event with timeout
-   * @param file - The file to wait for
-   * @param timeoutMs - Timeout in milliseconds after ctime
-   * @param ctime - File creation time (milliseconds since epoch)
-   */
-  private async waitForTemplaterEvent(
+  private async parseTemplateMetadata(
     file: TFile,
-    timeoutMs: number,
-    ctime: number
-  ): Promise<boolean> {
-    return new Promise((resolve) => {
-      let eventFired = false;
-
-      // Calculate how much time has already passed since ctime
-      const now = Date.now();
-      const elapsed = now - ctime;
-      const remainingTime = Math.max(0, timeoutMs - elapsed);
-
-      verboseLog(
-        this.plugin,
-        `Templater event: ${elapsed}ms elapsed since ctime, ${remainingTime}ms remaining for: ${file.path}`
-      );
-
-      // If already past timeout, return immediately
-      if (remainingTime === 0) {
-        verboseLog(
-          this.plugin,
-          `Templater event timeout already passed (${timeoutMs}ms after ctime) for: ${file.path}`
-        );
-        resolve(false);
-        return;
-      }
-
-      const timeout = window.setTimeout(() => {
-        if (!eventFired) {
-          verboseLog(
-            this.plugin,
-            `Templater event timeout (${timeoutMs}ms after ctime) for: ${file.path}`
-          );
-          resolve(false);
-        }
-      }, remainingTime);
-
-      // Listen for Templater event
-      const eventRef = (
-        this.plugin.app.workspace as unknown as WorkspaceWithCustomEvents
-      ).on(
-        'templater:new-note-from-template',
-        (data: Record<string, unknown>) => {
-          if (
-            data.file &&
-            typeof data.file === 'object' &&
-            'path' in data.file &&
-            data.file.path === file.path
-          ) {
-            eventFired = true;
-            window.clearTimeout(timeout);
-            this.plugin.app.workspace.offref(eventRef);
-            verboseLog(this.plugin, `Templater event fired for: ${file.path}`);
-            resolve(true);
-          }
-        }
-      );
-
-      // Clean up event listener if timeout occurs
-      // Must outlast the resolve timer above, hence the grace period on top of the same remainingTime
-      window.setTimeout(() => {
-        if (!eventFired) {
-          this.plugin.app.workspace.offref(eventRef);
-        }
-      }, remainingTime + TIMING.TEMPLATER_EVENT_CLEANUP_GRACE_MS);
-    });
+    judgedContent: string
+  ): Promise<CachedMetadata | null> {
+    // The file's cache has not indexed the template at the event: it fills 4–7 ms later (measured)
+    const metadata = await this.plugin.app.metadataCache.computeMetadataAsync(
+      new TextEncoder().encode(judgedContent).buffer
+    );
+    if (metadata) return metadata;
+    // Undefined only on a metadata worker error; empty text resolves `{}`, which is judged as it stands
+    verboseLog(
+      this.plugin,
+      `Template metadata parse failed for ${file.path}, judging the metadata cache instead`
+    );
+    return this.plugin.app.metadataCache.getFileCache(file);
   }
 
   /**
    * template-excluded: Check if template itself has excluded tags/properties.
    * Re-checks after Templater expansion, which can add tags or properties the file did not carry at content-excluded.
+   * @param metadata - The judged text's metadata, from `parseTemplateMetadata`
    */
-  private templateHasExclusions(file: TFile): boolean {
+  private templateHasExclusions(
+    file: TFile,
+    metadata: CachedMetadata | null
+  ): boolean {
     try {
-      const cache = this.plugin.app.metadataCache.getFileCache(file);
-      const frontmatter = cache?.frontmatter;
+      const frontmatter = metadata?.frontmatter;
       const exclusions = this.plugin.settings.exclusions;
-      const listedTags = filterNonEmpty(exclusions.excludedTags);
-      // template-excluded gates on the property key alone; configured values are not part of the template rule
-      const listedPropKeys = exclusions.excludedProperties
-        .map((p) => p.key.trim().toLowerCase())
-        .filter((key) => key !== '');
 
-      if (listedTags.length > 0) {
+      if (hasTagTargets(this.plugin.settings)) {
         const hasListedTag = fileHasTargetTags(
           file,
           this.plugin.settings,
-          this.plugin.app
+          this.plugin.app,
+          undefined,
+          undefined,
+          undefined,
+          metadata ?? undefined
         );
 
         if (
           exclusions.tagScopeStrategy === EXCLUSION_STRATEGY.EXCLUDE_ALL_EXCEPT
         ) {
           // Whitelist mode: a template that carries tags but none of the listed ones is excluded
-          if (this.templateHasAnyTagInScope(cache) && !hasListedTag) {
+          if (this.templateHasAnyTagInScope(metadata) && !hasListedTag) {
             return true;
           }
         } else if (hasListedTag) {
@@ -690,12 +610,11 @@ export class FileCreationCoordinator {
         }
       }
 
-      if (listedPropKeys.length > 0 && frontmatter) {
-        const allPropKeys = Object.keys(frontmatter).map((key) =>
-          key.toLowerCase()
-        );
+      if (hasPropertyTargets(this.plugin.settings) && frontmatter) {
+        const allPropKeys = Object.keys(frontmatter);
+        // template-excluded gates on the property key alone, by plain name or name pattern; configured values are not part of the template rule
         const hasListedProp = allPropKeys.some((key) =>
-          listedPropKeys.includes(key)
+          isListedPropertyKey(key, this.plugin.settings)
         );
 
         if (
@@ -731,7 +650,7 @@ export class FileCreationCoordinator {
       return (cache.tags?.length ?? 0) > 0;
     }
     if (mode === 'In Properties only') {
-      return getFrontmatterTagsFromCache(cache).length > 0;
+      return (parseFrontMatterTags(cache.frontmatter) ?? []).length > 0;
     }
     return (getAllTags(cache)?.length ?? 0) > 0;
   }
@@ -760,13 +679,22 @@ export class FileCreationCoordinator {
 
   /**
    * Helper to return no-action result
+   * @param judgedContent - Text the decision judged
+   * @param viewLagsFile - True after template-wrote-file:Y
    */
-  private noActions(path: string): FileCreationActions {
+  private noActions(
+    trail: DecisionTrail,
+    judgedContent: string,
+    viewLagsFile = false
+  ): FileCreationActions {
     return {
       shouldMoveCursor: false,
       shouldInsertTitle: false,
       placeCursorAtEnd: false,
-      decisionPath: path,
+      titleCursor: 'none',
+      judgedContent,
+      viewLagsFile,
+      decisionPath: this.pathString(trail),
     };
   }
 
@@ -774,8 +702,12 @@ export class FileCreationCoordinator {
    * Append a decision node result to the breadcrumb. Silent by design: the
    * intermediate gates are only meaningful as part of a full path.
    */
-  private recordDecision(node: DecisionNode, outcome: DecisionOutcome): void {
-    this.decisionPath.push(`${node}:${outcome}`);
+  private recordDecision(
+    trail: DecisionTrail,
+    node: DecisionNode,
+    outcome: DecisionOutcome
+  ): void {
+    trail.push(`${node}:${outcome}`);
   }
 
   /**
@@ -783,21 +715,29 @@ export class FileCreationCoordinator {
    * branches that settle the outcome, so one file creation logs one line.
    */
   private recordDecisionAndLogOutcome(
+    trail: DecisionTrail,
     node: DecisionNode,
     outcome: DecisionOutcome,
     resolution: string
   ): void {
-    this.recordDecision(node, outcome);
+    this.recordDecision(trail, node, outcome);
+    this.logOutcome(trail, resolution);
+  }
+
+  /**
+   * Log the path a creation resolved to. Called once per file creation, by the branch that settles it.
+   */
+  private logOutcome(trail: DecisionTrail, resolution: string): void {
     verboseLog(
       this.plugin,
-      `[FileCreation] Decision path: ${this.pathString()} → ${resolution}`
+      `[FileCreation] Decision path: ${this.pathString(trail)} → ${resolution}`
     );
   }
 
   /**
-   * Get current decision path as string
+   * Join a decision trail into the `decisionPath` string
    */
-  private pathString(): string {
-    return this.decisionPath.join(' → ');
+  private pathString(trail: DecisionTrail): string {
+    return trail.join(' → ');
   }
 }

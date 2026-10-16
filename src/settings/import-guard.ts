@@ -1,3 +1,5 @@
+// Import and export behavior and styles are ported from Notebook Navigator and aim to match it as closely as possible, so users of both plugins get the same familiar experience.
+
 import { CURRENT_DATA_SCHEMA_VERSION } from '../constants';
 import {
   isPlainObject,
@@ -10,16 +12,7 @@ export type SettingsImportVerdict =
   | { kind: 'unreadable' }
   | { kind: 'incompatible-schema' };
 
-/**
- * Decides whether a settings file may be applied. Pure — takes the file's raw text and reads
- * no plugin state, so the decision is testable without the modal plumbing around it.
- *
- * `loadSettings()` discards any data.json whose schema version does not match, so this path
- * must not become a back door around that gate. The version is read off the envelope rather
- * than out of the payload: `dataSchemaVersion` is itself a settings key, and accepting one
- * from inside the payload would let a hand-edited file persist a stale version that makes
- * the next load silently wipe every setting the user still had.
- */
+/** Decides whether a settings file may be applied. Pure — takes the file's raw text and reads no plugin state, so the decision is testable without the modal plumbing around it. `loadSettings()` discards any data.json whose schema version does not match, so this path must not become a back door around that gate. The version is read off the envelope rather than out of the payload: `dataSchemaVersion` is itself a settings key, and accepting one from inside the payload would let a hand-edited file persist a stale version that makes the next load silently wipe every setting the user still had. */
 export function evaluateSettingsImport(rawText: string): SettingsImportVerdict {
   let parsed: unknown;
   try {
@@ -28,14 +21,12 @@ export function evaluateSettingsImport(rawText: string): SettingsImportVerdict {
     return { kind: 'unreadable' };
   }
 
-  // `JSON.parse` returns null, numbers and strings without throwing, and an array passes a
-  // bare `typeof === 'object'` test — none of them are a settings envelope.
+  // `JSON.parse` returns null, numbers and strings without throwing, and an array passes a bare `typeof === 'object'` test — none of them are a settings envelope.
   if (!isPlainObject(parsed)) {
     return { kind: 'unreadable' };
   }
 
-  // A payload that is not an object has nothing to merge, which is a malformed file rather
-  // than a version mismatch.
+  // A payload that is not an object has nothing to merge, which is a malformed file rather than a version mismatch.
   if (!isPlainObject(parsed.settings)) {
     return { kind: 'unreadable' };
   }

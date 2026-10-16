@@ -1,16 +1,8 @@
 import type {} from 'obsidian';
+import type { Text } from '@codemirror/state';
 import FirstLineIsTitlePlugin from '../../main';
 import { TIMING } from '../constants/timing';
 import { TitleRegionCache } from '../types';
-
-/**
- * Operation tracking data for a file
- */
-export interface OperationData {
-  count: number;
-  lastContent: string;
-  lastUpdate: number;
-}
 
 /**
  * Comprehensive per-file state tracking
@@ -19,12 +11,11 @@ export interface FileState {
   path: string;
 
   // Lifecycle timers
-  creationDelayTimer?: number;
   throttleTimer?: number; // checkInterval > 0 delayed processing
   throttleTimerIsDelayed?: boolean; // The timer waits for typing in a linked note to pause, so each new first-line edit restarts it
 
   // Content tracking
-  lastEditorContent?: string;
+  lastEditorContent?: string | Text; // A CodeMirror document is kept as is, since it is immutable and shares structure with the live one, and converted to a string only when read
   lastEditorContentTimestamp?: number; // When editor content was last set (for staleness detection)
   lastSavedContent?: string; // Content after last save (for modify handler comparison)
   lastSavedContentTimestamp?: number;
@@ -32,14 +23,14 @@ export interface FileState {
   lastSelfRefNotice?: number; // timestamp
 
   // Operation tracking
-  operationData?: OperationData;
   isLocked?: boolean;
   lockTimestamp?: number; // When lock was acquired (for stale lock cleanup)
   pendingFirstLinePropertyRecheck?: boolean;
   isSyncingEditors?: boolean; // True when syncing background editors to prevent spurious rechecks
+  pendingMetadataUpdate?: boolean; // A first line property file write whose metadata update has not arrived yet; per path, so the rename move carries it
 
-  // Rename tracking - prevents processing stale content after rename
-  lastRenamedTime?: number; // Timestamp when file was renamed by plugin
+  // Rename tracking: the one record behind the stale-create guard and the disk-staleness skip, set only on the path a plugin rename moved a note into
+  lastRenamedTime?: number; // Timestamp when the plugin renamed a note into this path
 }
 
 /**
@@ -64,45 +55,9 @@ export class FileStateManager {
     return this.fileStates.get(path)!;
   }
 
-  /**
-   * Get file state (read-only)
-   */
-  getState(path: string): Readonly<FileState> | undefined {
-    return this.fileStates.get(path);
-  }
-
   // ============================================================================
   // LIFECYCLE TIMERS
   // ============================================================================
-
-  /**
-   * Set creation delay timer for a file
-   */
-  setCreationDelayTimer(path: string, timer: number): void {
-    const state = this.getOrCreateState(path);
-    if (state.creationDelayTimer) {
-      window.clearTimeout(state.creationDelayTimer);
-    }
-    state.creationDelayTimer = timer;
-  }
-
-  /**
-   * Clear creation delay timer
-   */
-  clearCreationDelayTimer(path: string): void {
-    const state = this.fileStates.get(path);
-    if (state?.creationDelayTimer) {
-      window.clearTimeout(state.creationDelayTimer);
-      delete state.creationDelayTimer;
-    }
-  }
-
-  /**
-   * Check if file is in creation delay
-   */
-  isFileInCreationDelay(path: string): boolean {
-    return !!this.fileStates.get(path)?.creationDelayTimer;
-  }
 
   /**
    * Set throttle timer for a file (checkInterval > 0 delayed processing)
@@ -168,18 +123,26 @@ export class FileStateManager {
 
   /**
    * Set last editor content with timestamp
+   * @param content - The text, or the editor's CodeMirror document, which is stored without converting it
    */
-  setLastEditorContent(path: string, content: string): void {
+  setLastEditorContent(path: string, content: string | Text): void {
     const state = this.getOrCreateState(path);
     state.lastEditorContent = content;
     state.lastEditorContentTimestamp = Date.now();
   }
 
   /**
-   * Get last editor content
+   * Get last editor content as a string, converting a stored CodeMirror document
    */
   getLastEditorContent(path: string): string | undefined {
-    return this.fileStates.get(path)?.lastEditorContent;
+    return this.fileStates.get(path)?.lastEditorContent?.toString();
+  }
+
+  /**
+   * Check whether a note has last editor content, without converting it
+   */
+  hasLastEditorContent(path: string): boolean {
+    return this.fileStates.get(path)?.lastEditorContent !== undefined;
   }
 
   /**
@@ -236,37 +199,6 @@ export class FileStateManager {
   }
 
   /**
-   * Delete title region cache
-   */
-  deleteTitleRegionCache(path: string): void {
-    const state = this.fileStates.get(path);
-    if (state) {
-      delete state.titleRegionCache;
-    }
-  }
-
-  /**
-   * Clear all title region caches (on settings change)
-   */
-  clearAllTitleRegionCaches(): void {
-    for (const state of this.fileStates.values()) {
-      delete state.titleRegionCache;
-    }
-  }
-
-  /**
-   * Update title region cache key on rename
-   */
-  updateTitleRegionCacheKey(oldPath: string, newPath: string): void {
-    const state = this.fileStates.get(oldPath);
-    if (state?.titleRegionCache) {
-      const cache = state.titleRegionCache;
-      delete state.titleRegionCache;
-      this.setTitleRegionCache(newPath, cache);
-    }
-  }
-
-  /**
    * Set last self-reference notice timestamp
    */
   setLastSelfRefNotice(path: string): void {
@@ -286,39 +218,6 @@ export class FileStateManager {
   // ============================================================================
   // OPERATION TRACKING
   // ============================================================================
-
-  /**
-   * Get operation data
-   */
-  getOperationData(path: string): OperationData | undefined {
-    return this.fileStates.get(path)?.operationData;
-  }
-
-  /**
-   * Set operation data
-   */
-  setOperationData(path: string, data: OperationData): void {
-    const state = this.getOrCreateState(path);
-    state.operationData = data;
-  }
-
-  /**
-   * Update operation count
-   */
-  updateOperationCount(path: string, content: string): void {
-    const state = this.getOrCreateState(path);
-    if (!state.operationData) {
-      state.operationData = {
-        count: 1,
-        lastContent: content,
-        lastUpdate: Date.now(),
-      };
-    } else {
-      state.operationData.count++;
-      state.operationData.lastContent = content;
-      state.operationData.lastUpdate = Date.now();
-    }
-  }
 
   /**
    * Acquire file operation lock
@@ -353,15 +252,6 @@ export class FileStateManager {
   }
 
   /**
-   * Clear all locks (on unload)
-   */
-  clearAllLocks(): void {
-    for (const state of this.fileStates.values()) {
-      delete state.isLocked;
-    }
-  }
-
-  /**
    * Mark file for pending first line property recheck
    */
   markPendingFirstLinePropertyRecheck(path: string): void {
@@ -384,19 +274,6 @@ export class FileStateManager {
     if (state) {
       delete state.pendingFirstLinePropertyRecheck;
     }
-  }
-
-  /**
-   * Get all file paths with pending first line property recheck
-   */
-  getFilesWithPendingFirstLinePropertyRecheck(): string[] {
-    const files: string[] = [];
-    for (const [path, state] of this.fileStates.entries()) {
-      if (state.pendingFirstLinePropertyRecheck) {
-        files.push(path);
-      }
-    }
-    return files;
   }
 
   /**
@@ -427,28 +304,53 @@ export class FileStateManager {
   }
 
   /**
-   * Mark file as recently renamed by plugin
-   * Used to prevent processFile from running with stale content immediately after rename
+   * Mark the path a plugin rename just moved a note into
+   * Read by the stale-create guard and by processFile's skip of disk content that can trail the rename, each with its own window
+   * @param path - The rename's new path; the path it vacated takes no record, since a note found there afterwards is a different note
    */
-  markRecentlyRenamed(path: string): void {
+  markRecentlyRenamedInto(path: string): void {
     const state = this.getOrCreateState(path);
     state.lastRenamedTime = Date.now();
   }
 
   /**
-   * Check if file was recently renamed by plugin
-   * Returns true if renamed within the specified time window
+   * Check if a plugin rename moved a note into this path within the time window
+   * A path a rename vacated never matches
    *
    * @param path - File path to check
    * @param withinMs - Time window in milliseconds (default 100ms)
    */
-  wasRecentlyRenamed(
+  wasRecentlyRenamedInto(
     path: string,
     withinMs: number = TIMING.RENAME_RECENTLY_WINDOW_MS
   ): boolean {
     const state = this.fileStates.get(path);
     if (!state?.lastRenamedTime) return false;
     return Date.now() - state.lastRenamedTime < withinMs;
+  }
+
+  /**
+   * Mark a note's first line property file write as waiting for its metadata update
+   */
+  markPendingMetadataUpdate(path: string): void {
+    this.getOrCreateState(path).pendingMetadataUpdate = true;
+  }
+
+  /**
+   * Check if a note's first line property file write still waits for its metadata update
+   */
+  hasPendingMetadataUpdate(path: string): boolean {
+    return this.fileStates.get(path)?.pendingMetadataUpdate ?? false;
+  }
+
+  /**
+   * Clear a note's pending metadata update flag
+   */
+  clearPendingMetadataUpdate(path: string): void {
+    const state = this.fileStates.get(path);
+    if (state) {
+      delete state.pendingMetadataUpdate;
+    }
   }
 
   // ============================================================================
@@ -473,8 +375,6 @@ export class FileStateManager {
   notifyFileDeleted(path: string): void {
     const state = this.fileStates.get(path);
     if (state) {
-      if (state.creationDelayTimer)
-        window.clearTimeout(state.creationDelayTimer);
       if (state.throttleTimer) window.clearTimeout(state.throttleTimer);
       this.fileStates.delete(path);
     }
@@ -482,26 +382,17 @@ export class FileStateManager {
 
   /**
    * Maintenance: cleanup stale entries
-   * Called periodically to remove old operation data, flags, and timestamps
+   * Called periodically to remove old content, flags, and timestamps
    */
   runMaintenance(): void {
     const now = Date.now();
     const staleThreshold = 10 * 60 * 1000; // 10 minutes
 
     for (const [path, state] of this.fileStates.entries()) {
-      // Clean up stale operation data
-      if (state.operationData) {
-        const age = now - state.operationData.lastUpdate;
-        if (age > staleThreshold) {
-          delete state.operationData;
-        }
-      }
-
       // Clean up stale lastRenamedTime (prevents memory leak)
-      // Cleanup after 1 second (wasRecentlyRenamed checks 100ms window)
       if (state.lastRenamedTime) {
         const age = now - state.lastRenamedTime;
-        if (age > 1000) {
+        if (age > TIMING.RECENTLY_RENAMED_RECORD_TTL_MS) {
           delete state.lastRenamedTime;
         }
       }
@@ -535,6 +426,14 @@ export class FileStateManager {
         }
       }
 
+      // Clean up a stale title region cache, which would otherwise keep a state alive for every path a title passed through
+      if (state.titleRegionCache) {
+        const age = now - state.titleRegionCache.lastUpdated;
+        if (age > staleThreshold) {
+          delete state.titleRegionCache;
+        }
+      }
+
       // Clean up stale self-ref notice timestamps
       if (state.lastSelfRefNotice) {
         const age = now - state.lastSelfRefNotice;
@@ -558,8 +457,6 @@ export class FileStateManager {
    */
   dispose(): void {
     for (const state of this.fileStates.values()) {
-      if (state.creationDelayTimer)
-        window.clearTimeout(state.creationDelayTimer);
       if (state.throttleTimer) window.clearTimeout(state.throttleTimer);
     }
     this.fileStates.clear();

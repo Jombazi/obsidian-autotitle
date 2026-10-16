@@ -2,13 +2,23 @@
  * Guards the locale files against silent drift.
  *
  * `t()` returns the key path itself on a miss, so a renamed or mistyped key
- * ships a button labelled `settings.other.foo.bar` while every other test still
- * passes. Nothing else in the suite would catch it.
+ * ships a button labeled `settings.other.foo.bar` while every other test still
+ * passes. Nothing else in the suite would catch it. The reverse check keeps
+ * strings nothing reads any more from piling up in both locale files.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { resolve, join } from 'path';
+import { App, getLanguage } from './mockObsidian';
+import { initI18n } from '../src/i18n';
+import { buildMarkupStrippingPage } from '../src/settings/markup-stripping';
+import type { FirstLineIsTitlePlugin } from '../src/settings/settings-base';
+import { DEFAULT_SETTINGS } from '../src/constants';
+import {
+  PRIMARY_CHAR_KEYS,
+  WINDOWS_ANDROID_CHAR_KEYS,
+} from '../src/types/char-replacement';
 
 const ROOT = resolve(__dirname, '..');
 
@@ -46,9 +56,7 @@ describe('locale parity', () => {
   it('has no extra Russian key beyond the plural categories English lacks', () => {
     const enKeys = new Set(leafPaths(en));
     const extra = leafPaths(ru).filter((key) => !enKeys.has(key));
-    // Russian has a third plural category ("few") that English has no slot for;
-    // `getPluralForm` in src/i18n.ts consumes these. A category is not always a
-    // leaf — `tpSplit` groups carry `.before`/`.noun`/`.after` beneath it.
+    // Russian has a third plural category ("few") that English has no slot for; `tp` and `tpSplit` in src/i18n.ts read these. A category is not always a leaf — `tpSplit` groups carry `.before`/`.noun`/`.after` beneath it.
     expect(extra.filter((key) => !/(^|\.)few(\.|$)/.test(key))).toEqual([]);
   });
 });
@@ -106,39 +114,108 @@ describe('locale key resolution', () => {
   it('resolves every key the settings builders assemble at runtime', () => {
     const enKeySet = new Set(leafPaths(en));
     const read = (path: string) => readFileSync(join(ROOT, path), 'utf-8');
-    const assembled: string[] = [];
-
-    for (const [, descKey, labelKey] of read(
-      'src/settings/first-line-property.ts'
-    ).matchAll(/buildLabelReferenceDescription\(\s*'([\w.]+)',\s*'(\w+)'/g)) {
-      assembled.push(
-        `${descKey}.part1`,
-        `${descKey}.${labelKey}`,
-        `${descKey}.part2`
-      );
-    }
-
-    const characterReplacements = read(
-      'src/settings/character-replacements.ts'
+    // Each character's label is keyed by its setting key
+    const assembled = [...PRIMARY_CHAR_KEYS, ...WINDOWS_ANDROID_CHAR_KEYS].map(
+      (key) => `settings.characterReplacements.characters.${key}`
     );
-    for (const mapName of ['CHAR_LABEL_KEYS', 'CHAR_NOTE_KEYS']) {
-      const body = new RegExp(`${mapName}[^{]*\\{([\\s\\S]*?)\\};`).exec(
-        characterReplacements
-      )?.[1];
-      expect(body, `${mapName} not found`).toBeDefined();
-      for (const [, value] of body!.matchAll(/:\s*'(\w+)'/g)) {
-        assembled.push(`settings.characterReplacements.characters.${value}`);
-      }
-    }
 
-    for (const [, id] of read('src/settings/markup-stripping.ts').matchAll(
-      /\bid:\s*'(\w+)'/g
-    )) {
-      assembled.push(`settings.markupStripping.${id}.name`);
+    const body = /CHAR_NOTE_KEYS[^{]*\{([\s\S]*?)\};/.exec(
+      read('src/settings/character-replacements.ts')
+    )?.[1];
+    expect(body, 'CHAR_NOTE_KEYS not found').toBeDefined();
+    for (const [, value] of body!.matchAll(/:\s*'(\w+)'/g)) {
+      assembled.push(`settings.characterReplacements.characters.${value}`);
     }
 
     // An empty list means a source pattern above stopped matching, not that every key resolves.
-    expect(assembled.length).toBeGreaterThan(30);
+    expect(assembled.length).toBeGreaterThan(14);
     expect(assembled.filter((key) => !enKeySet.has(key))).toEqual([]);
+  });
+
+  it('reads every English key somewhere in source', () => {
+    const literals = new Set<string>();
+    const namespacePrefixes = new Set<string>();
+    for (const file of [
+      ...sourceFiles(join(ROOT, 'src')),
+      join(ROOT, 'main.ts'),
+    ]) {
+      const source = readFileSync(file, 'utf-8');
+      for (const [, literal] of source.matchAll(/['"]([\w.]+)['"]/g)) {
+        literals.add(literal);
+      }
+      // A key built at runtime, such as `settings.markupStripping.${toggle.id}.name`, counts every key under its static prefix as read
+      for (const [, prefix] of source.matchAll(/`([\w.]+\.)\$\{/g)) {
+        namespacePrefixes.add(prefix);
+      }
+    }
+    // The leaves `tp` and `tpSplit` pick beneath a group key the source names
+    const pluralLeaf = /^(?:one|few|many)(?:\.(?:before|noun|after))?$/;
+    const isRead = (key: string): boolean => {
+      if (literals.has(key)) return true;
+      for (const prefix of namespacePrefixes) {
+        if (key.startsWith(prefix)) return true;
+      }
+      const lastDot = key.search(/\.(?:one|few|many)(?:\.\w+)?$/);
+      return (
+        lastDot !== -1 &&
+        literals.has(key.slice(0, lastDot)) &&
+        pluralLeaf.test(key.slice(lastDot + 1))
+      );
+    };
+
+    // An empty set means the literal pattern above stopped matching, not that every key is read.
+    expect(literals.size).toBeGreaterThan(100);
+    expect(leafPaths(en).filter((key) => !isRead(key))).toEqual([]);
+  });
+
+  describe('Markup stripping page', () => {
+    afterEach(() => {
+      vi.mocked(getLanguage).mockReturnValue('en');
+      initI18n();
+    });
+
+    // Its names, examples and stand-in titles are all addressed by keys built at runtime, so the page is rendered instead: a missing key reads back as its own path, an unfilled placeholder as `{{name}}`
+    it.each(['en', 'ru'])(
+      'renders every name and description in %s',
+      (locale) => {
+        vi.mocked(getLanguage).mockReturnValue(locale);
+        initI18n();
+        const plugin = {
+          app: new App(),
+          settings: structuredClone(DEFAULT_SETTINGS),
+        } as unknown as FirstLineIsTitlePlugin;
+        const texts = (buildMarkupStrippingPage(plugin).items ?? []).flatMap(
+          (item) => {
+            const { name, desc } = item as {
+              name?: string;
+              desc?: string | DocumentFragment;
+            };
+            if (!name) return [];
+            return [
+              name,
+              typeof desc === 'string' ? desc : (desc?.textContent ?? ''),
+            ];
+          }
+        );
+
+        expect(texts.length).toBeGreaterThan(40);
+        expect(
+          texts.filter((text) => text === '' || /settings\.|\{\{/.test(text))
+        ).toEqual([]);
+      }
+    );
+  });
+});
+
+describe('Russian spelling', () => {
+  // ё only where е would change the meaning; list each such word here with the reason
+  const MEANING_CHANGING_YO_WORDS: string[] = [];
+
+  it('writes е for ё except in words where е would change the meaning', () => {
+    const text = readFileSync(join(ROOT, 'locale', 'ru.json'), 'utf-8');
+    const yoWords = text.match(/[А-Яа-яЁё]*[Ёё][А-Яа-яЁё]*/g) ?? [];
+    expect(
+      yoWords.filter((word) => !MEANING_CHANGING_YO_WORDS.includes(word))
+    ).toEqual([]);
   });
 });

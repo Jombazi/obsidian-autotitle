@@ -89,6 +89,18 @@ describe('frontmatter-edit', () => {
       expect(stringifyYaml).not.toHaveBeenCalled();
     });
 
+    it('returns the text untouched, comments included, when the change alters nothing', () => {
+      const text = '---\n# kept\naliases:\n  - User\n---\nBody';
+      parsedFixtures.set('# kept\naliases:\n  - User\n', { aliases: ['User'] });
+
+      const result = applyFrontMatterChange(text, (frontmatter) => {
+        frontmatter.aliases = ['User'];
+      });
+
+      expect(result).toBe(text);
+      expect(stringifyYaml).not.toHaveBeenCalled();
+    });
+
     it('leaves a note without a block unchanged when nothing is added', () => {
       expect(applyFrontMatterChange('Title\nBody', () => {})).toBe(
         'Title\nBody'

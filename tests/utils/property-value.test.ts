@@ -1,16 +1,20 @@
 import { describe, it, expect } from 'vitest';
-import { setDisableRenamingProperty } from '../../src/utils/property-value';
+import { setRenamingDisabledInFrontmatter } from '../../src/utils/property-value';
 import { createTestSettings } from '../testUtils';
 
 describe('property-value', () => {
-  describe('setDisableRenamingProperty', () => {
+  describe('setRenamingDisabledInFrontmatter', () => {
     it('should remove the exact key when enabling', () => {
       const frontmatter: Record<string, unknown> = {
         title: 'x',
         'no rename': true,
       };
 
-      setDisableRenamingProperty(frontmatter, createTestSettings(), true);
+      setRenamingDisabledInFrontmatter(
+        frontmatter,
+        createTestSettings(),
+        false
+      );
 
       expect(frontmatter).toStrictEqual({ title: 'x' });
     });
@@ -18,7 +22,11 @@ describe('property-value', () => {
     it('should remove a key that differs only in case when enabling', () => {
       const frontmatter: Record<string, unknown> = { 'No Rename': true };
 
-      setDisableRenamingProperty(frontmatter, createTestSettings(), true);
+      setRenamingDisabledInFrontmatter(
+        frontmatter,
+        createTestSettings(),
+        false
+      );
 
       expect(frontmatter).toStrictEqual({});
     });
@@ -29,7 +37,11 @@ describe('property-value', () => {
         'NO RENAME': true,
       };
 
-      setDisableRenamingProperty(frontmatter, createTestSettings(), true);
+      setRenamingDisabledInFrontmatter(
+        frontmatter,
+        createTestSettings(),
+        false
+      );
 
       expect(frontmatter).toStrictEqual({});
     });
@@ -41,7 +53,7 @@ describe('property-value', () => {
         tags: [],
       };
 
-      setDisableRenamingProperty(frontmatter, createTestSettings(), false);
+      setRenamingDisabledInFrontmatter(frontmatter, createTestSettings(), true);
 
       expect(frontmatter['no rename']).toBe(true);
       expect(Object.keys(frontmatter)).toEqual(['title', 'no rename', 'tags']);
@@ -50,7 +62,7 @@ describe('property-value', () => {
     it('should replace a case variant with the configured key when disabling', () => {
       const frontmatter: Record<string, unknown> = { 'No Rename': false };
 
-      setDisableRenamingProperty(frontmatter, createTestSettings(), false);
+      setRenamingDisabledInFrontmatter(frontmatter, createTestSettings(), true);
 
       expect(frontmatter).toStrictEqual({ 'no rename': true });
     });
@@ -61,7 +73,7 @@ describe('property-value', () => {
         exclusions: { disableRenamingValue: 'yes' },
       });
 
-      setDisableRenamingProperty(frontmatter, settings, false);
+      setRenamingDisabledInFrontmatter(frontmatter, settings, true);
 
       expect(frontmatter).toStrictEqual({ 'no rename': 'yes' });
     });

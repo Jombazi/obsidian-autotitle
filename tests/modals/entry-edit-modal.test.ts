@@ -5,11 +5,17 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { App, ConfirmationModal, Platform } from '../mockObsidian';
+import {
+  App,
+  ConfirmationModal,
+  Platform,
+  displayTooltip,
+} from '../mockObsidian';
 import {
   EntryEditModal,
   EntryEditModalOptions,
 } from '../../src/modals/entry-edit-modal';
+import { flush, pressEnter, typeInto } from '../testUtils';
 
 type RuleValues = {
   searchText: string;
@@ -61,7 +67,7 @@ function openDialog(
         name: 'Replace with',
         placeholder: 'Empty',
         restoreDefault: '-',
-        forbiddenChars: 'windowsAndroid',
+        stripForbiddenChars: true,
       },
       {
         type: 'toggle',
@@ -110,22 +116,6 @@ function openDialog(
       )
     ),
   };
-}
-
-function typeInto(inputEl: HTMLInputElement, value: string): void {
-  inputEl.value = value;
-  inputEl.dispatchEvent(new window.Event('input', { bubbles: true }));
-}
-
-function pressEnter(inputEl: HTMLInputElement, isComposing = false): void {
-  inputEl.dispatchEvent(
-    new window.KeyboardEvent('keydown', { key: 'Enter', isComposing })
-  );
-}
-
-/** Lets the dialog's deferred focus timer and the confirmation buttons' async clicks run. */
-async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
 }
 
 describe('EntryEditModal', () => {
@@ -273,6 +263,53 @@ describe('EntryEditModal', () => {
       expect(onSave).toHaveBeenCalledWith(
         expect.objectContaining({ replaceText: '' })
       );
+    });
+
+    it('keeps the dialog open, saving nothing, and shows the message on the first text field when findError reports one', async () => {
+      vi.mocked(displayTooltip).mockClear();
+      const findError = vi.fn(() => 'Another rule already replaces this text');
+      const { modal, onSave, inputs, saveButton } = openDialog({ findError });
+
+      typeInto(inputs[1], 'x');
+      saveButton.click();
+      await flush();
+
+      expect(findError).toHaveBeenCalledWith(
+        expect.objectContaining({ searchText: 'TODO', replaceText: 'x' })
+      );
+      expect(displayTooltip).toHaveBeenCalledWith(
+        inputs[0],
+        'Another rule already replaces this text',
+        { classes: ['mod-error'] }
+      );
+      expect(onSave).not.toHaveBeenCalled();
+      expect(modal.close).not.toHaveBeenCalled();
+    });
+
+    it('saves once findError reports nothing', () => {
+      const { modal, onSave, saveButton } = openDialog({
+        findError: () => null,
+      });
+
+      saveButton.click();
+
+      expect(onSave).toHaveBeenCalledTimes(1);
+      expect(modal.close).toHaveBeenCalledTimes(1);
+    });
+
+    // On Add, the save records the entry at once, so the repeated Enter would find it
+    it('shows no error for an Enter repeated after a save, though findError would now find the saved entry', () => {
+      vi.mocked(displayTooltip).mockClear();
+      const { onSave, inputs } = openDialog({
+        findError: () =>
+          onSave.mock.calls.length > 0 ? 'Already in the list' : null,
+      });
+
+      pressEnter(inputs[0]);
+      pressEnter(inputs[0]);
+
+      expect(onSave).toHaveBeenCalledTimes(1);
+      expect(displayTooltip).not.toHaveBeenCalled();
     });
 
     it('discards edits on Cancel', async () => {
@@ -459,6 +496,42 @@ describe('EntryEditModal', () => {
       expect(inputs[1].value).toBe('abc');
       expect(onSave).toHaveBeenCalledWith(
         expect.objectContaining({ replaceText: 'abc' })
+      );
+    });
+
+    it('strips a dot only whitespace precedes, as a name refuses it', () => {
+      vi.stubGlobal('Event', window.Event);
+      const { inputs } = openDialog();
+
+      typeInto(inputs[1], ' .a.b');
+
+      expect(inputs[1].value).toBe(' a.b');
+    });
+
+    it('strips the Windows and Android set on macOS too, as the engine does', () => {
+      vi.stubGlobal('Event', window.Event);
+      Platform.isMacOS = true;
+      try {
+        const { inputs } = openDialog();
+
+        typeInto(inputs[1], 'a*"<>?b');
+
+        expect(inputs[1].value).toBe('ab');
+      } finally {
+        Platform.isMacOS = false;
+      }
+    });
+
+    it('leaves a field without the option as typed', () => {
+      // A search text can match characters a rule sees before forbidden characters are processed
+      vi.stubGlobal('Event', window.Event);
+      const { onSave, inputs, saveButton } = openDialog();
+
+      typeInto(inputs[0], 'a/b?c');
+      saveButton.click();
+
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({ searchText: 'a/b?c' })
       );
     });
   });

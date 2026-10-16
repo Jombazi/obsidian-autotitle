@@ -1,25 +1,37 @@
-import { Menu, TFile, TFolder, setIcon } from 'obsidian';
+import { Menu, TFile, TFolder } from 'obsidian';
 import { verboseLog } from '../utils';
-import { ProcessTagModal, RenameMultipleFoldersModal } from '../modals';
+import { RenameMultipleFoldersModal } from '../modals';
 import FirstLineIsTitlePlugin from '../../main';
-import { t, tp } from '../i18n';
+import { tp } from '../i18n';
 import { MenuRenderer } from './menu-config';
-import { MenuDefinitions } from './menu-definitions';
+import { DisableMenuVisibility, MenuDefinitions } from './menu-definitions';
 import { TIMING } from '../constants/timing';
-import { EXCLUSION_STRATEGY } from '../types';
 import {
   folderExclusionEntry,
   hasExcludedFileEntry,
   isFolderFullyExcludedByFileRules,
-  isTagFullyExcludedByTagRules,
 } from '../utils/file-exclusions';
+import { hasExcludedTagEntry } from '../utils/tag-utils';
+import { listedEntryDisablesRenaming } from '../utils/exclusion-strategy';
+
+/** Stops at the first note, so opening the menu never collects every note under a large folder only to learn whether there is one. */
+function folderHasMarkdownFile(folder: TFolder): boolean {
+  for (const child of folder.children) {
+    if (child instanceof TFile) {
+      if (child.extension === 'md') return true;
+    } else if (child instanceof TFolder && folderHasMarkdownFile(child)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Manages all context menu operations for the First Line is Title plugin.
- * Handles folder/tag menu creation, bulk operations, and menu text generation.
+ * Handles folder/tag menu creation and bulk operations.
  * Uses declarative menu configuration for clean, maintainable menu definitions.
  */
-export class ContextMenuManager {
+export class ContextMenuManager implements DisableMenuVisibility {
   private plugin: FirstLineIsTitlePlugin;
   private menuRenderer: MenuRenderer;
   private menuDefinitions: MenuDefinitions;
@@ -27,19 +39,21 @@ export class ContextMenuManager {
   constructor(plugin: FirstLineIsTitlePlugin) {
     this.plugin = plugin;
     this.menuRenderer = new MenuRenderer();
-    this.menuDefinitions = new MenuDefinitions(plugin);
+    this.menuDefinitions = new MenuDefinitions(plugin, this);
   }
 
   /**
    * Creates or retrieves a context menu for the given mouse event.
    * Uses Tag Wrangler's menuForEvent pattern.
+   * @param evt - The `contextmenu` event
+   * @param doc - The document the event fired in, so a menu opened in a pop-out window shows in that window rather than the main one
    */
-  menuForEvent(evt: MouseEvent): Menu {
+  menuForEvent(evt: MouseEvent, doc?: Document): Menu {
     let menu = evt.obsidian_contextmenu;
     if (!menu) {
       menu = evt.obsidian_contextmenu = new Menu();
       window.setTimeout(
-        () => menu!.showAtPosition({ x: evt.pageX, y: evt.pageY }),
+        () => menu!.showAtPosition({ x: evt.pageX, y: evt.pageY }, doc),
         TIMING.NEXT_TICK_MS
       );
     }
@@ -56,21 +70,12 @@ export class ContextMenuManager {
       folderEntry
     );
 
-    let result: boolean;
-    if (
-      this.plugin.settings.exclusions.fileScopeStrategy ===
-      EXCLUSION_STRATEGY.ONLY_EXCLUDE
-    ) {
-      // Only exclude strategy: list contains DISABLED folders
-      // folder in list (disabled) → show "enable" → return false
-      // folder not in list (enabled) → show "disable" → return true
-      result = !isInList;
-    } else {
-      // Exclude all except strategy: list contains ENABLED folders
-      // folder in list (enabled) → show "disable" → return true
-      // folder not in list (disabled) → show "enable" → return false
-      result = isInList;
-    }
+    // Disable shows while renaming is on, which is when the folder's listing does not disable it
+    const result =
+      isInList !==
+      listedEntryDisablesRenaming(
+        this.plugin.settings.exclusions.fileScopeStrategy
+      );
 
     verboseLog(this.plugin, `shouldShowDisableMenuForFolder(${folderPath})`, {
       fileScopeStrategy: this.plugin.settings.exclusions.fileScopeStrategy,
@@ -88,24 +93,17 @@ export class ContextMenuManager {
    */
   shouldShowDisableMenuForTag(tagName: string): boolean {
     const tagToFind = tagName.startsWith('#') ? tagName : `#${tagName}`;
-    const isInList =
-      this.plugin.settings.exclusions.excludedTags.includes(tagToFind);
+    const isInList = hasExcludedTagEntry(
+      this.plugin.settings.exclusions.excludedTags,
+      tagToFind
+    );
 
-    let result: boolean;
-    if (
-      this.plugin.settings.exclusions.tagScopeStrategy ===
-      EXCLUSION_STRATEGY.ONLY_EXCLUDE
-    ) {
-      // Only exclude strategy: list contains DISABLED tags
-      // tag in list (disabled) → show "enable" → return false
-      // tag not in list (enabled) → show "disable" → return true
-      result = !isInList;
-    } else {
-      // Exclude all except strategy: list contains ENABLED tags
-      // tag in list (enabled) → show "disable" → return true
-      // tag not in list (disabled) → show "enable" → return false
-      result = isInList;
-    }
+    // Disable shows while renaming is on, which is when the tag's listing does not disable it
+    const result =
+      isInList !==
+      listedEntryDisablesRenaming(
+        this.plugin.settings.exclusions.tagScopeStrategy
+      );
 
     verboseLog(this.plugin, `shouldShowDisableMenuForTag(${tagName})`, {
       tagScopeStrategy: this.plugin.settings.exclusions.tagScopeStrategy,
@@ -116,29 +114,6 @@ export class ContextMenuManager {
     });
 
     return result;
-  }
-
-  /**
-   * Menu text for folder operations. The scope strategy inverts which half of
-   * the pair is visible - see shouldShowDisableMenuForFolder - never its wording,
-   * so there is one phrasing per action rather than one per strategy.
-   */
-  getFolderMenuText(): { disable: string; enable: string } {
-    return {
-      disable: t('commands.disableRenamingInFolder'),
-      enable: t('commands.enableRenamingInFolder'),
-    };
-  }
-
-  /**
-   * Menu text for tag operations. Strategy-independent for the same reason as
-   * getFolderMenuText.
-   */
-  getTagMenuText(): { disable: string; enable: string } {
-    return {
-      disable: t('commands.disableRenamingForTag'),
-      enable: t('commands.enableRenamingForTag'),
-    };
   }
 
   /**
@@ -172,83 +147,14 @@ export class ContextMenuManager {
   }
 
   /**
-   * Adds tag-related menu items directly to a DOM element.
-   * Used for custom menu implementations.
-   */
-  addTagMenuItemsToDOM(menuEl: HTMLElement, tagName: string): void {
-    if (!this.plugin.settings.core.enableTagCommands) return;
-
-    const shouldShowDisable = this.shouldShowDisableMenuForTag(tagName);
-    const menuText = this.getTagMenuText();
-
-    // Hidden when exclusions leave no note to rename, since the dialog would only say so
-    if (
-      !isTagFullyExcludedByTagRules(
-        tagName,
-        this.plugin.settings,
-        this.plugin.app
-      )
-    ) {
-      const menuItem = menuEl.createDiv({ cls: 'menu-item' });
-      const iconEl = menuItem.createDiv({ cls: 'menu-item-icon' });
-      setIcon(iconEl, 'file-type-corner');
-      menuItem.createDiv({
-        cls: 'menu-item-title',
-        text: t('commands.putFirstLineInTitle'),
-      });
-
-      menuItem.addEventListener('click', () => {
-        new ProcessTagModal(this.plugin.app, this.plugin, tagName).open();
-        menuEl.remove();
-      });
-    }
-
-    if (shouldShowDisable) {
-      const menuItem = menuEl.createDiv({ cls: 'menu-item' });
-      const iconEl = menuItem.createDiv({ cls: 'menu-item-icon' });
-      setIcon(iconEl, 'pen-off');
-      menuItem.createDiv({
-        cls: 'menu-item-title',
-        text: menuText.disable,
-      });
-
-      menuItem.addEventListener('click', () => {
-        void this.plugin.toggleTagExclusion(tagName);
-        menuEl.remove();
-      });
-    }
-
-    if (!shouldShowDisable) {
-      const menuItem = menuEl.createDiv({ cls: 'menu-item' });
-      const iconEl = menuItem.createDiv({ cls: 'menu-item-icon' });
-      setIcon(iconEl, 'file-pen');
-      menuItem.createDiv({
-        cls: 'menu-item-title',
-        text: menuText.enable,
-      });
-
-      menuItem.addEventListener('click', () => {
-        void this.plugin.toggleTagExclusion(tagName);
-        menuEl.remove();
-      });
-    }
-  }
-
-  /**
    * Adds menu items for bulk operations on multiple folders.
    */
   addMultiFolderMenuItems(menu: Menu, folders: TFolder[]): void {
     if (!this.plugin.settings.core.enableFolderCommands) return;
 
-    let totalFiles = 0;
-    folders.forEach((folder) => {
-      const files = this.plugin.getAllMarkdownFilesInFolder(folder);
-      totalFiles += files.length;
-    });
-
     // Hidden when exclusions leave no note to rename, since the dialog would only say so
     const hasRenameCommand =
-      totalFiles > 0 &&
+      folders.some(folderHasMarkdownFile) &&
       !folders.every((folder) =>
         isFolderFullyExcludedByFileRules(folder, this.plugin.settings)
       );

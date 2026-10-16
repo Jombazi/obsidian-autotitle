@@ -4,51 +4,125 @@ import {
   TFile,
   TFolder,
   Notice,
-  Platform,
+  parseFrontMatterTags,
 } from 'obsidian';
-import {
-  verboseLog,
-  shouldProcessFile,
-  normalizeTag,
-  canModifyFile,
-} from './utils';
-import { t, getPluralForm, tpSplit } from './i18n';
-import { FirstLineIsTitlePlugin } from './settings/settings-base';
-import { setDisableRenamingProperty } from './utils/property-value';
+import { verboseLog, verboseLogger } from './utils';
+import { shouldProcessFile } from './utils/file-exclusions';
+import { canModifyFile } from './utils/disable-property';
+import { tagKey, tagMatchesTargetTag } from './utils/tag-utils';
+import { t, tp, tpSplit } from './i18n';
+import { FirstLineIsTitlePlugin, showNotice } from './settings/settings-base';
+import { setRenamingDisabledInFrontmatter } from './utils/property-value';
 import { addFlitModalClass } from './modals/flit-modal-class';
-import { addFormSheetHeaderButtons } from './modals/form-sheet-header';
+import { addFormSheetActions } from './modals/form-sheet-header';
 
-/** The caution every bulk-action modal shows above its buttons. */
-function appendBulkCaution(containerEl: HTMLElement): void {
+/** The caution a bulk-action modal shows above its buttons: renames name the exclusions too, while adding or removing the rename-blocking property ignores them, so it only asks for a backup. */
+function appendBulkCaution(
+  containerEl: HTMLElement,
+  key: 'modals.bulkCaution' | 'modals.bulkBackupCaution' = 'modals.bulkCaution'
+): void {
   // Obsidian's own `mod-warning` class gives the theme's warning color, so no plugin CSS is needed.
   containerEl.createEl('p', {
-    text: t('modals.bulkCaution'),
+    text: t(key),
     cls: 'mod-warning',
   });
 }
 
-// Deliberately small: enough concurrency to hide per-file await latency, not
-// enough to flood the vault adapter on mobile.
-const BULK_CHUNK_SIZE = 8;
+/** Appends the split form a plural group takes for `count`, with the count and its noun in bold. */
+function appendBoldCount(
+  paragraphEl: HTMLElement,
+  keyPath: string,
+  count: number
+): void {
+  const { before, noun, after } = tpSplit(keyPath, count);
+  paragraphEl.appendText(before);
+  paragraphEl.createEl('strong', { text: `${count} ${noun}` });
+  paragraphEl.appendText(after);
+}
+
+// Deliberately small: enough concurrency to hide per-file await latency, not enough to flood the vault adapter on mobile.
+const BULK_WORKER_COUNT = 8;
 
 /**
- * Runs `handler` over `items` in fixed-size concurrent chunks, awaiting each
- * chunk before starting the next. `handler` must swallow its own failures so
- * one bad item cannot abort the batch.
- *
- * Safe for the rename loops: RenameEngine reserves a destination before it
- * awaits the rename and resolves conflicts against those reservations as well as
- * the vault index, so two notes resolving to the same title inside one chunk
- * still produce one plain title and one counter suffix. Which of the two takes
- * the suffix follows completion order rather than the ctime sort.
+ * Runs `handler` over `items` on a pool of `BULK_WORKER_COUNT` workers, each taking the next unstarted item as soon as its previous one settles, so one slow note (a rename rewriting many backlinks) holds up a single worker rather than its whole batch. Items start in array order. `handler` must swallow its own failures so one bad item cannot abort the batch.
+ * Safe for the rename loops: RenameEngine reserves a destination before it awaits the rename and resolves conflicts against those reservations as well as the vault index, so two notes resolving to the same title while both are in flight still produce one plain title and one counter suffix. Which of the two takes the suffix follows which one reserves first rather than the ctime sort.
  */
-async function forEachInChunks<T>(
+async function forEachOnWorkerPool<T>(
   items: T[],
   handler: (item: T) => Promise<void>
 ): Promise<void> {
-  for (let start = 0; start < items.length; start += BULK_CHUNK_SIZE) {
-    await Promise.all(items.slice(start, start + BULK_CHUNK_SIZE).map(handler));
+  let nextIndex = 0;
+  const runWorker = async (): Promise<void> => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex++];
+      try {
+        await handler(item);
+      } catch (error) {
+        // A rejecting handler breaks the contract, so the batch aborts: no further item starts, because the caller resumes on the rejection (the rename loop then clears its reservations) while the other workers would still be pulling items
+        nextIndex = items.length;
+        throw error;
+      }
+    }
+  };
+  const workerCount = Math.min(BULK_WORKER_COUNT, items.length);
+  await Promise.all(Array.from({ length: workerCount }, runWorker));
+}
+
+interface BulkActionRun {
+  plugin: FirstLineIsTitlePlugin;
+  files: TFile[];
+  /** Stays up until the run ends. */
+  progressMessage: string;
+  /** Handles one note and resolves whether it counts as done; a throw is recorded as that note's error. */
+  processNote: (file: TFile) => Promise<boolean>;
+  buildDoneMessage: (doneCount: number) => string;
+  /** True keeps the success notice up, tinted, until dismissed; false shows a plain notice that fades, as the disable and enable runs always have. */
+  keepDoneNotice: boolean;
+  buildErrorMessage: (doneCount: number, errorCount: number) => string;
+  /** Runs once every note has settled, whether or not the batch aborted. */
+  cleanUp?: () => void;
+}
+
+/** Runs a bulk action over its notes, oldest first, behind a progress notice, then reports exactly one outcome. */
+async function runBulkAction(run: BulkActionRun): Promise<void> {
+  const { plugin, progressMessage } = run;
+  // Copied because the sort would otherwise reorder the caller's list.
+  const files = [...run.files].sort((a, b) => a.stat.ctime - b.stat.ctime);
+
+  verboseLog(plugin, `Showing notice: ${progressMessage}`);
+  const progressNotice = new Notice(progressMessage, 0);
+
+  let doneCount = 0;
+  const errors: string[] = [];
+  try {
+    await forEachOnWorkerPool(files, async (file) => {
+      try {
+        if (await run.processNote(file)) doneCount++;
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        errors.push(`Failed to process ${file.path}: ${errorMessage}`);
+        console.error(`Error processing ${file.path}`, error);
+      }
+    });
+  } finally {
+    progressNotice.hide();
+    run.cleanUp?.();
   }
+
+  // Exactly one outcome: a success notice beside the errors would contradict itself and misreport a total failure as "…for 0 notes" (Issue #6)
+  const hasErrors = errors.length > 0;
+  const outcomeMessage = hasErrors
+    ? run.buildErrorMessage(doneCount, errors.length)
+    : run.buildDoneMessage(doneCount);
+  verboseLog(plugin, `Showing notice: ${outcomeMessage}`);
+  if (!hasErrors && !run.keepDoneNotice) {
+    new Notice(outcomeMessage);
+  } else {
+    // The outcome of a run the user may have walked away from stays up until dismissed
+    showNotice(outcomeMessage, hasErrors ? 'warning' : 'success', 0);
+  }
+  if (hasErrors) console.error('Bulk action errors:', errors);
 }
 
 /**
@@ -61,17 +135,15 @@ function isProcessedByBulkRename(
 ): boolean {
   const { app, settings } = plugin;
 
-  // `true` because processFile treats a bulk run as a manual command, which only the rename-blocking property stops.
-  const { canModify } = canModifyFile(
-    file,
-    app,
-    settings.exclusions.disableRenamingKey,
-    settings.exclusions.disableRenamingValue,
-    true
-  );
+  // A manual command, because processFile treats a bulk run as one, which only the rename-blocking property stops.
+  const { canModify } = canModifyFile(file, app, settings, {
+    isManualCommand: true,
+  });
   if (!canModify) return false;
 
-  return shouldProcessFile(file, settings, app, undefined, undefined, plugin);
+  return shouldProcessFile(file, settings, app, {
+    log: verboseLogger(plugin),
+  });
 }
 
 /** True when `file` sits anywhere under `folder`, subfolders included. */
@@ -80,10 +152,7 @@ function isFileUnderFolder(file: TFile, folder: TFolder): boolean {
   return folder.isRoot() || file.path.startsWith(`${folder.path}/`);
 }
 
-/**
- * A bulk "Put first line in title" action. The exclusion settings alone decide
- * which notes it covers, so the dialog only confirms the run.
- */
+/** A bulk "Put first line in title" action. The exclusion settings alone decide which notes it covers, so the dialog only confirms the run. */
 abstract class BulkRenameModal extends ConfirmationModal {
   plugin: FirstLineIsTitlePlugin;
   protected readonly focusesCancelOnOpen: boolean = false;
@@ -102,7 +171,7 @@ abstract class BulkRenameModal extends ConfirmationModal {
   /** Shown in place of the dialog when exclusions leave no note to process. */
   protected abstract getNothingToRenameMessage(): string;
 
-  // The one list behind both the dialog's count and the run, so the two cannot disagree.
+  // The one list behind both the run and the dialog's default count, so outside a multi-selection the two cannot disagree.
   private getFilesToProcess(): TFile[] {
     if (!this.filesToProcess) {
       this.filesToProcess = this.getNotesInScope().filter((file) =>
@@ -110,6 +179,11 @@ abstract class BulkRenameModal extends ConfirmationModal {
       );
     }
     return this.filesToProcess;
+  }
+
+  /** The number of notes the dialog says it will rename. */
+  protected getDialogNoteCount(): number {
+    return this.getFilesToProcess().length;
   }
 
   open(): void {
@@ -126,6 +200,7 @@ abstract class BulkRenameModal extends ConfirmationModal {
           void this.renameFilesToProcess();
         })
     );
+    // By hand rather than `addCancelButton`, which returns the modal and so leaves no button to give initial focus; hence FLIT's own Cancel label instead of Obsidian's
     this.addButton((btn) => {
       btn.setButtonText(t('modals.buttons.cancel')).setCancel();
       if (this.focusesCancelOnOpen) btn.setInitialFocus();
@@ -139,87 +214,42 @@ abstract class BulkRenameModal extends ConfirmationModal {
 
     this.setTitle(t('modals.renameNotes'));
 
-    const count = this.getFilesToProcess().length;
-    const messagePara = contentEl.createEl('p');
-    const parts = tpSplit('modals.renameNNotes', count);
-    messagePara.appendText(parts.before);
-    messagePara.createEl('strong', { text: `${count} ${parts.noun}` });
-    messagePara.appendText(parts.after);
+    appendBoldCount(
+      contentEl.createEl('p'),
+      'modals.renameNNotes',
+      this.getDialogNoteCount()
+    );
 
     appendBulkCaution(contentEl);
   }
 
   async renameFilesToProcess() {
-    if (!this.plugin.renameEngine) {
-      const notice = new Notice(t('notifications.renameEngineNotInitialized'));
-      notice.containerEl.addClass('mod-warning');
-      return;
-    }
-
-    // Copied because the sort below would otherwise reorder the cached list.
-    const filesToRename = [...this.getFilesToProcess()];
-    filesToRename.sort((a, b) => a.stat.ctime - b.stat.ctime);
-
-    const renamingMsg = t('notifications.renamingNNotes').replace(
-      '{{count}}',
-      String(filesToRename.length)
-    );
-    verboseLog(this.plugin, `Showing notice: ${renamingMsg}`);
-    const pleaseWaitNotice = new Notice(renamingMsg, 0);
-
-    let renamedFileCount = 0;
-    const errors: string[] = [];
-    try {
-      await forEachInChunks(filesToRename, async (file) => {
-        try {
-          // No exclusion overrides: processFile re-applies the gates to the note's live content, which can be ahead of the cache the count came from.
-          const result = await this.plugin.renameEngine?.processFile(
-            file,
-            true,
-            true,
-            undefined,
-            true
-          );
-          if (result?.success) {
-            renamedFileCount++;
-          }
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          errors.push(`Failed to rename ${file.path}: ${errorMessage}`);
-          console.error(`Error renaming ${file.path}`, error);
-        }
-      });
-
-      if (errors.length > 0) {
-        const errorMsg = t('notifications.renamedNotesWithErrors')
-          .replace('{{renamed}}', String(renamedFileCount))
-          .replace('{{total}}', String(filesToRename.length))
-          .replace('{{errors}}', String(errors.length));
-        verboseLog(this.plugin, `Showing notice: ${errorMsg}`);
-        const errorNotice = new Notice(errorMsg, 0);
-        errorNotice.containerEl.addClass('mod-warning');
-        console.error('Rename errors:', errors);
-      }
-    } finally {
-      if (this.plugin.cacheManager) {
-        this.plugin.cacheManager.clearReservedPaths();
-      }
-
-      pleaseWaitNotice.hide();
-      if (errors.length === 0) {
-        const renamedMsg = t('notifications.renamedNotes')
-          .replace('{{renamed}}', String(renamedFileCount))
-          .replace('{{total}}', String(filesToRename.length));
-        verboseLog(this.plugin, `Showing notice: ${renamedMsg}`);
-        const successNotice = new Notice(renamedMsg, 0);
-        successNotice.containerEl.addClass('mod-success');
-      }
-      verboseLog(
-        this.plugin,
-        `Bulk rename completed: ${renamedFileCount}/${filesToRename.length} files renamed`
-      );
-    }
+    const { renameEngine } = this.plugin;
+    const filesToRename = this.getFilesToProcess();
+    // The dialog's own count, so a multi-selection's notices count every selected note ("Renamed 2/5"), the ones exclusions skip included
+    const total = this.getDialogNoteCount();
+    await runBulkAction({
+      plugin: this.plugin,
+      files: filesToRename,
+      progressMessage: tp('notifications.renamingNotes', total),
+      processNote: async (file) => {
+        // No exclusion overrides: processFile re-applies the gates to the note's live content, which can be ahead of the cache the count came from.
+        const result = await renameEngine.processFile(file, {
+          isManualCommand: true,
+          isBatchOperation: true,
+        });
+        return result.success;
+      },
+      keepDoneNotice: true,
+      buildDoneMessage: (renamed) =>
+        t('notifications.renamedNotes', { renamed, total }),
+      buildErrorMessage: (renamed, errorCount) =>
+        tp('notifications.renamedNotesWithNErrors', errorCount, {
+          renamed,
+          total,
+        }),
+      cleanUp: () => this.plugin.cacheManager.clearReservedPaths(),
+    });
   }
 
   onClose() {
@@ -291,7 +321,7 @@ export class ProcessTagModal extends BulkRenameModal {
   constructor(app: App, plugin: FirstLineIsTitlePlugin, tag: string) {
     super(app, plugin);
     this.tag = tag;
-    this.normalizedTag = normalizeTag(tag);
+    this.normalizedTag = tagKey(tag);
   }
 
   /** Every Markdown file carrying the tag or one of its subtags. */
@@ -307,20 +337,13 @@ export class ProcessTagModal extends BulkRenameModal {
 
   private fileHasTag(file: TFile): boolean {
     const cache = this.app.metadataCache.getFileCache(file);
-    const isMatch = (rawTag: string): boolean => {
-      const normalized = normalizeTag(rawTag);
-      return (
-        normalized === this.normalizedTag ||
-        normalized.startsWith(`${this.normalizedTag}/`)
-      );
-    };
+    // Subtags always count: the dialog covers the tag's whole branch, whatever the exclusion settings say
+    const isMatch = (rawTag: string): boolean =>
+      tagMatchesTargetTag(tagKey(rawTag), this.normalizedTag, true);
 
-    if (cache?.frontmatter?.tags) {
-      const frontmatterTags = Array.isArray(cache.frontmatter.tags)
-        ? cache.frontmatter.tags
-        : [cache.frontmatter.tags];
-      if (frontmatterTags.some((tag) => isMatch(String(tag)))) return true;
-    }
+    // Read as Obsidian reads them, so the dialog finds the notes Obsidian lists under the tag
+    const frontmatterTags = parseFrontMatterTags(cache?.frontmatter) ?? [];
+    if (frontmatterTags.some(isMatch)) return true;
 
     // Body tags live in the metadata cache rather than the frontmatter block.
     return cache?.tags?.some((tagCache) => isMatch(tagCache.tag)) ?? false;
@@ -339,8 +362,14 @@ export class RenameModal extends BulkRenameModal {
     return this.files;
   }
 
+  // A selection is never empty, so nothing left to rename means every selected note was excluded or blocked
   protected getNothingToRenameMessage(): string {
-    return t('notifications.noNotesToRename');
+    return t('notifications.allSelectedNotesExcluded');
+  }
+
+  // Every selected note, as the file menu label that opened the dialog counts them, even those exclusions will skip
+  protected getDialogNoteCount(): number {
+    return this.files.length;
   }
 }
 
@@ -376,7 +405,6 @@ export class DisableEnableModal extends ConfirmationModal {
 
     const key = this.plugin.settings.exclusions.disableRenamingKey;
     const value = this.plugin.settings.exclusions.disableRenamingValue;
-    const count = this.files.length;
 
     const messagePara = contentEl.createEl('p');
     messagePara.appendText(
@@ -384,26 +412,15 @@ export class DisableEnableModal extends ConfirmationModal {
         ? t('modals.disableEnableAddProperty')
         : t('modals.disableEnableRemoveProperty')
     );
-    messagePara.createEl('strong', { text: `${key}:${value}` });
-    messagePara.appendText(
+    messagePara.createEl('strong', { text: `${key}: ${value}` });
+    appendBoldCount(
+      messagePara,
       this.action === 'disable'
-        ? t('modals.propertyTo')
-        : t('modals.propertyFrom')
+        ? 'modals.addPropertyToNNotes'
+        : 'modals.removePropertyFromNNotes',
+      this.files.length
     );
-    const nounForm =
-      this.action === 'disable'
-        ? getPluralForm(
-            count,
-            t('modals.note'),
-            t('modals.noteFew'),
-            t('modals.notes')
-          )
-        : count === 1
-          ? t('modals.note')
-          : t('modals.notesPrepositional');
-    messagePara.createEl('strong', { text: `${count} ${nounForm}` });
-    messagePara.appendText('.');
-    appendBulkCaution(contentEl);
+    appendBulkCaution(contentEl, 'modals.bulkBackupCaution');
 
     this.addButton((btn) =>
       btn
@@ -417,87 +434,50 @@ export class DisableEnableModal extends ConfirmationModal {
           void this.processFiles();
         })
     );
-    this.addCancelButton(t('modals.buttons.cancel'));
+    this.addCancelButton();
   }
 
   async processFiles() {
-    const filesToProcess = [...this.files];
-    filesToProcess.sort((a, b) => a.stat.ctime - b.stat.ctime);
-
     // Ensure property type is set to checkbox before adding properties
     if (this.action === 'disable') {
-      if (!this.plugin.propertyManager) {
-        const notice = new Notice(
-          t('notifications.propertyManagerNotInitialized')
-        );
-        notice.containerEl.addClass('mod-warning');
-        return;
-      }
       await this.plugin.propertyManager.ensurePropertyTypeIsCheckbox();
     }
 
-    verboseLog(this.plugin, `Processing ${filesToProcess.length} notes...`);
-    // This operation only writes a property, so it must not claim to rename.
-    const processingMsg = t('notifications.processingNNotes').replace(
-      '{{count}}',
-      String(filesToProcess.length)
-    );
-    const pleaseWaitNotice = new Notice(processingMsg, 0);
-
-    let processedCount = 0;
-    const errors: string[] = [];
-
-    try {
-      // Safe to chunk: processFrontMatter is atomic per file and these writes
-      // have no cross-file coupling.
-      await forEachInChunks(filesToProcess, async (file) => {
-        try {
-          await this.app.fileManager.processFrontMatter(
-            file,
-            (frontmatter: Record<string, unknown>) => {
-              setDisableRenamingProperty(
-                frontmatter,
-                this.plugin.settings,
-                this.action === 'enable'
-              );
-            }
-          );
-          processedCount++;
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          errors.push(`Failed to process ${file.path}: ${errorMessage}`);
-          console.error(`Error processing ${file.path}`, error);
-        }
-      });
-    } finally {
-      pleaseWaitNotice.hide();
-    }
-
-    // Report exactly one outcome. Reporting success alongside errors contradicts
-    // itself and misreports a total failure as "…for 0 notes" (Issue #6).
-    if (errors.length > 0) {
-      const errorMsg = t('notifications.processedNotesWithErrors')
-        .replace('{{processed}}', String(processedCount))
-        .replace('{{total}}', String(filesToProcess.length))
-        .replace('{{errors}}', String(errors.length));
-      const errorNotice = new Notice(errorMsg, 0);
-      errorNotice.containerEl.addClass('mod-warning');
-      console.error('Process errors:', errors);
-    } else {
-      const notificationKey =
-        this.action === 'disable'
-          ? 'notifications.disabledRenamingForNNotes'
-          : 'notifications.enabledRenamingForNNotes';
-      const actionPast = this.action === 'disable' ? 'Disabled' : 'Enabled';
-      verboseLog(
-        this.plugin,
-        `${actionPast} renaming in ${processedCount} notes.`
-      );
-      new Notice(
-        t(notificationKey).replace('{{count}}', String(processedCount))
-      );
-    }
+    const total = this.files.length;
+    const isEnabling = this.action === 'enable';
+    await runBulkAction({
+      plugin: this.plugin,
+      files: this.files,
+      // This operation only writes a property, so it must not claim to rename.
+      progressMessage: tp('notifications.processingNotes', total),
+      // Safe to run concurrently: processFrontMatter is atomic per file and these writes have no cross-file coupling.
+      processNote: async (file) => {
+        await this.app.fileManager.processFrontMatter(
+          file,
+          (frontmatter: Record<string, unknown>) => {
+            setRenamingDisabledInFrontmatter(
+              frontmatter,
+              this.plugin.settings,
+              !isEnabling
+            );
+          }
+        );
+        return true;
+      },
+      keepDoneNotice: false,
+      buildDoneMessage: (processed) =>
+        tp(
+          isEnabling
+            ? 'notifications.enabledRenamingForNNotes'
+            : 'notifications.disabledRenamingForNNotes',
+          processed
+        ),
+      buildErrorMessage: (processed, errorCount) =>
+        tp('notifications.processedNotesWithNErrors', errorCount, {
+          processed,
+          total,
+        }),
+    });
   }
 
   onClose() {
@@ -507,22 +487,12 @@ export class DisableEnableModal extends ConfirmationModal {
 }
 
 export class InternalLinkModal extends ConfirmationModal {
-  plugin: FirstLineIsTitlePlugin;
-  onSubmit: (linkTarget: string, linkDisplayText?: string) => void;
-  withDisplayText: boolean;
-  private enterKeyHandler?: (e: KeyboardEvent) => void;
+  onSubmit: (linkText: string) => void;
 
-  constructor(
-    app: App,
-    plugin: FirstLineIsTitlePlugin,
-    onSubmit: (linkTarget: string, linkDisplayText?: string) => void,
-    withDisplayText: boolean = false
-  ) {
+  constructor(app: App, onSubmit: (linkText: string) => void) {
     super(app);
     addFlitModalClass(this);
-    this.plugin = plugin;
     this.onSubmit = onSubmit;
-    this.withDisplayText = withDisplayText;
   }
 
   onOpen() {
@@ -538,47 +508,25 @@ export class InternalLinkModal extends ConfirmationModal {
       placeholder: t('modals.enterText'),
       cls: 'flit-link-input-full',
     });
-    textInput.focus();
 
     // Returns true while the input is empty, which keeps the confirmation dialog open
     const handleSubmit = (): true | undefined => {
       const inputText = textInput.value.trim();
       if (!inputText) return true;
       this.close();
-      this.onSubmit(inputText, this.withDisplayText ? inputText : undefined);
+      this.onSubmit(inputText);
     };
 
-    const headerSubmitEl = Platform.isPhone
-      ? addFormSheetHeaderButtons(this, () => {
-          handleSubmit();
-        })
-      : null;
-    if (headerSubmitEl === null) {
-      this.addButton((btn) =>
-        btn
-          .setButtonText(t('modals.buttons.add'))
-          .setCta()
-          .onClick(handleSubmit)
-      );
-      this.addCancelButton(t('modals.buttons.cancel'));
-    } else {
-      // ConfirmationModal builds the row in its constructor; left empty, it would still leave a margin under the input
-      this.buttonContainerEl.remove();
-    }
-
-    // Handle Enter key
-    this.enterKeyHandler = (e: KeyboardEvent) => {
-      // An Enter that confirms an IME composition (e.g., CJK input) belongs to the input method, not to the dialog
-      if (e.isComposing || e.key !== 'Enter') return;
-      e.preventDefault();
-      handleSubmit();
-    };
-    textInput.addEventListener('keydown', this.enterKeyHandler);
+    addFormSheetActions(this, {
+      submitText: t('modals.buttons.add'),
+      submit: handleSubmit,
+      submitOnEnterEls: [textInput],
+      mobileFocusEl: textInput,
+    });
   }
 
   onClose() {
-    const { contentEl } = this;
-    // Note: textInput is a child of contentEl, so its listener is removed when contentEl.empty() is called
-    contentEl.empty();
+    // Nothing to unregister: emptying detaches the input, and its Enter listener goes with it
+    this.contentEl.empty();
   }
 }

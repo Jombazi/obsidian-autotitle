@@ -1,16 +1,27 @@
-import { normalizePath, Notice, Plugin, TFile, TFolder } from 'obsidian';
+import {
+  debounce,
+  normalizePath,
+  Notice,
+  Plugin,
+  TFile,
+  TFolder,
+} from 'obsidian';
 import { around } from 'monkey-around';
 import { PluginSettings } from './src/types';
 import { CURRENT_DATA_SCHEMA_VERSION, DEFAULT_SETTINGS } from './src/constants';
 import { initI18n, t } from './src/i18n';
+import { verboseLog } from './src/utils';
+import { hasDisablePropertyInFile } from './src/utils/disable-property';
+import { normalizeExclusionLists } from './src/utils/exclusion-lists';
 import {
-  verboseLog,
-  detectOS,
-  hasDisablePropertyInFile,
-  deepMerge,
-  normalizeExclusionLists,
-} from './src/utils';
-import { FirstLineIsTitleSettings } from './src/settings/settings-main';
+  FirstLineIsTitleSettings,
+  runChangedCascades,
+} from './src/settings/settings-main';
+import {
+  saveSettingsOrWarn,
+  showNotice,
+  TYPED_SETTING_DEBOUNCE_MS,
+} from './src/settings/settings-base';
 import { RenameEngine } from './src/core/rename-engine';
 import { ContextMenuManager } from './src/ui/context-menus';
 import { FolderOperations } from './src/operations/folder-operations';
@@ -18,10 +29,11 @@ import { TagOperations } from './src/operations/tag-operations';
 import { FirstLinePropertyManager } from './src/core/first-line-property-manager';
 import { FileOperations } from './src/operations/file-operations';
 import { PropertyVisibility } from './src/ui/property-visibility';
-import { setDisableRenamingProperty } from './src/utils/property-value';
-import { createSettingsTransferFilename } from './src/settings/transfer';
-
-// High-performance cache system replaces all global variables
+import { setRenamingDisabledInFrontmatter } from './src/utils/property-value';
+import {
+  createSettingsTransferFilename,
+  mergeSettingsOverDefaults,
+} from './src/settings/transfer';
 import { CacheManager } from './src/core/cache-manager';
 import { EditorLifecycleManager } from './src/core/editor-lifecycle';
 import { WorkspaceIntegration } from './src/core/workspace-integration';
@@ -36,14 +48,13 @@ import { NotebookNavigatorIntegration } from './src/core/notebook-navigator-inte
 // Build-time constant injected by esbuild
 declare const BUILD_GIT_HASH: string;
 
-// Extra suffixed names tried when a settings backup collides with an existing file.
+// Extra suffixed names tried when a settings file written to the vault root collides with an existing file.
 const SETTINGS_BACKUP_NAME_ATTEMPTS = 5;
 
 export default class FirstLineIsTitle extends Plugin {
   settings: PluginSettings;
   isFullyLoaded: boolean = false;
   pluginLoadTime: number = 0;
-  recentlyRenamedPaths: Set<string> = new Set();
 
   // Set by `loadSettings` when it discards a pre-4.0.0 file, read once by the
   // notice below. Transient by design: the schema stamp makes the reset a
@@ -78,6 +89,48 @@ export default class FirstLineIsTitle extends Plugin {
   private _debugPatchCleanup?: () => void;
   private _createdDebugNamespace: boolean = false;
 
+  private readonly settingsSaveDebouncer = debounce(
+    () => void saveSettingsOrWarn(this),
+    TYPED_SETTING_DEBOUNCE_MS,
+    true
+  );
+
+  /** Saves once typing in a settings text field pauses, rather than on every keystroke. */
+  requestSaveSettings(): void {
+    this.settingsSaveDebouncer();
+  }
+
+  /** Writes a save `requestSaveSettings` still holds, at once: closing Settings and unloading both call it, since a pending timer can die before it fires. */
+  flushSettingsSave(): void {
+    this.settingsSaveDebouncer.run();
+  }
+
+  /**
+   * Replaces every setting at once, as Clear settings and Import do, and brings runtime
+   * state in line: each changed key's cascade runs, so property hiding, the debug stamp
+   * and the rest follow the new values without a reload.
+   *
+   * Takes ownership of `next`: it becomes the live settings object, which is mutated in
+   * place from then on, so callers hand over a fresh copy and never `DEFAULT_SETTINGS`.
+   * Resolves false, with the previous settings restored and a warning shown, when the
+   * save fails.
+   */
+  async replaceSettings(next: PluginSettings): Promise<boolean> {
+    const previous = structuredClone(this.settings);
+    try {
+      normalizeExclusionLists(next);
+      this.settings = next;
+      // Before the save, so what a cascade writes (the debug timestamp) is persisted with the rest
+      runChangedCascades(this, previous);
+      await this.saveSettings();
+      return true;
+    } catch {
+      this.settings = previous;
+      showNotice(t('settings.errors.saveFailed'), 'warning');
+      return false;
+    }
+  }
+
   /**
    * Rebuilds the settings tab's definition tree.
    *
@@ -95,13 +148,10 @@ export default class FirstLineIsTitle extends Plugin {
   get folderOperations(): FolderOperations {
     if (!this._folderOperations) {
       this._folderOperations = new FolderOperations(
-        this.app,
-        this.settings,
+        () => this.settings,
         () => this.saveSettings(),
         (settingName: string, value: unknown) =>
-          this.debugLog(settingName, value),
-        (files: TFile[], action: 'rename') =>
-          this.processMultipleFiles(files, action)
+          this.debugLog(settingName, value)
       );
     }
     return this._folderOperations;
@@ -110,7 +160,7 @@ export default class FirstLineIsTitle extends Plugin {
   get tagOperations(): TagOperations {
     if (!this._tagOperations) {
       this._tagOperations = new TagOperations(
-        this.settings,
+        () => this.settings,
         () => this.saveSettings(),
         (settingName: string, value: unknown) =>
           this.debugLog(settingName, value)
@@ -131,13 +181,6 @@ export default class FirstLineIsTitle extends Plugin {
       this._linkManager = new LinkManager(this);
     }
     return this._linkManager;
-  }
-
-  // Track files with pending metadata cache updates (for first line property manager sync)
-  pendingMetadataUpdates: Set<TFile> = new Set();
-
-  isTagWranglerEnabled(): boolean {
-    return this.app.plugins.enabledPlugins.has('tag-wrangler');
   }
 
   async toggleFolderExclusion(folderPath: string): Promise<void> {
@@ -172,19 +215,12 @@ export default class FirstLineIsTitle extends Plugin {
       return;
     }
 
-    try {
-      const content = editorContent ?? 'N/A (no editor content available)';
+    const content = editorContent ?? 'N/A (no editor content available)';
 
-      console.debug(`CONTENT [${action}] ${file.path}:`);
-      console.debug('--- FILE CONTENT START ---');
-      console.debug(content);
-      console.debug('--- FILE CONTENT END ---');
-    } catch (error) {
-      console.debug(
-        `CONTENT [${action}] ${file.path}: Failed to read file:`,
-        error
-      );
-    }
+    console.debug(`CONTENT [${action}] ${file.path}:`);
+    console.debug('--- FILE CONTENT START ---');
+    console.debug(content);
+    console.debug('--- FILE CONTENT END ---');
   }
 
   // Output structured settings when debug mode is enabled - only non-default values
@@ -237,182 +273,75 @@ export default class FirstLineIsTitle extends Plugin {
       return;
     }
 
-    // Output non-default settings in organized groups
+    // One line per top-level section, each a whole object, which the console shows expandable
     for (const key in nonDefaults) {
-      const value = nonDefaults[key];
-
-      // Format the output based on type
-      if (Array.isArray(value)) {
-        if (value.length > 0) {
-          console.debug(`  ${key}:`, value);
-        }
-      } else if (typeof value === 'object' && value !== null) {
-        console.debug(`  ${key}:`, value);
-      } else {
-        console.debug(`  ${key}:`, value);
-      }
+      console.debug(`  ${key}:`, nonDefaults[key]);
     }
-  }
-
-  getSelectedFolders(): TFolder[] {
-    return this.folderOperations.getSelectedFolders();
-  }
-
-  getAllMarkdownFilesInFolder(folder: TFolder): TFile[] {
-    return this.folderOperations.getAllMarkdownFilesInFolder(folder);
   }
 
   async processMultipleFolders(
     folders: TFolder[],
-    action: 'rename' | 'disable' | 'enable'
+    action: 'disable' | 'enable'
   ): Promise<void> {
     await this.folderOperations.processMultipleFolders(folders, action);
     // Bulk exclusion changes mutate the same arrays, but only once at the end.
-    if (action !== 'rename') this.refreshSettingsTab();
+    this.refreshSettingsTab();
   }
 
-  async processMultipleFiles(files: TFile[], action: 'rename'): Promise<void> {
-    if (files.length === 0) return;
-
-    let processed = 0;
-    let errors = 0;
-
-    new Notice(
-      t('notifications.renamingNNotes').replace(
-        '{{count}}',
-        String(files.length)
-      )
-    );
-
-    const exclusionOverrides = {
-      ignoreFiles: true,
-      ignoreTag: true,
-      ignoreProperty: true,
-    };
-
-    // Process sequentially for safety (prevents race conditions with file operations)
-    // Batch operations bypass global rate limiting to avoid blocking legitimate bulk operations
-    for (const file of files) {
-      try {
-        if (action === 'rename') {
-          const result = await this.renameEngine.processFile(
-            file,
-            true,
-            true,
-            undefined,
-            false,
-            exclusionOverrides
-          );
-          if (result.success) {
-            processed++;
-          }
-        }
-      } catch (error) {
-        console.error(`Error processing file ${file.path}:`, error);
-        errors++;
-      }
-    }
-
-    // Show completion notice
-    if (errors > 0) {
-      const errorMsg = t('notifications.renamedNotesWithErrors')
-        .replace('{{renamed}}', String(processed))
-        .replace('{{total}}', String(files.length))
-        .replace('{{errors}}', String(errors));
-      new Notice(errorMsg, 0);
-    } else {
-      const successMsg = t('notifications.renamedNotes')
-        .replace('{{renamed}}', String(processed))
-        .replace('{{total}}', String(files.length));
-      new Notice(successMsg, 0);
-    }
-  }
-
-  async disableRenamingForNote(): Promise<void> {
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile || activeFile.extension !== 'md') {
-      new Notice(t('notifications.errorNoActiveNote'));
-      return;
-    }
-
-    // Ensure property type is set to checkbox before adding property
-    await this.propertyManager.ensurePropertyTypeIsCheckbox();
-
-    // Check if property already exists
-    const hasProperty = hasDisablePropertyInFile(
-      activeFile,
-      this.app,
-      this.settings.exclusions.disableRenamingKey,
-      this.settings.exclusions.disableRenamingValue
-    );
-
+  /**
+   * Turns renaming off or on for one note by adding or removing the disable property, then confirms with a notice; the file menu and the two commands share it.
+   * @param file - The note to change
+   * @param disabled - True to add the property, false to remove it
+   */
+  async setRenamingDisabledForNote(
+    file: TFile,
+    disabled: boolean
+  ): Promise<void> {
     try {
-      if (!hasProperty) {
+      if (disabled) {
+        // Before the write, so Obsidian types the new property as a checkbox rather than text
+        await this.propertyManager.ensurePropertyTypeIsCheckbox();
+      }
+      // Read again at click time, since the menu or palette may have been built before another edit added or removed it
+      const hasProperty = hasDisablePropertyInFile(
+        file,
+        this.app,
+        this.settings
+      );
+      if (hasProperty !== disabled) {
         await this.app.fileManager.processFrontMatter(
-          activeFile,
+          file,
           (frontmatter: Record<string, unknown>) => {
-            setDisableRenamingProperty(frontmatter, this.settings, false);
+            setRenamingDisabledInFrontmatter(
+              frontmatter,
+              this.settings,
+              disabled
+            );
           }
         );
       }
-
       new Notice(
-        t('notifications.disabledRenamingFor', {
-          filename: activeFile.basename,
-        })
+        t(
+          disabled
+            ? 'notifications.disabledRenamingFor'
+            : 'notifications.enabledRenamingFor',
+          { filename: file.basename }
+        )
       );
     } catch (error) {
-      console.error('Failed to disable renaming:', error);
-      new Notice(t('notifications.failedToDisable'));
-    }
-  }
-
-  async enableRenamingForNote(): Promise<void> {
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile || activeFile.extension !== 'md') {
-      new Notice(t('notifications.errorNoActiveNote'));
-      return;
-    }
-
-    // Check if property exists
-    const hasProperty = hasDisablePropertyInFile(
-      activeFile,
-      this.app,
-      this.settings.exclusions.disableRenamingKey,
-      this.settings.exclusions.disableRenamingValue
-    );
-
-    try {
-      if (hasProperty) {
-        await this.app.fileManager.processFrontMatter(
-          activeFile,
-          (frontmatter: Record<string, unknown>) => {
-            setDisableRenamingProperty(frontmatter, this.settings, true);
-          }
-        );
-      }
-
-      new Notice(
-        t('notifications.enabledRenamingFor', {
-          filename: activeFile.basename,
-        })
+      console.error(
+        `Failed to ${disabled ? 'disable' : 'enable'} renaming:`,
+        error
       );
-    } catch (error) {
-      console.error('Failed to enable renaming:', error);
-      new Notice(t('notifications.failedToEnable'));
+      showNotice(
+        t(
+          disabled
+            ? 'notifications.failedToDisable'
+            : 'notifications.failedToEnable'
+        ),
+        'warning'
+      );
     }
-  }
-
-  addSafeInternalLink(): void {
-    this.linkManager.addSafeInternalLink();
-  }
-
-  addSafeInternalLinkWithDisplayText(): void {
-    this.linkManager.addSafeInternalLinkWithDisplayText();
-  }
-
-  addInternalLinkWithDisplayTextAndCustomTarget(): void {
-    this.linkManager.addInternalLinkWithDisplayTextAndCustomTarget();
   }
 
   updatePropertyVisibility(): void {
@@ -456,8 +385,8 @@ export default class FirstLineIsTitle extends Plugin {
       }
     }
 
-    // Initialize high-performance cache system
-    this.cacheManager = new CacheManager(this);
+    // Initialize the cache system
+    this.cacheManager = new CacheManager();
 
     // Initialize file state manager
     this.fileStateManager = new FileStateManager(this);
@@ -501,25 +430,13 @@ export default class FirstLineIsTitle extends Plugin {
     // Initialize event handler manager
     this.eventHandlerManager = new EventHandlerManager(this);
 
-    // Note: folderOperations, tagOperations, linkManager, and propertyVisibility
-    // are now lazy-loaded on first access for faster plugin load time
-
-    // Auto-detect OS every time plugin loads
-    this.settings.characterReplacements.osPreset = detectOS();
-    await this.saveSettings();
+    // folderOperations, tagOperations, linkManager and propertyVisibility are built on first access instead, so loading the plugin does not wait on them
 
     if (this.settings.core.debug) {
       console.debug(`Plugin loaded - build ${BUILD_GIT_HASH}`);
     }
-    verboseLog(
-      this,
-      `Detected OS: \`${this.settings.characterReplacements.osPreset}\``
-    );
 
-    // Initialize first-enable logic and exclusions setup
-    const pluginInitializer = new PluginInitializer(this);
-    await pluginInitializer.initializeFirstEnableLogic();
-    await pluginInitializer.checkFirstTimeExclusionsSetup();
+    await new PluginInitializer(this).checkFirstTimeExclusionsSetup();
 
     this.settingTab = new FirstLineIsTitleSettings(this.app, this);
     this.addSettingTab(this.settingTab);
@@ -537,8 +454,8 @@ export default class FirstLineIsTitle extends Plugin {
     // Register all event handlers
     this.eventHandlerManager.registerAllHandlers();
 
-    // Setup cursor positioning for new notes
-    this.workspaceIntegration.setupCursorPositioning();
+    // The new-note pipeline: title insertion, cursor placement and the first rename of each note created
+    this.workspaceIntegration.setupNewNotePipeline();
 
     // Setup save event hook for rename on save
     this.workspaceIntegration.setupSaveEventHook();
@@ -552,7 +469,7 @@ export default class FirstLineIsTitle extends Plugin {
       this.editorLifecycle.initializeCheckingSystem();
       verboseLog(
         this,
-        'Checking system initialized based on checkInterval setting'
+        'Open editors and link resolution are now tracked for tab-close and linked-note renames'
       );
     });
 
@@ -627,6 +544,8 @@ export default class FirstLineIsTitle extends Plugin {
   }
 
   onunload() {
+    this.flushSettingsSave();
+
     if (this.cacheManager) {
       this.cacheManager.dispose();
     }
@@ -646,10 +565,6 @@ export default class FirstLineIsTitle extends Plugin {
     // Cleanup lazy-loaded managers only if they were instantiated
     if (this._propertyVisibility) {
       this._propertyVisibility.cleanup();
-    }
-
-    if (this.fileOperations) {
-      this.fileOperations.cleanup();
     }
 
     // Cleanup console API
@@ -672,8 +587,9 @@ export default class FirstLineIsTitle extends Plugin {
     // 4.0.0 replaced every per-key migration with a one-time reset. Stored data from
     // an older schema is discarded wholesale rather than merged: the pre-nesting
     // layout left dozens of flat top-level keys and whole dead subsystems in
-    // data.json that nothing reads any more, and deepMerge copies stored keys the
-    // defaults lack, so every one of them would be written back forever.
+    // data.json that nothing reads any more. The merge below would drop those keys
+    // too, since it keeps only keys the defaults have, but silently; the reset makes
+    // the loss explicit, with a backup and a notice.
     //
     // Resetting is deliberately not special-cased anywhere else. Defaults carry
     // `hasSetupExclusions: false`, so the Excalidraw and template-folder
@@ -690,10 +606,12 @@ export default class FirstLineIsTitle extends Plugin {
       this.settingsBackupPath = await this.backUpPriorSettings();
     }
 
-    // deepMerge deep-copies its defaults, so an empty source yields a fresh clone.
-    // DEFAULT_SETTINGS itself must never be handed out: settings are mutated in place.
-    this.settings = deepMerge(
-      DEFAULT_SETTINGS,
+    // The same validated merge an import goes through: a hand-edited data.json with a
+    // wrong-typed list or an unknown option falls back per key instead of throwing in
+    // normalizeExclusionLists on every start. Keys absent from DEFAULT_SETTINGS are
+    // dropped and leave data.json at the next save. The merge copies every leaf, so
+    // DEFAULT_SETTINGS itself is never handed out: settings are mutated in place.
+    this.settings = mergeSettingsOverDefaults(
       isCurrentSchema ? loadedData : {}
     );
 
@@ -734,15 +652,31 @@ export default class FirstLineIsTitle extends Plugin {
    * Writes `contents` to a timestamped file at the vault root, returning its path or
    * `null` if nothing could be written.
    *
-   * The vault root rather than the plugin's own folder: a backup buried in `.obsidian/`
-   * is one the user cannot open from inside their own vault, and writing there needs the
-   * adapter instead of the Vault API the guidelines call for.
-   *
    * Public because the settings import modal writes the outgoing settings the same way.
    */
   async writeSettingsBackup(contents: string): Promise<string | null> {
+    try {
+      return await this.createSettingsFileAtVaultRoot(contents);
+    } catch {
+      // A backup's callers only need to know whether one landed, not why it did not.
+      return null;
+    }
+  }
+
+  /**
+   * Writes `contents` to a new timestamped file at the vault root and returns its path,
+   * throwing the last write error when no name could be created.
+   *
+   * The vault root rather than the plugin's own folder: a file buried in `.obsidian/`
+   * is one the user cannot open from inside their own vault, and writing there needs the
+   * adapter instead of the Vault API the guidelines call for.
+   *
+   * Public because the export modal saves there on mobile, where it names the error in its notice.
+   */
+  async createSettingsFileAtVaultRoot(contents: string): Promise<string> {
     const fileName = createSettingsTransferFilename(new Date());
     const stem = fileName.slice(0, -'.json'.length);
+    let lastError: unknown;
 
     // `vault.create` throws on an existing path, and the timestamp is only second-
     // resolution, so a same-second second write needs a suffix. A handful of attempts
@@ -753,12 +687,13 @@ export default class FirstLineIsTitle extends Plugin {
       );
       try {
         return (await this.app.vault.create(path, contents)).path;
-      } catch {
+      } catch (error) {
         // Collision or write failure: try the next name, then give up.
+        lastError = error;
       }
     }
 
-    return null;
+    throw lastError;
   }
 
   async saveSettings(): Promise<void> {

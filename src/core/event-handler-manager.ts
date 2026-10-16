@@ -1,13 +1,22 @@
-import { Menu, TFile, TFolder, MarkdownView, EventRef } from 'obsidian';
-import FirstLineIsTitlePlugin from '../../main';
 import {
-  verboseLog,
-  isOnlyFrontmatterChanged,
+  Component,
+  Menu,
+  TFile,
+  TFolder,
+  MarkdownView,
+  EventRef,
+} from 'obsidian';
+import FirstLineIsTitlePlugin from '../../main';
+import { verboseLog } from '../utils';
+import {
   hasDisablePropertyInFile,
   frontmatterHasDisableProperty,
   disablePropertyIsOff,
+} from '../utils/disable-property';
+import {
   isFileOpenInAnyEditor,
-} from '../utils';
+  isOnlyFrontmatterChanged,
+} from '../utils/editor-checks';
 import { tp } from '../i18n';
 import { RenameModal, DisableEnableModal } from '../modals';
 import { around } from 'monkey-around';
@@ -35,7 +44,6 @@ interface WorkspaceWithSearchEvents {
 
 /**
  * Manages all event handler registration for the First Line is Title plugin.
- * Centralizes event handler logic previously scattered in main.ts.
  */
 export class EventHandlerManager {
   private plugin: FirstLineIsTitlePlugin;
@@ -47,6 +55,12 @@ export class EventHandlerManager {
   private notesShownInEditor = new WeakSet<TFile>();
   /** When each note was last edited in any editor, keyed by `TFile` because the object survives renames */
   private lastEditorEditAt = new WeakMap<TFile, number>();
+  /** Removes the YAML tag menu patch the last right-click installed; `monkey-around` removers are idempotent, so calling one that already ran is harmless */
+  private pendingYamlMenuPatchRemove: (() => void) | null = null;
+  /** Whether the unload callback removing a pending YAML tag menu patch is registered; done on the first YAML right-click, since some test stubs construct the manager without `plugin.register` */
+  private yamlMenuPatchUnloadRegistered = false;
+  /** The tag `contextmenu` listener of each pop-out window's document, unloaded when the window closes, so a closed window's document is not held until the plugin unloads */
+  private readonly popoutTagMenuListeners = new Map<Document, Component>();
 
   constructor(plugin: FirstLineIsTitlePlugin) {
     this.plugin = plugin;
@@ -84,8 +98,14 @@ export class EventHandlerManager {
     if (target?.isDirty()) {
       return 'user-typing';
     }
-    // An editor holding other text has not loaded an outside change yet; the file write lets Obsidian reload it silently.
-    return target && target.editor.getValue() === fileContent ? target : null;
+    if (!target) return null;
+    // An editor holding other text has not loaded an outside change yet; the file write lets Obsidian reload it silently. Lengths first, which the CodeMirror document knows without joining its lines.
+    const editorLength =
+      target.editor.cm?.state.doc.length ?? target.editor.getValue().length;
+    return editorLength === fileContent.length &&
+      target.editor.getValue() === fileContent
+      ? target
+      : null;
   }
 
   /**
@@ -169,54 +189,7 @@ export class EventHandlerManager {
         // Handle multiple Markdown files
         if (markdownFiles.length > 0) {
           if (!this.plugin.settings.core.enableFileCommands) return;
-
-          // No separator here — see MenuRenderer.render for why.
-          menu.addItem((item) => {
-            item
-              .setTitle(
-                tp('commands.putFirstLineInTitleNNotes', markdownFiles.length)
-              )
-              .setIcon('file-type-corner')
-              .onClick(() => {
-                new RenameModal(
-                  this.plugin.app,
-                  this.plugin,
-                  markdownFiles
-                ).open();
-              });
-          });
-
-          menu.addItem((item) => {
-            item
-              .setTitle(
-                tp('commands.disableRenamingNNotes', markdownFiles.length)
-              )
-              .setIcon('pen-off')
-              .onClick(() => {
-                new DisableEnableModal(
-                  this.plugin.app,
-                  this.plugin,
-                  markdownFiles,
-                  'disable'
-                ).open();
-              });
-          });
-
-          menu.addItem((item) => {
-            item
-              .setTitle(
-                tp('commands.enableRenamingNNotes', markdownFiles.length)
-              )
-              .setIcon('file-pen')
-              .onClick(() => {
-                new DisableEnableModal(
-                  this.plugin.app,
-                  this.plugin,
-                  markdownFiles,
-                  'enable'
-                ).open();
-              });
-          });
+          this.addMultiNoteMenuItems(menu, markdownFiles);
         }
 
         // Handle multiple folders
@@ -225,6 +198,51 @@ export class EventHandlerManager {
         }
       })
     );
+  }
+
+  /**
+   * Add the rename, disable and enable items for several notes to the file explorer's selection menu or the search results menu.
+   * @param menu - Menu being built
+   * @param notes - Selected or matched Markdown notes
+   */
+  private addMultiNoteMenuItems(menu: Menu, notes: TFile[]): void {
+    // No separator here — see MenuRenderer.render for why.
+    menu.addItem((item) => {
+      item
+        .setTitle(tp('commands.putFirstLineInTitleNNotes', notes.length))
+        .setIcon('file-type-corner')
+        .onClick(() => {
+          new RenameModal(this.plugin.app, this.plugin, notes).open();
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle(tp('commands.disableRenamingNNotes', notes.length))
+        .setIcon('pen-off')
+        .onClick(() => {
+          new DisableEnableModal(
+            this.plugin.app,
+            this.plugin,
+            notes,
+            'disable'
+          ).open();
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle(tp('commands.enableRenamingNNotes', notes.length))
+        .setIcon('file-pen')
+        .onClick(() => {
+          new DisableEnableModal(
+            this.plugin.app,
+            this.plugin,
+            notes,
+            'enable'
+          ).open();
+        });
+    });
   }
 
   /**
@@ -237,12 +255,10 @@ export class EventHandlerManager {
         if (!this.plugin.settings.core.enableContextMenus) return;
         if (!(view instanceof MarkdownView)) return;
 
-        const pos = editor.getCursor();
-        const line = editor.getLine(pos.line);
-        const tagName = detectTagFromEditor(line, pos.ch);
+        const tagInfo = detectTagFromEditor(view, editor.getCursor());
 
-        if (tagName) {
-          this.plugin.contextMenuManager.addTagMenuItems(menu, tagName);
+        if (tagInfo) {
+          this.plugin.contextMenuManager.addTagMenuItems(menu, tagInfo.tagName);
         }
       })
     );
@@ -250,38 +266,90 @@ export class EventHandlerManager {
 
   /**
    * Unified tag context menu handler using event delegation.
-   * Handles both tag pane and YAML frontmatter tags with a single DOM listener.
+   * Handles both tag pane and YAML frontmatter tags with one DOM listener per window document.
    */
   private registerTagSearchMenuHandler(): void {
-    // Single event-delegated handler for all DOM-based tag contexts
-    this.plugin.registerDomEvent(document, 'contextmenu', (evt) => {
-      if (!this.plugin.settings.core.enableContextMenus) return;
+    // Module-scope `document` is the main window's, which lives as long as the plugin
+    this.plugin.registerDomEvent(document, 'contextmenu', (evt) =>
+      this.handleTagContextMenu(evt)
+    );
 
-      if (!(evt.target instanceof HTMLElement)) return;
-      const target = evt.target;
-      const tagInfo = detectTagFromDOM(target);
-
-      if (!tagInfo) return;
-
-      // Different handling based on where tag was found
-      if (tagInfo.location === 'tag-pane') {
-        // Tag pane: use Tag Wrangler's menuForEvent pattern
-        const menu = this.plugin.contextMenuManager.menuForEvent(evt);
-        this.plugin.contextMenuManager.addTagMenuItems(menu, tagInfo.tagName);
-      } else if (tagInfo.location === 'yaml') {
-        // YAML tags: use monkey-patching to inject into Obsidian's native menu
-        const plugin = this.plugin;
-        const remove = around(Menu.prototype, {
-          showAtPosition(old) {
-            return function (this: Menu, ...args: unknown[]) {
-              remove();
-              plugin.contextMenuManager.addTagMenuItems(this, tagInfo.tagName);
-              return old.apply(this, args);
-            };
-          },
-        });
-      }
+    // A pop-out window has its own document, which the main one's listener never hears. A pop-out open when the plugin loads (a plugin reload with one open) sends no `window-open`, so those are read off the leaves they hold.
+    this.plugin.app.workspace.onLayoutReady(() => {
+      this.plugin.app.workspace.iterateAllLeaves((leaf) => {
+        this.listenForPopoutTagMenus(leaf.view.containerEl.ownerDocument);
+      });
     });
+    this.plugin.registerEvent(
+      this.plugin.app.workspace.on('window-open', (_, win) => {
+        this.listenForPopoutTagMenus(win.document);
+      })
+    );
+    this.plugin.registerEvent(
+      this.plugin.app.workspace.on('window-close', (_, win) => {
+        const listener = this.popoutTagMenuListeners.get(win.document);
+        if (!listener) return;
+        this.popoutTagMenuListeners.delete(win.document);
+        this.plugin.removeChild(listener);
+      })
+    );
+  }
+
+  /**
+   * Listen for tag right-clicks in a pop-out window's document, once per document.
+   * @param doc - Document of a window that may be a pop-out
+   */
+  private listenForPopoutTagMenus(doc: Document): void {
+    // The leaf scan meets each document once per leaf, and a window can reach both the scan and `window-open`
+    if (doc === document || this.popoutTagMenuListeners.has(doc)) return;
+    // A child component per window rather than `plugin.registerDomEvent`, which would keep every closed window's document until the plugin unloads
+    const listener = this.plugin.addChild(new Component());
+    listener.registerDomEvent(doc, 'contextmenu', (evt) =>
+      this.handleTagContextMenu(evt)
+    );
+    this.popoutTagMenuListeners.set(doc, listener);
+  }
+
+  /**
+   * Add the plugin's tag items to the menu a right-click on a tag pane entry or a properties tag pill opens.
+   * @param evt - The `contextmenu` event, from any window's document
+   */
+  private handleTagContextMenu(evt: MouseEvent): void {
+    if (!this.plugin.settings.core.enableContextMenus) return;
+
+    if (!(evt.target instanceof HTMLElement)) return;
+    const target = evt.target;
+    const tagInfo = detectTagFromDOM(target);
+
+    if (!tagInfo) return;
+
+    // Different handling based on where tag was found
+    if (tagInfo.location === 'tag-pane') {
+      // Tag pane: use Tag Wrangler's menuForEvent pattern; the event's own document shows the menu in the window that was clicked
+      const menu = this.plugin.contextMenuManager.menuForEvent(evt, target.doc);
+      this.plugin.contextMenuManager.addTagMenuItems(menu, tagInfo.tagName);
+    } else if (tagInfo.location === 'yaml') {
+      // YAML tags: use monkey-patching to inject into Obsidian's native menu
+      this.pendingYamlMenuPatchRemove?.();
+      if (!this.yamlMenuPatchUnloadRegistered) {
+        this.yamlMenuPatchUnloadRegistered = true;
+        this.plugin.register(() => this.pendingYamlMenuPatchRemove?.());
+      }
+
+      const plugin = this.plugin;
+      const remove = around(Menu.prototype, {
+        showAtPosition(old) {
+          return function (this: Menu, ...args: unknown[]) {
+            remove();
+            plugin.contextMenuManager.addTagMenuItems(this, tagInfo.tagName);
+            return old.apply(this, args);
+          };
+        },
+      });
+      this.pendingYamlMenuPatchRemove = remove;
+      // The pill's handler shows its menu from a 0 ms timer on the event's window, queued before this one (measured), so a patch still installed here met no menu and must not reach the next one
+      target.win.setTimeout(remove, 0);
+    }
   }
 
   /**
@@ -320,43 +388,7 @@ export class EventHandlerManager {
 
           if (files.length < 1) return;
 
-          // No separator here — see MenuRenderer.render for why.
-          menu.addItem((item) => {
-            item
-              .setTitle(tp('commands.putFirstLineInTitleNNotes', files.length))
-              .setIcon('file-type-corner')
-              .onClick(() => {
-                new RenameModal(this.plugin.app, this.plugin, files).open();
-              });
-          });
-
-          menu.addItem((item) => {
-            item
-              .setTitle(tp('commands.disableRenamingNNotes', files.length))
-              .setIcon('pen-off')
-              .onClick(() => {
-                new DisableEnableModal(
-                  this.plugin.app,
-                  this.plugin,
-                  files,
-                  'disable'
-                ).open();
-              });
-          });
-
-          menu.addItem((item) => {
-            item
-              .setTitle(tp('commands.enableRenamingNNotes', files.length))
-              .setIcon('file-pen')
-              .onClick(() => {
-                new DisableEnableModal(
-                  this.plugin.app,
-                  this.plugin,
-                  files,
-                  'enable'
-                ).open();
-              });
-          });
+          this.addMultiNoteMenuItems(menu, files);
         }
       )
     );
@@ -368,44 +400,47 @@ export class EventHandlerManager {
   private registerEditorChangeHandler(): void {
     this.plugin.registerEvent(
       this.plugin.app.workspace.on('editor-change', (editor, info) => {
-        if (this.plugin.settings.core.debug) {
-          console.debug(
-            `Editor change detected for file: ${info.file?.path || 'unknown'}`
-          );
-        }
+        verboseLog(
+          this.plugin,
+          `Editor change detected for file: ${info.file?.path || 'unknown'}`
+        );
 
         if (!this.plugin.settings.core.renameAutomatically) {
-          if (this.plugin.settings.core.debug) {
-            console.debug(
-              `Skipping editor-change: renameAutomatically=${this.plugin.settings.core.renameAutomatically}`
-            );
-          }
+          verboseLog(
+            this.plugin,
+            `Skipping editor-change: renameAutomatically=${this.plugin.settings.core.renameAutomatically}`
+          );
           return;
         }
 
         if (!info.file) {
-          if (this.plugin.settings.core.debug) {
-            console.debug(`Skipping editor-change: no file in info`);
-          }
+          verboseLog(this.plugin, `Skipping editor-change: no file in info`);
           return;
         }
 
         if (info.file.extension !== 'md') {
-          if (this.plugin.settings.core.debug) {
-            console.debug(
-              `Skipping editor-change: not Markdown (${info.file.extension})`
-            );
-          }
+          verboseLog(
+            this.plugin,
+            `Skipping editor-change: not Markdown (${info.file.extension})`
+          );
           return;
         }
 
         // A page preview or Canvas card showing one section passes itself as `info`, and its editor's first line is the section's, not the note's.
         if ('subpath' in info && info.subpath) {
-          if (this.plugin.settings.core.debug) {
-            console.debug(
-              `Skipping editor-change: section embed (${info.subpath})`
-            );
-          }
+          verboseLog(
+            this.plugin,
+            `Skipping editor-change: section embed (${info.subpath})`
+          );
+          return;
+        }
+
+        // Another plugin writing into a Reading view's hidden editor fires this event too, and the view never saves that text (measured, Obsidian 1.14.4).
+        if (info instanceof MarkdownView && info.getMode() !== 'source') {
+          verboseLog(
+            this.plugin,
+            `Skipping editor-change: Reading view (${info.file.path})`
+          );
           return;
         }
 
@@ -413,24 +448,22 @@ export class EventHandlerManager {
         this.lastEditorEditAt.set(info.file, Date.now());
         this.rememberSavedContentBaseline(info.file);
 
-        // Early exit if still within creation delay window
+        // Early exit while the new-note pipeline or the New note delay still owns the note
         if (info.file && editor) {
-          if (
-            this.plugin.editorLifecycle.isFileInCreationDelay(info.file.path)
-          ) {
-            if (this.plugin.settings.core.debug) {
-              console.debug(
-                `Skipping editor-change: file in creation delay: ${info.file.path}`
-              );
-            }
+          if (this.plugin.editorLifecycle.isFileInCreationWindow(info.file)) {
+            verboseLog(
+              this.plugin,
+              `Skipping editor-change: file in creation window: ${info.file.path}`
+            );
             return;
           }
         }
 
         if (!this.plugin.isFullyLoaded) {
-          if (this.plugin.settings.core.debug) {
-            console.debug(`Skipping editor-change: plugin not fully loaded`);
-          }
+          verboseLog(
+            this.plugin,
+            `Skipping editor-change: plugin not fully loaded`
+          );
           return;
         }
 
@@ -488,20 +521,15 @@ export class EventHandlerManager {
   }
 
   private rememberIfBlockingRename(file: TFile): void {
-    if (
-      hasDisablePropertyInFile(
-        file,
-        this.plugin.app,
-        this.plugin.settings.exclusions.disableRenamingKey,
-        this.plugin.settings.exclusions.disableRenamingValue
-      )
-    ) {
+    if (hasDisablePropertyInFile(file, this.plugin.app, this.plugin.settings)) {
       this.notesBlockingRename.add(file);
     }
   }
 
   /** Seeds the baseline the first line property handlers compare a save against, so a properties-only save of an open note never writes a first line property value. */
   private rememberSavedContentBaseline(file: TFile): void {
+    // Both readers return without a property name. A note already open when a name is first set therefore has no baseline, so its first properties-only save writes the value once (accepted).
+    if (!hasFirstLinePropertyName(this.plugin.settings)) return;
     const { fileStateManager } = this.plugin;
     const existingBaseline = fileStateManager.getLastSavedContent(file.path);
     if (existingBaseline !== undefined) {
@@ -543,10 +571,10 @@ export class EventHandlerManager {
     if (!this.notesBlockingRename.has(file)) return;
     // A half-typed value keeps the note remembered until it settles.
     if (!disablePropertyIsOff(frontmatter, disableRenamingKey)) return;
-    // The note stays remembered; the delayed new-note processing renames it.
-    if (this.plugin.editorLifecycle.isFileInCreationDelay(file.path)) return;
+    // The note stays remembered; the new-note pipeline's creation rename, immediate or delayed, renames it.
+    if (this.plugin.editorLifecycle.isFileInCreationWindow(file)) return;
 
-    if (this.plugin.cacheManager?.isLocked(file.path)) {
+    if (this.plugin.fileStateManager.isLocked(file.path)) {
       if (retriesLeft > 0) {
         window.setTimeout(
           () =>
@@ -570,7 +598,7 @@ export class EventHandlerManager {
 
     this.notesBlockingRename.delete(file);
     // No `await` before this call, so `processFile` takes the lock synchronously; `canModifyFile` then requires the note open in any Markdown leaf, Reading view included.
-    void this.plugin.renameEngine.processFile(file, true);
+    void this.plugin.renameEngine.processFile(file);
   }
 
   /**
@@ -582,12 +610,10 @@ export class EventHandlerManager {
       this.plugin.app.vault.on('rename', (file, oldPath) => {
         if (file instanceof TFile && file.extension === 'md') {
           // Update file state
-          this.plugin.fileStateManager?.notifyFileRenamed(oldPath, file.path);
+          this.plugin.fileStateManager.notifyFileRenamed(oldPath, file.path);
 
           // Update cache
-          if (this.plugin.cacheManager) {
-            this.plugin.cacheManager.notifyFileRenamed(oldPath, file.path);
-          }
+          this.plugin.cacheManager.notifyFileRenamed(oldPath, file.path);
 
           // Clean up pendingFirstLinePropertyUpdates for old path (state moved to new path)
           this.pendingFirstLinePropertyUpdates.delete(oldPath);
@@ -604,9 +630,9 @@ export class EventHandlerManager {
     this.plugin.registerEvent(
       this.plugin.app.vault.on('delete', (file) => {
         if (file instanceof TFile) {
-          this.plugin.cacheManager?.notifyFileDeleted(file.path);
+          this.plugin.cacheManager.notifyFileDeleted(file.path);
           this.plugin.editorLifecycle.clearCreationDelayTimer(file.path);
-          this.plugin.fileStateManager?.notifyFileDeleted(file.path);
+          this.plugin.fileStateManager.notifyFileDeleted(file.path);
           // Clean up pendingFirstLinePropertyUpdates to prevent memory leak and blocking
           this.pendingFirstLinePropertyUpdates.delete(file.path);
         }
@@ -620,13 +646,13 @@ export class EventHandlerManager {
         if (file.extension !== 'md') return;
 
         // Skip if file operation in progress (rename, etc.)
-        if (this.plugin.cacheManager?.isLocked(file.path)) return;
+        if (this.plugin.fileStateManager.isLocked(file.path)) return;
 
-        // Skip if file is in creation delay period
-        if (this.plugin.editorLifecycle.isFileInCreationDelay(file.path)) {
+        // Skip if the new-note pipeline or the New note delay still owns the file
+        if (this.plugin.editorLifecycle.isFileInCreationWindow(file)) {
           verboseLog(
             this.plugin,
-            `Skipping modify: file in creation delay: ${file.path}`
+            `Skipping modify: file in creation window: ${file.path}`
           );
           return;
         }
@@ -651,7 +677,7 @@ export class EventHandlerManager {
                 this.plugin,
                 `Modify event: processing ${file.path} (contentReadMethod: ${this.plugin.settings.core.contentReadMethod})`
               );
-              await this.plugin.renameEngine.processFile(file, true);
+              await this.plugin.renameEngine.processFile(file);
             }
           }
         }
@@ -664,216 +690,154 @@ export class EventHandlerManager {
           this.plugin.settings.core.renameAutomatically
         ) {
           // Skip if file has pending metadata update from processFrontMatter
-          const hasPending = this.plugin.pendingMetadataUpdates.has(file);
+          const hasPending =
+            this.plugin.fileStateManager.hasPendingMetadataUpdate(file.path);
           verboseLog(
             this.plugin,
-            `// PENDING_META_CHECK (modify): Checking ${file.path} in pendingMetadataUpdates → ${hasPending}`
+            `PENDING_META_CHECK (modify): ${file.path} awaits the metadata update of a first line property write → ${hasPending}`
           );
           if (hasPending) {
             return;
           }
 
-          // Skip if first line property update already in progress for this file
-          if (this.pendingFirstLinePropertyUpdates.has(file.path)) {
-            return;
-          }
-
-          // Background first line property updates follow only notes being edited: a closed note changed by sync, another plugin or a script is left alone, its saved-content baseline is dropped so the next open reseeds it from disk, and manual commands write their own first line property values.
-          if (!this.isEditingNote(file)) {
-            this.plugin.fileStateManager.deleteLastSavedContent(file.path);
-            return;
-          }
-
-          // Mark as in-progress BEFORE any async operation to prevent race
-          // between modify and metadata-changed handlers
-          this.pendingFirstLinePropertyUpdates.add(file.path);
-          try {
-            let currentContent: string;
-            try {
-              currentContent = await this.plugin.app.vault.read(file);
-            } catch {
-              // File was deleted or inaccessible - clean up and return
-              this.pendingFirstLinePropertyUpdates.delete(file.path);
-              return;
-            }
-
-            // Skip if only frontmatter changed (user manually editing YAML)
-            // Use lastSavedContent - represents content from PREVIOUS save, not current editor buffer
-            const previousContent =
-              this.plugin.fileStateManager.getLastSavedContent(file.path);
-            if (
-              previousContent !== undefined &&
-              isOnlyFrontmatterChanged(currentContent, previousContent)
-            ) {
-              verboseLog(
-                this.plugin,
-                `Skipping first line property update (modify) - only frontmatter edited: ${file.path}`
-              );
-              // Still update lastSavedContent even when skipping
-              this.plugin.fileStateManager.setLastSavedContent(
-                file.path,
-                currentContent
-              );
-              return;
-            }
-
-            const target = this.findBackgroundFirstLinePropertyTarget(
-              file,
-              currentContent
-            );
-            if (target === 'user-typing') {
-              verboseLog(
-                this.plugin,
-                `Skipping first line property update (modify) - unsaved typing or a scheduled rename: ${file.path}`
-              );
-              // Still update lastSavedContent even when skipping
-              this.plugin.fileStateManager.setLastSavedContent(
-                file.path,
-                currentContent
-              );
-              return;
-            }
-
-            verboseLog(
-              this.plugin,
-              `// EDITOR_PASS (modify): Passing target=${target ? 'editor' : 'file'} to updateFirstLinePropertyIfNeeded`
-            );
-
-            await this.plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded(
-              file,
-              currentContent,
-              undefined,
-              target
-            );
-
-            // Update lastSavedContent after processing
-            this.plugin.fileStateManager.setLastSavedContent(
-              file.path,
-              currentContent
-            );
-          } finally {
-            this.pendingFirstLinePropertyUpdates.delete(file.path);
-          }
+          await this.updateFirstLinePropertyAfterSave(
+            file,
+            () => this.plugin.app.vault.read(file),
+            'modify'
+          );
         }
       })
     );
 
     // Metadata change handler
     this.plugin.registerEvent(
-      this.plugin.app.metadataCache.on('changed', async (file) => {
+      this.plugin.app.metadataCache.on('changed', async (file, data) => {
+        // Clear pending metadata flag FIRST, before any early return: a write made in manual mode (bulk or menu rename) would otherwise stay flagged, and once automatic renaming is back the next save's first line property update would be skipped
+        if (this.plugin.fileStateManager.hasPendingMetadataUpdate(file.path)) {
+          this.plugin.fileStateManager.clearPendingMetadataUpdate(file.path);
+          verboseLog(
+            this.plugin,
+            `PENDING_META_CLEAR: ${file.path} received the metadata update of a first line property write`
+          );
+          // Don't return - continue to check if first line property update is needed
+        }
+
         if (!hasFirstLinePropertyName(this.plugin.settings)) return;
         if (!this.plugin.settings.core.renameAutomatically) return;
         if (file.extension !== 'md') return;
 
         // Skip if file operation in progress (rename, etc.)
-        if (this.plugin.cacheManager?.isLocked(file.path)) return;
+        if (this.plugin.fileStateManager.isLocked(file.path)) return;
 
-        // Skip if file is in creation delay period
-        if (this.plugin.editorLifecycle.isFileInCreationDelay(file.path)) {
-          if (this.plugin.settings.core.debug) {
-            console.debug(
-              `Skipping first line property update (metadata): file in creation delay: ${file.path}`
-            );
-          }
-          return;
-        }
-
-        // Clear pending metadata flag FIRST - before any other checks that might return early
-        // This ensures the flag is cleared when metadataCache processes our processFrontMatter write
-        if (this.plugin.pendingMetadataUpdates.has(file)) {
-          this.plugin.pendingMetadataUpdates.delete(file);
+        // Skip if the new-note pipeline or the New note delay still owns the file
+        if (this.plugin.editorLifecycle.isFileInCreationWindow(file)) {
           verboseLog(
             this.plugin,
-            `// PENDING_META_CLEAR: Clearing ${file.path} from pendingMetadataUpdates (set size: ${this.plugin.pendingMetadataUpdates.size})`
+            `Skipping first line property update (metadata): file in creation window: ${file.path}`
           );
-          // Don't return - continue to check if first line property update is needed
-        }
-
-        // Skip if first line property update already in progress for this file
-        if (this.pendingFirstLinePropertyUpdates.has(file.path)) {
           return;
         }
 
-        // Background first line property updates follow only notes being edited: a closed note changed by sync, another plugin or a script is left alone, its saved-content baseline is dropped so the next open reseeds it from disk, and manual commands write their own first line property values.
-        if (!this.isEditingNote(file)) {
-          this.plugin.fileStateManager.deleteLastSavedContent(file.path);
-          return;
-        }
-
-        // Mark as in-progress BEFORE any async operation to prevent race
-        // between modify and metadata-changed handlers
-        this.pendingFirstLinePropertyUpdates.add(file.path);
-        try {
-          // Check if only frontmatter changed - skip first line property update to preserve YAML formatting
-          let currentContent: string;
-          try {
-            currentContent = await this.plugin.app.vault.read(file);
-          } catch {
-            // File was deleted or inaccessible - clean up and return
-            this.pendingFirstLinePropertyUpdates.delete(file.path);
-            return;
-          }
-
-          // Use lastSavedContent - represents content from PREVIOUS save, not current editor buffer
-          const previousContent =
-            this.plugin.fileStateManager.getLastSavedContent(file.path);
-
-          if (
-            previousContent !== undefined &&
-            isOnlyFrontmatterChanged(currentContent, previousContent)
-          ) {
-            if (this.plugin.settings.core.debug) {
-              console.debug(
-                `Skipping first line property update (metadata) - only frontmatter edited: ${file.path}`
-              );
-            }
-            // Still update lastSavedContent even when skipping
-            this.plugin.fileStateManager.setLastSavedContent(
-              file.path,
-              currentContent
-            );
-            return;
-          }
-          // No previousContent means no baseline: a note open or just edited but not yet seeded, or purged, so a YAML-only edit cannot be told apart and the first line property update proceeds
-
-          const target = this.findBackgroundFirstLinePropertyTarget(
-            file,
-            currentContent
-          );
-          if (target === 'user-typing') {
-            verboseLog(
-              this.plugin,
-              `Skipping first line property update (metadata) - unsaved typing or a scheduled rename: ${file.path}`
-            );
-            // Still update lastSavedContent even when skipping
-            this.plugin.fileStateManager.setLastSavedContent(
-              file.path,
-              currentContent
-            );
-            return;
-          }
-
-          verboseLog(
-            this.plugin,
-            `// EDITOR_PASS (metadata): Passing target=${target ? 'editor' : 'file'} to updateFirstLinePropertyIfNeeded`
-          );
-
-          await this.plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded(
-            file,
-            currentContent,
-            undefined,
-            target
-          );
-
-          // Update lastSavedContent after processing
-          this.plugin.fileStateManager.setLastSavedContent(
-            file.path,
-            currentContent
-          );
-        } finally {
-          this.pendingFirstLinePropertyUpdates.delete(file.path);
-        }
+        // The text Obsidian just indexed, read from the file in the same work item, so no second read is needed
+        await this.updateFirstLinePropertyAfterSave(
+          file,
+          () => data,
+          'metadata'
+        );
       })
     );
+  }
+
+  /**
+   * Update a saved note's first line property in the background, for the vault `modify` and metadata `changed` handlers.
+   * @param file - Note just saved
+   * @param readSavedContent - Returns the saved text; throws when the note was deleted or cannot be read
+   * @param handlerLabel - Names the calling handler in debug logs
+   */
+  private async updateFirstLinePropertyAfterSave(
+    file: TFile,
+    readSavedContent: () => string | Promise<string>,
+    handlerLabel: 'modify' | 'metadata'
+  ): Promise<void> {
+    // Skip if first line property update already in progress for this file
+    if (this.pendingFirstLinePropertyUpdates.has(file.path)) {
+      return;
+    }
+
+    // Background first line property updates follow only notes being edited: a closed note changed by sync, another plugin or a script is left alone, its saved-content baseline is dropped so the next open reseeds it from disk, and manual commands write their own first line property values.
+    if (!this.isEditingNote(file)) {
+      this.plugin.fileStateManager.deleteLastSavedContent(file.path);
+      return;
+    }
+
+    // Mark as in-progress BEFORE any async operation to prevent race between modify and metadata-changed handlers
+    this.pendingFirstLinePropertyUpdates.add(file.path);
+    try {
+      let currentContent: string;
+      try {
+        currentContent = await readSavedContent();
+      } catch {
+        // File was deleted or inaccessible
+        return;
+      }
+
+      // Skip if only frontmatter changed (user manually editing YAML), to preserve its formatting
+      // Use lastSavedContent - represents content from PREVIOUS save, not current editor buffer
+      const previousContent = this.plugin.fileStateManager.getLastSavedContent(
+        file.path
+      );
+      if (
+        previousContent !== undefined &&
+        isOnlyFrontmatterChanged(currentContent, previousContent)
+      ) {
+        verboseLog(
+          this.plugin,
+          `Skipping first line property update (${handlerLabel}) - only frontmatter edited: ${file.path}`
+        );
+        // Still update lastSavedContent even when skipping
+        this.plugin.fileStateManager.setLastSavedContent(
+          file.path,
+          currentContent
+        );
+        return;
+      }
+      // No previousContent means no baseline: a note open or just edited but not yet seeded, or purged, so a YAML-only edit cannot be told apart and the first line property update proceeds
+
+      const target = this.findBackgroundFirstLinePropertyTarget(
+        file,
+        currentContent
+      );
+      if (target === 'user-typing') {
+        verboseLog(
+          this.plugin,
+          `Skipping first line property update (${handlerLabel}) - unsaved typing or a scheduled rename: ${file.path}`
+        );
+        // Still update lastSavedContent even when skipping
+        this.plugin.fileStateManager.setLastSavedContent(
+          file.path,
+          currentContent
+        );
+        return;
+      }
+
+      verboseLog(
+        this.plugin,
+        `EDITOR_PASS (${handlerLabel}): Passing target=${target ? 'editor' : 'file'} to updateFirstLinePropertyIfNeeded`
+      );
+
+      await this.plugin.firstLinePropertyManager.updateFirstLinePropertyIfNeeded(
+        file,
+        currentContent,
+        target
+      );
+
+      // Update lastSavedContent after processing
+      this.plugin.fileStateManager.setLastSavedContent(
+        file.path,
+        currentContent
+      );
+    } finally {
+      this.pendingFirstLinePropertyUpdates.delete(file.path);
+    }
   }
 }

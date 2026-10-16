@@ -11,28 +11,18 @@ import type {
   SettingDefinitionPage,
   SettingDefinitionRender,
 } from 'obsidian';
-import { App, Platform, Setting } from '../mockObsidian';
+import { App, Platform, Setting, displayTooltip } from '../mockObsidian';
 
 const { openedModals } = vi.hoisted(() => ({
   openedModals: [] as unknown[],
 }));
 
-// The base Modal mock declares `onOpen` as an instance field, so instances are recorded here and opened through the real prototype
-vi.mock('../../src/modals/entry-edit-modal', async () => {
-  const actual = await vi.importActual<
-    typeof import('../../src/modals/entry-edit-modal')
-  >('../../src/modals/entry-edit-modal');
-  class RecordingEntryEditModal<
-    V extends Record<string, string | boolean>,
-  > extends actual.EntryEditModal<V> {
-    constructor(
-      ...args: ConstructorParameters<typeof actual.EntryEditModal<V>>
-    ) {
-      super(...args);
-      openedModals.push(this);
-    }
-  }
-  return { ...actual, EntryEditModal: RecordingEntryEditModal };
+vi.mock('../../src/modals/entry-edit-modal', async (importOriginal) => {
+  const { withRecordedEntryEditModals } = await import('../testUtils');
+  return withRecordedEntryEditModals(
+    await importOriginal<typeof import('../../src/modals/entry-edit-modal')>(),
+    openedModals
+  );
 });
 
 import { buildCustomReplacementsPage } from '../../src/settings/custom-replacements';
@@ -44,11 +34,7 @@ import {
 } from '../../src/settings/settings-base';
 import { DEFAULT_SETTINGS } from '../../src/constants';
 import type { CustomReplacement, PluginSettings } from '../../src/types';
-
-/** Lets an awaited save settle. */
-async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
-}
+import { clickExtraButton, flush, typeInto } from '../testUtils';
 
 interface Harness {
   settings: PluginSettings;
@@ -58,6 +44,8 @@ interface Harness {
   page: SettingDefinitionPage;
   group: SettingDefinitionGroup;
   list: SettingDefinitionList;
+  /** The rule list as a fresh `getSettingDefinitions` pass builds it from the current settings. */
+  rebuildList: () => SettingDefinitionList;
 }
 
 function buildHarness(rules?: CustomReplacement[]): Harness {
@@ -71,15 +59,16 @@ function buildHarness(rules?: CustomReplacement[]): Harness {
     debugLog: vi.fn(),
   } as unknown as FirstLineIsTitlePlugin;
   const update = vi.fn();
-  const page = buildCustomReplacementsPage(plugin, {
-    update,
-  } as unknown as PluginSettingTab);
+  const tab = { update } as unknown as PluginSettingTab;
+  const findList = (built: SettingDefinitionPage) =>
+    (built.items ?? []).find(
+      (item) => (item as { type?: string }).type === 'list'
+    ) as SettingDefinitionList;
+  const page = buildCustomReplacementsPage(plugin, tab);
   const group = (page.items ?? []).find(
     (item) => (item as { type?: string }).type === 'group'
   ) as SettingDefinitionGroup;
-  const list = (page.items ?? []).find(
-    (item) => (item as { type?: string }).type === 'list'
-  ) as SettingDefinitionList;
+  const list = findList(page);
   return {
     settings,
     rules: settings.customReplacements.rules,
@@ -88,6 +77,7 @@ function buildHarness(rules?: CustomReplacement[]): Harness {
     page,
     group,
     list,
+    rebuildList: () => findList(buildCustomReplacementsPage(plugin, tab)),
   };
 }
 
@@ -141,13 +131,6 @@ function renderRow(harness: Harness, ruleIndex: number): Setting {
   return renderDefinition(ruleRowDefinition(harness, ruleIndex));
 }
 
-function clickExtraButton(setting: Setting, icon: string): void {
-  const button = setting.components.find(
-    (component) => component.setIcon.mock.calls[0]?.[0] === icon
-  );
-  (button.onClick.mock.calls[0][0] as () => void)();
-}
-
 interface OpenedDialog {
   modal: EntryEditModal<Record<string, string | boolean>>;
   inputs: HTMLInputElement[];
@@ -176,11 +159,6 @@ function openLatestDialog(): OpenedDialog {
     saveButton: buttons[0],
     cancelButton: buttons[1],
   };
-}
-
-function typeInto(inputEl: HTMLInputElement, value: string): void {
-  inputEl.value = value;
-  inputEl.dispatchEvent(new window.Event('input', { bubbles: true }));
 }
 
 describe('Custom replacements page', () => {
@@ -393,6 +371,23 @@ describe('Custom replacements page', () => {
       expect(harness.update).toHaveBeenCalledTimes(1);
     });
 
+    it('strips forbidden characters from the replacement, never from the search text', () => {
+      // The guard re-dispatches `input` through the global Event, which jsdom only delivers when it is jsdom's own
+      vi.stubGlobal('Event', window.Event);
+      try {
+        const harness = buildHarness([]);
+
+        harness.list.addItem?.action(document.createElement('div'));
+        const { inputs } = openLatestDialog();
+        typeInto(inputs[0], 'a?b');
+        typeInto(inputs[1], 'c?d');
+
+        expect(inputs.map((input) => input.value)).toEqual(['a?b', 'cd']);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
     it('adds nothing on Cancel', async () => {
       const harness = buildHarness([]);
 
@@ -486,6 +481,132 @@ describe('Custom replacements page', () => {
       expect(
         toggles.map((toggle) => toggle.classList.contains('is-enabled'))
       ).toEqual([true, false]);
+    });
+  });
+
+  describe('duplicate rules', () => {
+    beforeEach(() => {
+      vi.mocked(displayTooltip).mockClear();
+    });
+
+    it('keeps the dialog open with an error, adding nothing, for the text and options of an existing rule, whatever it replaces them with', async () => {
+      const harness = buildHarness([rule({ onlyAtStart: true })]);
+
+      harness.list.addItem?.action(document.createElement('div'));
+      const { modal, inputs, toggles, saveButton } = openLatestDialog();
+      typeInto(inputs[0], 'TODO');
+      typeInto(inputs[1], 'Something else');
+      toggles[0].click();
+      saveButton.click();
+      await flush();
+
+      expect(displayTooltip).toHaveBeenCalledWith(
+        inputs[0],
+        'Another rule already replaces this text',
+        { classes: ['mod-error'] }
+      );
+      expect(harness.rules).toHaveLength(1);
+      expect(harness.saveSettings).not.toHaveBeenCalled();
+      expect(modal.close).not.toHaveBeenCalled();
+    });
+
+    it('saves once a match option differs', async () => {
+      const harness = buildHarness([rule({ onlyAtStart: true })]);
+
+      harness.list.addItem?.action(document.createElement('div'));
+      const { inputs, toggles, saveButton } = openLatestDialog();
+      typeInto(inputs[0], 'TODO');
+      toggles[0].click();
+      saveButton.click();
+      await flush();
+      expect(harness.rules).toHaveLength(1);
+      toggles[1].click();
+      saveButton.click();
+      await flush();
+
+      expect(harness.rules).toHaveLength(2);
+      expect(harness.rules[1]).toMatchObject({
+        searchText: 'TODO',
+        onlyAtStart: false,
+        onlyWholeLine: true,
+      });
+    });
+
+    it('lets an edit save a rule unchanged, which is not a duplicate of itself', async () => {
+      const harness = buildHarness([rule(), rule({ searchText: 'B' })]);
+
+      clickExtraButton(renderRow(harness, 0), 'lucide-pen-line');
+      const { modal, saveButton } = openLatestDialog();
+      saveButton.click();
+      await flush();
+
+      expect(displayTooltip).not.toHaveBeenCalled();
+      expect(modal.close).toHaveBeenCalled();
+      expect(harness.saveSettings).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses an edit that makes a rule match another', async () => {
+      const harness = buildHarness([rule(), rule({ searchText: 'B' })]);
+
+      clickExtraButton(renderRow(harness, 1), 'lucide-pen-line');
+      const { modal, inputs, saveButton } = openLatestDialog();
+      typeInto(inputs[0], 'TODO');
+      saveButton.click();
+      await flush();
+
+      expect(displayTooltip).toHaveBeenCalledWith(
+        inputs[0],
+        'Another rule already replaces this text',
+        { classes: ['mod-error'] }
+      );
+      expect(harness.rules[1].searchText).toBe('B');
+      expect(modal.close).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('row ids', () => {
+    /** The key Obsidian reconciles a list row by, which it reads from `id` before the name. */
+    function rowId(row: unknown): string | undefined {
+      return (row as { id?: string }).id;
+    }
+
+    it('gives two rules with identical text two distinct row ids', () => {
+      const harness = buildHarness([rule(), rule()]);
+      const [firstRow, secondRow] = harness.list.items ?? [];
+
+      expect(firstRow.name).toBe(secondRow.name);
+      expect(rowId(firstRow)).toEqual(expect.any(String));
+      expect(rowId(secondRow)).toEqual(expect.any(String));
+      expect(rowId(firstRow)).not.toBe(rowId(secondRow));
+    });
+
+    it("keeps each rule's row id across a reorder and the re-render after it", async () => {
+      const first = rule({ searchText: 'A' });
+      const second = rule({ searchText: 'B' });
+      const third = rule({ searchText: 'C' });
+      const harness = buildHarness([first, second, third]);
+      const idsBefore = (harness.list.items ?? []).map(rowId);
+
+      harness.list.onReorder?.(0, 2);
+      await flush();
+      const idsAfter = (harness.rebuildList().items ?? []).map(rowId);
+
+      expect(harness.rules).toEqual([second, third, first]);
+      expect(idsAfter).toEqual([idsBefore[1], idsBefore[2], idsBefore[0]]);
+    });
+
+    it("keeps a rule's row id when an edit saves it", async () => {
+      const harness = buildHarness([rule(), rule({ searchText: 'B' })]);
+      const idsBefore = (harness.list.items ?? []).map(rowId);
+
+      clickExtraButton(renderRow(harness, 0), 'lucide-pen-line');
+      const { toggles, saveButton } = openLatestDialog();
+      toggles[0].click();
+      saveButton.click();
+      await flush();
+
+      expect(harness.rules[0].onlyAtStart).toBe(true);
+      expect((harness.rebuildList().items ?? []).map(rowId)).toEqual(idsBefore);
     });
   });
 

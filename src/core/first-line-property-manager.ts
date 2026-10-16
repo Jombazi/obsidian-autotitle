@@ -1,14 +1,18 @@
 import { TFile, MarkdownView, getFrontMatterInfo, parseYaml } from 'obsidian';
-import { PluginSettings } from '../types';
+import { ExclusionOverrides, PluginSettings } from '../types';
+import { verboseLog, verboseLogger } from '../utils';
+import { shouldProcessFile } from '../utils/file-exclusions';
+import { frontmatterHasDisableProperty } from '../utils/disable-property';
 import {
-  verboseLog,
-  shouldProcessFile,
   extractTitle,
-  frontmatterHasDisableProperty,
-  findTitleSourceLine,
-} from '../utils';
-import { resolveCurrentFrontmatter } from '../utils/file-exclusions';
-import { t } from '../i18n';
+  applyTitleCase,
+  isUntitledName,
+} from '../utils/title-extraction';
+import {
+  TitleSource,
+  findTitleSource,
+  lineSourceFromText,
+} from '../utils/title-source';
 import { readFileContent } from '../utils/content-reader';
 import {
   hasFirstLinePropertyName,
@@ -19,6 +23,8 @@ import {
   applyFrontMatterChange,
   replaceEditorText,
 } from '../utils/frontmatter-edit';
+import { applyCustomReplacementRules } from '../utils/custom-replacement-rules';
+import { truncateWithEllipsis } from '../utils/string-processing';
 import FirstLineIsTitle from '../../main';
 
 const ZWSP = '\u200B';
@@ -28,6 +34,68 @@ function isFirstLinePropertyValue(value: unknown): boolean {
   return (
     typeof value === 'string' && value.startsWith(ZWSP) && value.endsWith(ZWSP)
   );
+}
+
+/**
+ * Whether a property already holds what `writeFirstLinePropertyValue` would leave in it, so the write can be skipped.
+ * @param existingValues - The property's values as a list
+ * @param value - Value without its markers
+ * @param placeLast - Whether the plugin's value belongs at the end
+ */
+function holdsWrittenValue(
+  existingValues: unknown[],
+  value: string,
+  placeLast: boolean
+): boolean {
+  const pluginValues = existingValues.filter(isFirstLinePropertyValue);
+  // The write keeps a plain copy of the value the user wrote and drops every plugin value beside it, a stale one included
+  if (existingValues.includes(value)) {
+    return pluginValues.length === 0;
+  }
+  return (
+    pluginValues.length === 1 &&
+    pluginValues[0] === ZWSP + value + ZWSP &&
+    (!placeLast ||
+      isFirstLinePropertyValue(existingValues[existingValues.length - 1]))
+  );
+}
+
+/** A property's raw value as a list: no value is an empty list, a single value a list of one. */
+function toValueList(raw: unknown): unknown[] {
+  if (raw === null || raw === undefined || raw === '') {
+    return [];
+  }
+  return Array.isArray(raw) ? [...(raw as unknown[])] : [raw];
+}
+
+/** A note's properties block, parsed once per first line property pass */
+type ParsedPropertiesBlock =
+  | { state: 'absent' }
+  | { state: 'parsed'; frontmatter: Record<string, unknown> | null }
+  | { state: 'malformed' };
+
+/**
+ * Parse the properties block at the top of a note's text.
+ * @param content - Note text
+ * @returns `absent` without a block, `malformed` when its YAML does not parse, otherwise the parsed value, which is null for an empty block
+ */
+function parsePropertiesBlock(content: string): ParsedPropertiesBlock {
+  const frontmatterInfo = getFrontMatterInfo(content);
+  if (!frontmatterInfo.exists) {
+    return { state: 'absent' };
+  }
+  try {
+    const parsed = parseYaml(frontmatterInfo.frontmatter) as unknown;
+    return {
+      state: 'parsed',
+      frontmatter:
+        parsed && typeof parsed === 'object'
+          ? (parsed as Record<string, unknown>)
+          : null,
+    };
+  } catch {
+    return { state: 'malformed' };
+  }
 }
 
 /** Check if an error is ENOENT, which a rename raises mid-edit. Narrows `unknown` because the review bot's type check cannot resolve `NodeJS.ErrnoException`. */
@@ -68,17 +136,25 @@ export class FirstLinePropertyManager {
    *
    * Every public entry point checks this before doing any work. Letting the
    * per-key loops iterate zero times is not enough: the surrounding code still
-   * reaches `writeFrontMatter()`, which writes the note to accomplish nothing.
+   * reaches `writeFrontMatter()`, which saves the active view and reads the note to accomplish nothing.
    */
   private hasNoFirstLineProperty(): boolean {
     return !hasFirstLinePropertyName(this.settings);
   }
 
+  /**
+   * Bring the first line property in line with the note's title source: write its value, or remove the plugin's value when the source yields none.
+   * @param file - Note to update
+   * @param providedContent - Note text to read the line from, ahead of the editor and the file
+   * @param target - Editor to write into, or null to write the file
+   * @param exclusionOverrides - Exclusion rules to ignore, as the manual rename command passes them; the rename-blocking property is never overridden
+   * @returns True when the property holds the value after the call, false when it was removed or skipped
+   */
   async updateFirstLinePropertyIfNeeded(
     file: TFile,
     providedContent?: string,
-    targetTitle?: string,
-    target?: SourceEditorTarget | null
+    target?: SourceEditorTarget | null,
+    exclusionOverrides?: ExclusionOverrides
   ): Promise<boolean> {
     // With no property to populate this call is a no-op. `false` matches every
     // other skip in this method — it means "no first line property update performed", not
@@ -99,18 +175,28 @@ export class FirstLinePropertyManager {
 
       file = currentFile;
 
-      // Note: No lock check here - first line property manager is called from within processFile's lock
-      // The lock is already acquired by the time we reach this point
+      // Read once, ahead of every check, so the disable-property check and the update judge the same text
+      const content = await readFileContent(this.plugin, file, {
+        providedContent,
+        providedEditor: target?.editor,
+      });
+
+      if (!content || content.trim() === '') {
+        return false;
+      }
+
+      // Parsed once: the disable-property check and the existing-value check both read it
+      const propertiesBlock = parsePropertiesBlock(content);
 
       // Check disable property FIRST - this cannot be overridden by any command
-      // Content first: the editor is ahead of the cache by up to Obsidian's autosave delay. The cache decides when content is absent or has no parseable frontmatter.
+      // Content first: the editor is ahead of the cache by up to Obsidian's autosave delay. The cache decides when content has no parseable frontmatter, failing closed as resolveCurrentFrontmatter does.
+      const frontmatterForDisableCheck =
+        propertiesBlock.state === 'parsed' && propertiesBlock.frontmatter
+          ? propertiesBlock.frontmatter
+          : this.app.metadataCache.getFileCache(file)?.frontmatter;
       if (
         frontmatterHasDisableProperty(
-          resolveCurrentFrontmatter(
-            file,
-            this.app,
-            providedContent ?? target?.editor.getValue()
-          ) ?? {},
+          frontmatterForDisableCheck ?? {},
           this.settings.exclusions.disableRenamingKey,
           this.settings.exclusions.disableRenamingValue
         )
@@ -122,146 +208,76 @@ export class FirstLinePropertyManager {
         return false;
       }
 
+      // The same walk the rename reads, so both agree on where the properties block ends and which block the title comes from (card links, code blocks, tables); read before the exclusion check, which, as the rename's does, reads tags typed into it ahead of the metadata cache
+      const titleSource = findTitleSource(
+        lineSourceFromText(content),
+        this.settings,
+        verboseLogger(this.plugin)
+      );
+
+      // Only text whose tags Obsidian will index passes, so a tag in code, a card link's title or after an HTML comment block never excludes the note
       if (
-        !shouldProcessFile(
-          file,
-          this.settings,
-          this.app,
-          undefined,
-          undefined,
-          this.plugin
-        )
+        !shouldProcessFile(file, this.settings, this.app, {
+          exclusionOverrides,
+          log: verboseLogger(this.plugin),
+          titleLine: titleSource?.tagsIndexed ? titleSource.text : undefined,
+        })
       ) {
         return false;
       }
 
-      const content = await readFileContent(this.plugin, file, {
-        providedContent,
-        providedEditor: target?.editor,
-      });
-
-      if (!content || content.trim() === '') {
-        return false;
-      }
-
-      const contentWithoutFrontmatter =
-        this.plugin.renameEngine.stripFrontmatterFromContent(content, file);
-      const lines = contentWithoutFrontmatter.split('\n');
-
-      // Find first non-empty line (consistent with rename-engine.ts)
-      let firstNonEmptyLine = '';
-      for (const line of lines) {
-        if (line.trim() !== '') {
-          firstNonEmptyLine = line;
-          break;
-        }
-      }
-
-      if (!firstNonEmptyLine || firstNonEmptyLine.trim() === '') {
+      if (titleSource === null) {
         await this.removeFirstLinePropertyValuesFromFile(file, target ?? null);
         return false;
       }
 
-      // Determine titleSourceLine using shared utility function
-      // This may differ from firstNonEmptyLine in special cases (card links, code blocks, tables)
-      const titleSourceLine = findTitleSourceLine(
-        lines,
-        this.settings,
-        this.plugin
-      );
-
-      // Parse frontmatter from fresh editor content instead of stale cache
+      // Frontmatter from fresh editor content instead of stale cache
       // This prevents race conditions where cache hasn't updated yet during YAML edits
-      const frontmatterInfo = getFrontMatterInfo(content);
-      let frontmatter: Record<string, unknown> | null = null;
-      if (frontmatterInfo.exists) {
-        try {
-          frontmatter = parseYaml(frontmatterInfo.frontmatter) as Record<
-            string,
-            unknown
-          > | null;
-        } catch {
-          // YAML is malformed (e.g., user is mid-typing) - skip first line property update until valid
-          verboseLog(
-            this.plugin,
-            `Skipping first line property update - malformed YAML in ${file.path}`
-          );
-          return false;
-        }
-      }
-
-      const processedTitleSource = extractTitle(titleSourceLine, this.settings);
-      const titleToCompare =
-        targetTitle !== undefined ? targetTitle.trim() : file.basename.trim();
-      const processedLineMatchesFilename =
-        processedTitleSource.trim() === titleToCompare;
-
-      const shouldHaveFirstLineProperty =
-        !this.settings.firstLineProperty.addOnlyIfTitleDiffers ||
-        !processedLineMatchesFilename;
-
-      if (!shouldHaveFirstLineProperty) {
+      if (propertiesBlock.state === 'malformed') {
+        // YAML is malformed (e.g., user is mid-typing) - skip first line property update until valid
         verboseLog(
           this.plugin,
-          `Removing first line property values - first line matches filename: "${processedTitleSource}" = "${titleToCompare}"`
+          `Skipping first line property update - malformed YAML in ${file.path}`
+        );
+        return false;
+      }
+      const frontmatter =
+        propertiesBlock.state === 'parsed' ? propertiesBlock.frontmatter : null;
+
+      const value = this.computeFirstLinePropertyValue(titleSource);
+      if (value === null) {
+        verboseLog(
+          this.plugin,
+          `Removing first line property values - no meaningful value in: ${titleSource.text}`
         );
         await this.removeFirstLinePropertyValuesFromFile(file, target ?? null);
         return false;
       }
 
-      const firstLinePropertyKeys = this.getFirstLinePropertyKeys();
-      let expectedValue = this.settings.markupStripping
-        .stripMarkupInFirstLineProperty
-        ? extractTitle(titleSourceLine, this.settings)
-        : titleSourceLine;
-      // Apply truncation if enabled (must match what addFirstLinePropertyToFile will produce)
-      if (this.settings.firstLineProperty.truncate) {
-        if (expectedValue.length > this.settings.core.charCount - 1) {
-          expectedValue =
-            expectedValue.slice(0, this.settings.core.charCount - 1).trimEnd() +
-            '…';
-        }
-      }
-      const expectedValueWithMarker = ZWSP + expectedValue + ZWSP;
-
-      let allPropertiesHaveCorrectValue = true;
-      let valueNeedsRepositioning = false;
-      for (const firstLinePropertyKey of firstLinePropertyKeys) {
-        let existingValues: string[] = [];
-        const rawValue = frontmatter?.[firstLinePropertyKey];
-        if (rawValue) {
-          if (Array.isArray(rawValue)) {
-            existingValues = [...(rawValue as string[])];
-          } else {
-            existingValues = [rawValue as string];
-          }
-        }
-
-        const hasCorrectValue = existingValues.some(
-          (value) =>
-            value === expectedValueWithMarker || value === expectedValue
+      // Compares the value that would be written, so the setting's "first line and title are identical" means what the property would show.
+      const titleToCompare = file.basename.trim();
+      if (
+        this.settings.firstLineProperty.addOnlyIfTitleDiffers &&
+        value.trim() === titleToCompare
+      ) {
+        verboseLog(
+          this.plugin,
+          `Removing first line property values - value matches the title: "${value}" = "${titleToCompare}"`
         );
-
-        if (!hasCorrectValue) {
-          allPropertiesHaveCorrectValue = false;
-          break;
-        }
-
-        // Check if the value needs repositioning (placeLast ON but not last)
-        if (
-          this.settings.firstLineProperty.placeLast &&
-          existingValues.length > 1
-        ) {
-          const lastValue = existingValues[existingValues.length - 1];
-          const isFirstLinePropertyValueLast =
-            isFirstLinePropertyValue(lastValue);
-          if (!isFirstLinePropertyValueLast) {
-            valueNeedsRepositioning = true;
-          }
-        }
+        await this.removeFirstLinePropertyValuesFromFile(file, target ?? null);
+        return false;
       }
 
-      if (allPropertiesHaveCorrectValue && !valueNeedsRepositioning) {
+      const allPropertiesHoldValue = this.getFirstLinePropertyKeys().every(
+        (firstLinePropertyKey) =>
+          holdsWrittenValue(
+            toValueList(frontmatter?.[firstLinePropertyKey]),
+            value,
+            this.settings.firstLineProperty.placeLast
+          )
+      );
+
+      if (allPropertiesHoldValue) {
         verboseLog(
           this.plugin,
           `File ${file.path} already has correct first line property value in all properties`
@@ -269,20 +285,12 @@ export class FirstLinePropertyManager {
         return true;
       }
 
-      // Note: Lock already acquired by processFile - the first line property update runs within that lock
-      // No need to acquire separate lock here
-
       try {
         verboseLog(
           this.plugin,
           `Adding first line property to ${file.path} - no correct value found`
         );
-        await this.addFirstLinePropertyToFile(
-          file,
-          titleSourceLine,
-          titleToCompare,
-          target ?? null
-        );
+        await this.writeFirstLinePropertyValue(file, value, target ?? null);
         return true;
       } catch (error) {
         console.error('Error updating first line property:', error);
@@ -294,278 +302,95 @@ export class FirstLinePropertyManager {
     }
   }
 
-  async addFirstLinePropertyToFile(
-    file: TFile,
-    originalFirstNonEmptyLine: string,
-    newTitle: string,
-    target: SourceEditorTarget | null = null
-  ): Promise<void> {
-    // No property to write the value into - skip before `writeFrontMatter()`
-    // touches the note.
-    if (this.hasNoFirstLineProperty()) {
-      return;
+  /**
+   * The value the first line property should hold for a title source, the single pipeline both the "already correct" check and the write read.
+   * @param titleSource - Where the title comes from
+   * @returns The value without its markers, or null when the source yields no value worth holding
+   */
+  private computeFirstLinePropertyValue(
+    titleSource: TitleSource
+  ): string | null {
+    const titleSourceText = titleSource.text;
+    // Code is shown as typed, but its indentation would land in the property as a quoted scalar.
+    let value = titleSource.raw ? titleSourceText.trim() : titleSourceText;
+    if (
+      this.settings.markupStripping.applyCustomReplacementsInFirstLineProperty
+    ) {
+      value = applyCustomReplacementRules(
+        value,
+        this.settings.customReplacements.rules
+      );
+    }
+    // Code and a callout's default title skip markup stripping; title case still applies, as extractTitle applies it last.
+    value = titleSource.raw
+      ? applyTitleCase(value, this.settings)
+      : extractTitle(value, this.settings, {
+          skipMarkupStripping:
+            !this.settings.markupStripping.stripMarkupInFirstLineProperty,
+        });
+    if (this.settings.firstLineProperty.truncate) {
+      value = truncateWithEllipsis(value, this.settings.core.charCount);
     }
 
+    // An empty, whitespace-only or ellipsis-only value (from extreme truncation) carries nothing worth showing.
+    if (value.trim() === '' || value.trim() === '…') {
+      return null;
+    }
+
+    // Prevent "Untitled" or "Untitled n" values UNLESS the title source is literally that.
+    // Markup that reduces to nothing yields "Untitled": empty headings (`#`), empty list markers (`- `), template syntax (`<% tp.file.cursor() %>`).
+    // A synthetic source (lineIndex -1) spelling Untitled is the walk's own fallback, never a line the note holds.
+    const sourceIsLiterallyUntitled =
+      titleSource.lineIndex >= 0 && isUntitledName(titleSourceText.trim());
+    if (isUntitledName(value.trim()) && !sourceIsLiterallyUntitled) {
+      return null;
+    }
+
+    return value;
+  }
+
+  /**
+   * Write the value into every first line property, keeping the user's own values.
+   * @param file - Note to write
+   * @param value - Value without its markers
+   * @param target - Editor to write into, or null to write the file
+   */
+  private async writeFirstLinePropertyValue(
+    file: TFile,
+    value: string,
+    target: SourceEditorTarget | null
+  ): Promise<void> {
     try {
-      // Validate file exists and get fresh reference from vault.
-      // writeFrontMatter re-validates before its processFrontMatter call to guard
-      // against file deletion during activeView.save().
-      const currentFile = this.app.vault.getAbstractFileByPath(file.path);
-      if (!currentFile || !(currentFile instanceof TFile)) {
-        verboseLog(
-          this.plugin,
-          `Skipping first line property addition - file no longer exists: ${file.path}`
-        );
-        return;
-      }
-      file = currentFile;
-
-      const firstNonEmptyLine = originalFirstNonEmptyLine;
-      let firstLinePropertyProcessedLine = firstNonEmptyLine;
-
-      // Apply custom replacements to the value if enabled
-      if (
-        this.settings.markupStripping.applyCustomReplacementsInFirstLineProperty
-      ) {
-        for (const replacement of this.settings.customReplacements.rules) {
-          if (replacement.searchText === '') continue;
-
-          let tempLine = firstLinePropertyProcessedLine;
-          if (replacement.onlyWholeLine) {
-            if (
-              firstLinePropertyProcessedLine.trim() ===
-              replacement.searchText.trim()
-            ) {
-              tempLine = replacement.replaceText;
-            }
-          } else if (replacement.onlyAtStart) {
-            if (tempLine.startsWith(replacement.searchText)) {
-              tempLine =
-                replacement.replaceText +
-                tempLine.slice(replacement.searchText.length);
-            }
-          } else {
-            // Replacer function so `$&` and `$$` in the user's replacement text stay literal.
-            tempLine = tempLine.replaceAll(
-              replacement.searchText,
-              () => replacement.replaceText
-            );
-          }
-          firstLinePropertyProcessedLine = tempLine;
-        }
-      }
-
-      // Process the value WITHOUT forbidden char replacements.
-      // Use try/finally to guarantee settings restoration even if extractTitle throws.
-      const originalCharReplacementSetting =
-        this.settings.characterReplacements.enableForbiddenCharReplacements;
-
-      let valueToAdd: string;
-      try {
-        this.settings.characterReplacements.enableForbiddenCharReplacements = false;
-        valueToAdd = extractTitle(
-          firstLinePropertyProcessedLine,
-          this.settings,
-          {
-            skipMarkupStripping:
-              !this.settings.markupStripping.stripMarkupInFirstLineProperty,
-          }
-        );
-      } finally {
-        this.settings.characterReplacements.enableForbiddenCharReplacements =
-          originalCharReplacementSetting;
-      }
-      // Re-check value-matches-filename after custom replacements are applied.
-      // The caller (updateFirstLinePropertyIfNeeded) checks this too, but the custom replacement
-      // rules applied above can modify the value differently, so we must verify again.
-      const targetTitle = newTitle.trim();
-      const valueMatchesFilename = valueToAdd.trim() === targetTitle;
-      const shouldAddFirstLineProperty =
-        !this.settings.firstLineProperty.addOnlyIfTitleDiffers ||
-        !valueMatchesFilename;
-
-      if (!shouldAddFirstLineProperty) {
-        verboseLog(
-          this.plugin,
-          `Removing first line property values and skipping add - value matches filename: \`${valueToAdd}\` = \`${targetTitle}\``
-        );
-        await this.removeFirstLinePropertyValuesFromFile(file, target);
-        return;
-      }
-
-      // Apply truncation to the value if enabled
-      if (this.settings.firstLineProperty.truncate) {
-        if (valueToAdd.length > this.settings.core.charCount - 1) {
-          valueToAdd =
-            valueToAdd.slice(0, this.settings.core.charCount - 1).trimEnd() +
-            '…';
-        }
-      }
-
-      // If the value is empty, only whitespace, or just an ellipsis (from extreme truncation),
-      // remove the first line property value instead - these provide no meaningful value.
-      if (
-        !valueToAdd ||
-        valueToAdd.trim() === '' ||
-        valueToAdd.trim() === '…'
-      ) {
-        verboseLog(
-          this.plugin,
-          `Removing first line property value - no meaningful content found`
-        );
-        await this.removeFirstLinePropertyValuesFromFile(file, target);
-        return;
-      }
-
-      // Prevent "Untitled" or "Untitled n" values UNLESS first line is literally that.
-      // Pattern matches: "Untitled", "Untitled 2", "Untitled 10", etc.
-      // Pattern excludes: "Untitled 0", "Untitled 01" (via [1-9]) to match Obsidian's
-      // auto-numbering which starts at 2 for duplicates.
-      const untitledWord = t('untitled').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const untitledPattern = new RegExp(`^${untitledWord}(\\s+[1-9]\\d*)?$`);
-      if (untitledPattern.test(valueToAdd.trim())) {
-        // Check if original first non-empty line (before processing) was literally "Untitled" or "Untitled n"
-        const originalFirstLineTrimmed = firstNonEmptyLine.trim();
-
-        if (!untitledPattern.test(originalFirstLineTrimmed)) {
-          // Extracted title is "Untitled" but first line is not literally "Untitled"
-          // This happens when markup stripping results in empty content:
-          // - Empty headings: `#`, `##`, etc.
-          // - Empty list markers: `- `, `* `, `1. `, etc.
-          // - Template syntax: `<%*`, `<% tp.file.cursor() %>`, etc.
-          // Remove any stale first line property values since there's no valid content
-          verboseLog(
-            this.plugin,
-            `Removing stale first line property values - extracted title is "Untitled" from markup: ${originalFirstLineTrimmed}`
-          );
-          await this.removeFirstLinePropertyValuesFromFile(file, target);
-          return;
-        }
-      }
-
-      // Mark the value with ZWSP for identification
-      const markedValue = ZWSP + valueToAdd + ZWSP;
+      const markedValue = ZWSP + value + ZWSP;
       const firstLinePropertyKeys = this.getFirstLinePropertyKeys();
       // With no properties block yet the callback receives `{}` and creates each property holding the value alone.
       const written = await this.writeFrontMatter(
         file,
         (frontmatter: Record<string, unknown>) => {
-          // Insert the value into all specified properties
           for (const firstLinePropertyKey of firstLinePropertyKeys) {
-            // Check if property is 'aliases' - if yes, use current behavior
-            if (firstLinePropertyKey === 'aliases') {
-              let existingAliases: string[] = [];
-              const rawAliases = frontmatter[firstLinePropertyKey];
-              if (rawAliases) {
-                if (Array.isArray(rawAliases)) {
-                  existingAliases = [...(rawAliases as string[])];
-                } else {
-                  existingAliases = [rawAliases as string];
-                }
-              }
+            const existingValues = toValueList(
+              frontmatter[firstLinePropertyKey]
+            );
+            const existingPluginIndex = existingValues.findIndex(
+              isFirstLinePropertyValue
+            );
+            const userValues = existingValues.filter(
+              (existing) =>
+                !isFirstLinePropertyValue(existing) && existing !== ''
+            );
 
-              // Find existing plugin value index (ZWSP-wrapped)
-              const existingPluginIndex = existingAliases.findIndex((alias) =>
-                isFirstLinePropertyValue(alias)
-              );
-
-              // Remove plugin values and empty strings
-              const userAliases = existingAliases.filter(
-                (alias) => !isFirstLinePropertyValue(alias) && alias !== ''
-              );
-
-              // Check if this exact value already exists (unmarked)
-              if (!userAliases.includes(valueToAdd)) {
-                if (existingPluginIndex === -1) {
-                  // No existing plugin value - always add at end
-                  userAliases.push(markedValue);
-                } else if (this.settings.firstLineProperty.placeLast) {
-                  // Has existing plugin value, placeLast ON - move to end
-                  userAliases.push(markedValue);
-                } else {
-                  // Has existing plugin value, placeLast OFF - keep original position
-                  userAliases.splice(existingPluginIndex, 0, markedValue);
-                }
-                frontmatter[firstLinePropertyKey] = userAliases;
-              } else {
-                // Value already exists unmarked - just keep user aliases
-                if (userAliases.length === 0) {
-                  if (this.settings.firstLineProperty.keepEmptyProperty) {
-                    frontmatter[firstLinePropertyKey] = null;
-                  } else {
-                    delete frontmatter[firstLinePropertyKey];
-                  }
-                } else {
-                  frontmatter[firstLinePropertyKey] = userAliases;
-                }
-              }
-            } else {
-              // New behavior for non-aliases properties
-              const propertyExists = firstLinePropertyKey in frontmatter;
-
-              const rawPropValue = frontmatter[firstLinePropertyKey];
+            // The user already holds the value unmarked, so the plugin's own copy would only duplicate it.
+            if (!userValues.includes(value)) {
               if (
-                !propertyExists ||
-                rawPropValue === null ||
-                rawPropValue === undefined ||
-                rawPropValue === ''
+                existingPluginIndex === -1 ||
+                this.settings.firstLineProperty.placeLast
               ) {
-                // Property doesn't exist or has no value - insert inline
-                frontmatter[firstLinePropertyKey] = markedValue;
+                userValues.push(markedValue);
               } else {
-                // Property has existing values
-                let existingValues: string[] = [];
-                if (Array.isArray(rawPropValue)) {
-                  existingValues = [...(rawPropValue as string[])];
-                } else {
-                  existingValues = [rawPropValue as string];
-                }
-
-                // Find existing plugin value index (ZWSP-wrapped)
-                const existingPluginIndex = existingValues.findIndex((value) =>
-                  isFirstLinePropertyValue(value)
-                );
-
-                // Remove plugin values and empty strings
-                const userValues = existingValues.filter(
-                  (value) => !isFirstLinePropertyValue(value) && value !== ''
-                );
-
-                // Check if this exact value already exists (unmarked)
-                if (!userValues.includes(valueToAdd)) {
-                  if (userValues.length === 0) {
-                    // No user values, just our value - insert inline
-                    frontmatter[firstLinePropertyKey] = markedValue;
-                  } else {
-                    // Has user values - add plugin value
-                    if (existingPluginIndex === -1) {
-                      // No existing plugin value - always add at end
-                      userValues.push(markedValue);
-                    } else if (this.settings.firstLineProperty.placeLast) {
-                      // Has existing plugin value, placeLast ON - move to end
-                      userValues.push(markedValue);
-                    } else {
-                      // Has existing plugin value, placeLast OFF - keep position
-                      userValues.splice(existingPluginIndex, 0, markedValue);
-                    }
-                    frontmatter[firstLinePropertyKey] = userValues;
-                  }
-                } else {
-                  // Value already exists, just restore user values
-                  if (userValues.length === 0) {
-                    if (this.settings.firstLineProperty.keepEmptyProperty) {
-                      frontmatter[firstLinePropertyKey] = null;
-                    } else {
-                      delete frontmatter[firstLinePropertyKey];
-                    }
-                  } else if (userValues.length === 1) {
-                    frontmatter[firstLinePropertyKey] = userValues[0];
-                  } else {
-                    frontmatter[firstLinePropertyKey] = userValues;
-                  }
-                }
+                userValues.splice(existingPluginIndex, 0, markedValue);
               }
             }
+            this.storeValues(frontmatter, firstLinePropertyKey, userValues);
           }
         },
         target
@@ -574,7 +399,7 @@ export class FirstLinePropertyManager {
       if (written) {
         verboseLog(
           this.plugin,
-          `Updated first line property \`${valueToAdd}\` in ${file.path}`
+          `Updated first line property \`${value}\` in ${file.path}`
         );
       }
     } catch (error) {
@@ -593,6 +418,30 @@ export class FirstLinePropertyManager {
       }
       // Don't throw - first line property addition failure shouldn't prevent the rename
     }
+  }
+
+  /**
+   * Store a property's values in the shape Obsidian shows them.
+   * @param frontmatter - Parsed properties, changed in place
+   * @param key - Property to store
+   * @param values - Values the property should hold
+   */
+  private storeValues(
+    frontmatter: Record<string, unknown>,
+    key: string,
+    values: unknown[]
+  ): void {
+    if (values.length === 0) {
+      if (this.settings.firstLineProperty.keepEmptyProperty) {
+        frontmatter[key] = null;
+      } else {
+        delete frontmatter[key];
+      }
+      return;
+    }
+    // 'aliases' is Obsidian's own list property, so it stays a list even with one value; other properties take one value inline.
+    frontmatter[key] =
+      values.length === 1 && key !== 'aliases' ? values[0] : values;
   }
 
   async removeFirstLinePropertyValuesFromFile(
@@ -628,59 +477,22 @@ export class FirstLinePropertyManager {
         (frontmatter: Record<string, unknown>) => {
           const firstLinePropertyKeys = this.getFirstLinePropertyKeys();
 
-          // Remove first line property values from all specified properties
           for (const firstLinePropertyKey of firstLinePropertyKeys) {
-            if (!(firstLinePropertyKey in frontmatter)) {
-              continue;
-            }
-
-            const propValue = frontmatter[firstLinePropertyKey];
-
-            // Handle null/empty property
-            if (
-              propValue === null ||
-              propValue === undefined ||
-              propValue === ''
-            ) {
-              if (!this.settings.firstLineProperty.keepEmptyProperty) {
-                delete frontmatter[firstLinePropertyKey];
-              }
-              continue;
-            }
-
-            let existingValues: string[] = [];
-
-            // Normalize to array
-            if (Array.isArray(propValue)) {
-              existingValues = [...(propValue as string[])];
-            } else {
-              existingValues = [propValue as string];
-            }
-
-            // Filter out plugin values (marked with ZWSP) and empty strings
-            const filteredValues = existingValues.filter(
-              (value) => !isFirstLinePropertyValue(value) && value !== ''
+            const existingValues = toValueList(
+              frontmatter[firstLinePropertyKey]
             );
-
-            // Update or remove the property based on remaining values
-            if (filteredValues.length === 0) {
-              if (!this.settings.firstLineProperty.keepEmptyProperty) {
-                // Delete empty property completely
-                delete frontmatter[firstLinePropertyKey];
-              } else {
-                // Keep empty property as null
-                frontmatter[firstLinePropertyKey] = null;
-              }
-            } else if (
-              filteredValues.length === 1 &&
-              firstLinePropertyKey !== 'aliases'
-            ) {
-              // For non-aliases properties, convert back to single value if only one remains
-              frontmatter[firstLinePropertyKey] = filteredValues[0];
-            } else {
-              // Keep as array for aliases or multiple values
-              frontmatter[firstLinePropertyKey] = filteredValues;
+            // A property holding no plugin value keeps its exact value, an empty one the user wrote included.
+            if (!existingValues.some(isFirstLinePropertyValue)) {
+              continue;
             }
+            this.storeValues(
+              frontmatter,
+              firstLinePropertyKey,
+              existingValues.filter(
+                (existing) =>
+                  !isFirstLinePropertyValue(existing) && existing !== ''
+              )
+            );
           }
         },
         target
@@ -712,9 +524,9 @@ export class FirstLinePropertyManager {
   /**
    * Change a note's properties in the editor the caller chose, or in the file.
    * @param file - Note to change
-   * @param mutate - Changes the parsed properties in place
+   * @param mutate - Changes the parsed properties in place; runs once on a copy to detect a no-op, and again inside the file write
    * @param target - Editor showing the note, or null to write the file
-   * @returns False when nothing was written: the editor already held the result, or the file is gone
+   * @returns False when nothing was written: the editor or file already held the result, or the file is gone
    */
   private async writeFrontMatter(
     file: TFile,
@@ -756,8 +568,18 @@ export class FirstLinePropertyManager {
       return false;
     }
 
-    // Mark file as having pending metadata cache update
-    this.plugin.pendingMetadataUpdates.add(currentFile);
+    // Read after the save, so the no-op check compares against the text the user sees; marked pending only past it, so only a note a write is reaching is marked.
+    const text = await this.app.vault.read(currentFile);
+    if (applyFrontMatterChange(text, mutate) === text) {
+      verboseLog(
+        this.plugin,
+        `Skipping properties write - already holds the result: ${file.path}`
+      );
+      return false;
+    }
+
+    // Read by the save handlers, which leave the update this write triggers alone
+    this.plugin.fileStateManager.markPendingMetadataUpdate(currentFile.path);
     await this.app.fileManager.processFrontMatter(currentFile, mutate);
     return true;
   }

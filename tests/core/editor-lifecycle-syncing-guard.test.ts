@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EditorLifecycleManager } from '../../src/core/editor-lifecycle';
 import { App, Editor, TFile } from '../mockObsidian';
-import { createMockApp, createTestSettings } from '../testUtils';
+import {
+  createMockApp,
+  createTestSettings,
+  stubEditorText,
+} from '../testUtils';
 import type FirstLineIsTitle from '../../main';
 
 /**
@@ -15,7 +19,7 @@ describe('EditorLifecycleManager editor-syncing guard', () => {
   let file: TFile;
   let isEditorSyncing: ReturnType<typeof vi.fn>;
   let setThrottleTimer: ReturnType<typeof vi.fn>;
-  let processEditorChangeOptimal: ReturnType<typeof vi.fn>;
+  let processEditorChange: ReturnType<typeof vi.fn>;
   let lifecycle: EditorLifecycleManager;
 
   beforeEach(() => {
@@ -30,11 +34,11 @@ describe('EditorLifecycleManager editor-syncing guard', () => {
     file.extension = 'md';
 
     editor = new Editor();
-    editor.getValue = vi.fn().mockReturnValue('A freshly written title\n');
+    stubEditorText(editor, 'A freshly written title\n');
 
     isEditorSyncing = vi.fn().mockReturnValue(false);
     setThrottleTimer = vi.fn();
-    processEditorChangeOptimal = vi.fn().mockResolvedValue(undefined);
+    processEditorChange = vi.fn().mockResolvedValue(undefined);
 
     const settings = createTestSettings();
     settings.core.checkInterval = 0;
@@ -49,10 +53,10 @@ describe('EditorLifecycleManager editor-syncing guard', () => {
         hasDelayedThrottleTimer: vi.fn().mockReturnValue(false),
         setThrottleTimer,
         clearThrottleTimer: vi.fn(),
-        getLastEditorContent: vi.fn(),
+        hasLastEditorContent: vi.fn().mockReturnValue(false),
         setLastEditorContent: vi.fn(),
       },
-      renameEngine: { processEditorChangeOptimal },
+      renameEngine: { processEditorChange },
     } as unknown as FirstLineIsTitle);
   });
 
@@ -74,13 +78,13 @@ describe('EditorLifecycleManager editor-syncing guard', () => {
     expect(setThrottleTimer).not.toHaveBeenCalled();
   });
 
-  it('never reaches processEditorChangeOptimal while the plugin is writing', async () => {
+  it('never reaches processEditorChange while the plugin is writing', async () => {
     isEditorSyncing.mockReturnValue(true);
 
     lifecycle.handleEditorChangeWithThrottle(editor, file);
     await vi.advanceTimersByTimeAsync(100);
 
-    expect(processEditorChangeOptimal).not.toHaveBeenCalled();
+    expect(processEditorChange).not.toHaveBeenCalled();
   });
 
   it('checks the flag against the file being edited', () => {

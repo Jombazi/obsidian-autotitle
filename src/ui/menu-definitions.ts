@@ -1,10 +1,10 @@
-import { Notice, TFile, TFolder } from 'obsidian';
+import { TFile, TFolder } from 'obsidian';
 import { MenuConfig } from './menu-config';
 import FirstLineIsTitlePlugin from '../../main';
 import { ProcessTagModal, RenameFolderModal } from '../modals';
 import { t } from '../i18n';
-import { hasDisablePropertyInFile } from '../utils';
-import { setDisableRenamingProperty } from '../utils/property-value';
+import { IGNORE_ALL_EXCLUSIONS } from '../types';
+import { hasDisablePropertyInFile } from '../utils/disable-property';
 import {
   isFolderFullyExcludedByFileRules,
   isTagFullyExcludedByTagRules,
@@ -17,7 +17,6 @@ import {
  * Each menu type has its own configuration with visibility rules and actions.
  */
 
-// Context type interfaces
 interface TagContext {
   tagName: string;
 }
@@ -30,70 +29,57 @@ interface FileContext {
   file: TFile;
 }
 
+/** The checks deciding which half of a folder's or tag's Disable/Enable pair a menu shows; the scope strategy flips which half, never its wording, so each action has one title. */
+export interface DisableMenuVisibility {
+  shouldShowDisableMenuForFolder(folderPath: string): boolean;
+  shouldShowDisableMenuForTag(tagName: string): boolean;
+}
+
 export class MenuDefinitions {
-  constructor(private plugin: FirstLineIsTitlePlugin) {}
+  constructor(
+    private plugin: FirstLineIsTitlePlugin,
+    private visibility: DisableMenuVisibility
+  ) {}
 
   /**
    * Tag context menu configuration
    */
-  getTagMenuConfig(): MenuConfig {
+  getTagMenuConfig(): MenuConfig<TagContext> {
     return {
       items: [
         {
-          id: 'tag-put-first-line-in-title',
           title: t('commands.putFirstLineInTitle'),
           icon: 'file-type-corner',
           // Hidden when exclusions leave no note to rename, since the dialog would only say so
-          visible: (context) =>
+          visible: ({ tagName }) =>
             this.plugin.settings.core.enableTagCommands &&
             !isTagFullyExcludedByTagRules(
-              (context as TagContext).tagName,
+              tagName,
               this.plugin.settings,
               this.plugin.app
             ),
-          onClick: (context) => {
-            const tagContext = context as TagContext;
-            new ProcessTagModal(
-              this.plugin.app,
-              this.plugin,
-              tagContext.tagName
-            ).open();
+          onClick: ({ tagName }) => {
+            new ProcessTagModal(this.plugin.app, this.plugin, tagName).open();
           },
         },
         {
-          id: 'tag-disable-renaming',
-          title: this.plugin.contextMenuManager.getTagMenuText().disable,
+          title: t('commands.disableRenamingForTag'),
           icon: 'pen-off',
-          visible: (context) => {
-            if (!this.plugin.settings.core.enableTagCommands) return false;
-            const tagContext = context as TagContext;
-            const shouldShowDisable =
-              this.plugin.contextMenuManager.shouldShowDisableMenuForTag(
-                tagContext.tagName
-              );
-            return shouldShowDisable;
-          },
-          onClick: async (context) => {
-            const tagContext = context as TagContext;
-            await this.plugin.toggleTagExclusion(tagContext.tagName);
+          visible: ({ tagName }) =>
+            this.plugin.settings.core.enableTagCommands &&
+            this.visibility.shouldShowDisableMenuForTag(tagName),
+          onClick: async ({ tagName }) => {
+            await this.plugin.toggleTagExclusion(tagName);
           },
         },
         {
-          id: 'tag-enable-renaming',
-          title: this.plugin.contextMenuManager.getTagMenuText().enable,
+          title: t('commands.enableRenamingForTag'),
           icon: 'file-pen',
-          visible: (context) => {
-            if (!this.plugin.settings.core.enableTagCommands) return false;
-            const tagContext = context as TagContext;
-            const shouldShowDisable =
-              this.plugin.contextMenuManager.shouldShowDisableMenuForTag(
-                tagContext.tagName
-              );
-            return !shouldShowDisable;
-          },
-          onClick: async (context) => {
-            const tagContext = context as TagContext;
-            await this.plugin.toggleTagExclusion(tagContext.tagName);
+          visible: ({ tagName }) =>
+            this.plugin.settings.core.enableTagCommands &&
+            !this.visibility.shouldShowDisableMenuForTag(tagName),
+          onClick: async ({ tagName }) => {
+            await this.plugin.toggleTagExclusion(tagName);
           },
         },
       ],
@@ -103,66 +89,41 @@ export class MenuDefinitions {
   /**
    * Folder context menu configuration
    */
-  getFolderMenuConfig(): MenuConfig {
+  getFolderMenuConfig(): MenuConfig<FolderContext> {
     return {
       items: [
         {
-          id: 'folder-put-first-line-in-title',
           title: t('commands.putFirstLineInTitle'),
           icon: 'file-type-corner',
           // Hidden when exclusions leave no note to rename, since the dialog would only say so
-          visible: (context) =>
+          visible: ({ folder }) =>
             this.plugin.settings.core.enableFolderCommands &&
-            !isFolderFullyExcludedByFileRules(
-              (context as FolderContext).folder,
-              this.plugin.settings
-            ),
-          onClick: (context) => {
-            const folderContext = context as FolderContext;
-            new RenameFolderModal(
-              this.plugin.app,
-              this.plugin,
-              folderContext.folder
-            ).open();
+            !isFolderFullyExcludedByFileRules(folder, this.plugin.settings),
+          onClick: ({ folder }) => {
+            new RenameFolderModal(this.plugin.app, this.plugin, folder).open();
           },
         },
         {
-          id: 'folder-disable-renaming',
-          title: this.plugin.contextMenuManager.getFolderMenuText().disable,
+          title: t('commands.disableRenamingInFolder'),
           icon: 'pen-off',
-          visible: (context) => {
-            if (!this.plugin.settings.core.enableFolderCommands) return false;
-            const folderContext = context as FolderContext;
-            // The vault root has no entry of its own, as in Obsidian's Excluded files; the explorer passes it on a blank-area right-click
-            if (folderContext.folder.isRoot()) return false;
-            const shouldShowDisable =
-              this.plugin.contextMenuManager.shouldShowDisableMenuForFolder(
-                folderContext.folder.path
-              );
-            return shouldShowDisable;
-          },
-          onClick: async (context) => {
-            const folderContext = context as FolderContext;
-            await this.plugin.toggleFolderExclusion(folderContext.folder.path);
+          // The vault root has no entry of its own, as in Obsidian's Excluded files; the explorer passes it on a blank-area right-click
+          visible: ({ folder }) =>
+            this.plugin.settings.core.enableFolderCommands &&
+            !folder.isRoot() &&
+            this.visibility.shouldShowDisableMenuForFolder(folder.path),
+          onClick: async ({ folder }) => {
+            await this.plugin.toggleFolderExclusion(folder.path);
           },
         },
         {
-          id: 'folder-enable-renaming',
-          title: this.plugin.contextMenuManager.getFolderMenuText().enable,
+          title: t('commands.enableRenamingInFolder'),
           icon: 'file-pen',
-          visible: (context) => {
-            if (!this.plugin.settings.core.enableFolderCommands) return false;
-            const folderContext = context as FolderContext;
-            if (folderContext.folder.isRoot()) return false;
-            const shouldShowDisable =
-              this.plugin.contextMenuManager.shouldShowDisableMenuForFolder(
-                folderContext.folder.path
-              );
-            return !shouldShowDisable;
-          },
-          onClick: async (context) => {
-            const folderContext = context as FolderContext;
-            await this.plugin.toggleFolderExclusion(folderContext.folder.path);
+          visible: ({ folder }) =>
+            this.plugin.settings.core.enableFolderCommands &&
+            !folder.isRoot() &&
+            !this.visibility.shouldShowDisableMenuForFolder(folder.path),
+          onClick: async ({ folder }) => {
+            await this.plugin.toggleFolderExclusion(folder.path);
           },
         },
       ],
@@ -172,113 +133,49 @@ export class MenuDefinitions {
   /**
    * File context menu configuration
    */
-  getFileMenuConfig(): MenuConfig {
+  getFileMenuConfig(): MenuConfig<FileContext> {
     return {
       items: [
         {
-          id: 'file-put-first-line-in-title',
           title: t('commands.putFirstLineInTitle'),
           icon: 'file-type-corner',
-          visible: (_context) => this.plugin.settings.core.enableFileCommands,
-          onClick: async (context) => {
-            const fileContext = context as FileContext;
-            const exclusionOverrides = {
-              ignoreFiles: true,
-              ignoreTag: true,
-              ignoreProperty: true,
-            };
-            await this.plugin.renameEngine?.processFile(
-              fileContext.file,
-              true,
-              true,
-              undefined,
-              false,
-              exclusionOverrides
-            );
+          visible: () => this.plugin.settings.core.enableFileCommands,
+          onClick: async ({ file }) => {
+            await this.plugin.renameEngine.processFile(file, {
+              isManualCommand: true,
+              exclusionOverrides: IGNORE_ALL_EXCLUSIONS,
+            });
           },
         },
         {
-          id: 'file-disable-renaming',
           title: t('commands.disableRenamingForNote'),
           icon: 'pen-off',
-          visible: (context) => {
-            if (!this.plugin.settings.core.enableFileCommands) return false;
-
-            const fileContext = context as FileContext;
-            return !hasDisablePropertyInFile(
-              fileContext.file,
-              this.plugin.app,
-              this.plugin.settings.exclusions.disableRenamingKey,
-              this.plugin.settings.exclusions.disableRenamingValue
-            );
-          },
-          onClick: async (context) => {
-            const fileContext = context as FileContext;
-            try {
-              await this.plugin.propertyManager.ensurePropertyTypeIsCheckbox();
-              await this.plugin.app.fileManager.processFrontMatter(
-                fileContext.file,
-                (frontmatter: Record<string, unknown>) => {
-                  setDisableRenamingProperty(
-                    frontmatter,
-                    this.plugin.settings,
-                    false
-                  );
-                }
-              );
-              new Notice(
-                t('notifications.disabledRenamingFor', {
-                  filename: fileContext.file.basename,
-                })
-              );
-            } catch (error) {
-              console.error('Failed to disable renaming:', error);
-              const notice = new Notice(t('notifications.failedToDisable'));
-              notice.containerEl.addClass('mod-warning');
-            }
+          visible: ({ file }) =>
+            this.plugin.settings.core.enableFileCommands &&
+            !this.hasDisableProperty(file),
+          onClick: async ({ file }) => {
+            await this.plugin.setRenamingDisabledForNote(file, true);
           },
         },
         {
-          id: 'file-enable-renaming',
           title: t('commands.enableRenamingForNote'),
           icon: 'file-pen',
-          visible: (context) => {
-            if (!this.plugin.settings.core.enableFileCommands) return false;
-
-            const fileContext = context as FileContext;
-            return hasDisablePropertyInFile(
-              fileContext.file,
-              this.plugin.app,
-              this.plugin.settings.exclusions.disableRenamingKey,
-              this.plugin.settings.exclusions.disableRenamingValue
-            );
-          },
-          onClick: async (context) => {
-            const fileContext = context as FileContext;
-            try {
-              await this.plugin.app.fileManager.processFrontMatter(
-                fileContext.file,
-                (frontmatter: Record<string, unknown>) => {
-                  setDisableRenamingProperty(
-                    frontmatter,
-                    this.plugin.settings,
-                    true
-                  );
-                }
-              );
-              new Notice(
-                t('notifications.enabledRenamingFor', {
-                  filename: fileContext.file.basename,
-                })
-              );
-            } catch (error) {
-              console.error('Failed to enable renaming:', error);
-              const notice = new Notice(t('notifications.failedToEnable'));
-              notice.containerEl.addClass('mod-warning');
-            }
+          visible: ({ file }) =>
+            this.plugin.settings.core.enableFileCommands &&
+            this.hasDisableProperty(file),
+          onClick: async ({ file }) => {
+            await this.plugin.setRenamingDisabledForNote(file, false);
           },
         },
       ],
     };
+  }
+
+  private hasDisableProperty(file: TFile): boolean {
+    return hasDisablePropertyInFile(
+      file,
+      this.plugin.app,
+      this.plugin.settings
+    );
   }
 }

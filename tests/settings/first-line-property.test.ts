@@ -2,13 +2,13 @@
  * Tests for the First line property page: the property name field is what turns the feature on, so every row below it follows the field.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import type {
   PluginSettingTab,
   SettingDefinitionPage,
   SettingDefinitionRender,
 } from 'obsidian';
-import { App, Setting } from '../mockObsidian';
+import { App, Setting, debounce } from '../mockObsidian';
 import { buildFirstLinePropertyPage } from '../../src/settings/first-line-property';
 import type { FirstLineIsTitlePlugin } from '../../src/settings/settings-base';
 import { DEFAULT_SETTINGS } from '../../src/constants';
@@ -23,6 +23,8 @@ interface Harness {
   update: ReturnType<typeof vi.fn>;
   refreshDomState: ReturnType<typeof vi.fn>;
   saveSettings: ReturnType<typeof vi.fn>;
+  requestSaveSettings: ReturnType<typeof vi.fn>;
+  updatePropertyVisibility: ReturnType<typeof vi.fn>;
 }
 
 function buildHarness(
@@ -33,20 +35,47 @@ function buildHarness(
   settings.firstLineProperty.propertyKey = propertyKey;
   settings.customReplacements.rules = rules;
   const saveSettings = vi.fn().mockResolvedValue(undefined);
+  // A pending flag in place of the plugin's debouncer, so a request followed by a flush counts as the one write it is
+  let isSavePending = false;
+  const requestSaveSettings = vi.fn(() => {
+    isSavePending = true;
+  });
+  const updatePropertyVisibility = vi.fn();
   const plugin = {
     app: new App(),
     settings,
     saveSettings,
+    requestSaveSettings,
+    flushSettingsSave: vi.fn(() => {
+      if (!isSavePending) return;
+      isSavePending = false;
+      void saveSettings();
+    }),
     debugLog: vi.fn(),
-    updatePropertyVisibility: vi.fn(),
+    updatePropertyVisibility,
   } as unknown as FirstLineIsTitlePlugin;
   const update = vi.fn();
   const refreshDomState = vi.fn();
-  const page = buildFirstLinePropertyPage(plugin, {
+  // Stands in for the tab's debouncer, which runs the same property-name cascade
+  const requestPropertyKeyCascade = debounce(
+    () => updatePropertyVisibility(),
+    500,
+    true
+  );
+  const page = buildFirstLinePropertyPage(
+    plugin,
+    { update, refreshDomState } as unknown as PluginSettingTab,
+    requestPropertyKeyCascade
+  );
+  return {
+    settings,
+    page,
     update,
     refreshDomState,
-  } as unknown as PluginSettingTab);
-  return { settings, page, update, refreshDomState, saveSettings };
+    saveSettings,
+    requestSaveSettings,
+    updatePropertyVisibility,
+  };
 }
 
 function visibleRowNames(harness: Harness): string[] {
@@ -65,13 +94,19 @@ function propertyNameRow(harness: Harness): SettingDefinitionRender {
 function renderPropertyNameRow(harness: Harness) {
   const setting = new Setting(document.createElement('div'));
   propertyNameRow(harness).render(setting as never, {} as never);
-  const [restoreButton, textField] = setting.components;
+  const restoreButton = setting.controlEl.querySelector<HTMLElement>(
+    '.extra-setting-button'
+  )!;
+  const [textField] = setting.components;
   return { restoreButton, textField };
 }
 
-/** Lets an awaited save settle. */
-async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
+/** Types `value` into the property name field. */
+function typeName(
+  textField: ReturnType<typeof renderPropertyNameRow>['textField'],
+  value: string
+): void {
+  (textField.onChange.mock.calls[0][0] as (v: string) => unknown)(value);
 }
 
 const rule: CustomReplacement = {
@@ -133,32 +168,72 @@ describe('First line property page', () => {
   });
 
   describe('property name field', () => {
-    it('re-applies row visibility without rebuilding the rows while typing', async () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('re-applies row visibility without rebuilding the rows while typing', () => {
       const harness = buildHarness('');
       const { textField } = renderPropertyNameRow(harness);
 
-      await (textField.onChange.mock.calls[0][0] as (v: string) => unknown)(
-        'aliases'
-      );
+      typeName(textField, 'aliases');
 
       expect(harness.settings.firstLineProperty.propertyKey).toBe('aliases');
-      expect(harness.saveSettings).toHaveBeenCalledTimes(1);
+      expect(harness.requestSaveSettings).toHaveBeenCalledTimes(1);
+      expect(harness.saveSettings).not.toHaveBeenCalled();
       expect(harness.refreshDomState).toHaveBeenCalledTimes(1);
       expect(harness.update).not.toHaveBeenCalled();
       expect(visibleRowNames(harness)).toContain('Truncate');
     });
 
-    it('re-applies row visibility when restoring the blank default', async () => {
+    it('applies the name to property hiding once typing pauses, not per keystroke', () => {
+      vi.useFakeTimers();
+      const harness = buildHarness('');
+      const { textField } = renderPropertyNameRow(harness);
+
+      typeName(textField, 'al');
+      typeName(textField, 'alias');
+      expect(harness.updatePropertyVisibility).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(500);
+
+      expect(harness.updatePropertyVisibility).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-applies row visibility when restoring the blank default', () => {
       const harness = buildHarness('aliases');
       const { restoreButton } = renderPropertyNameRow(harness);
 
-      (restoreButton.onClick.mock.calls[0][0] as () => void)();
-      await flush();
+      restoreButton.click();
 
       expect(harness.settings.firstLineProperty.propertyKey).toBe('');
       expect(harness.refreshDomState).toHaveBeenCalledTimes(1);
       expect(harness.update).not.toHaveBeenCalled();
       expect(visibleRowNames(harness)).toEqual([PROPERTY_NAME_ROW]);
+    });
+
+    it('saves and applies a restored name at once, as a click rather than typing', () => {
+      vi.useFakeTimers();
+      const harness = buildHarness('aliases');
+      const { restoreButton } = renderPropertyNameRow(harness);
+
+      restoreButton.click();
+
+      expect(harness.saveSettings).toHaveBeenCalledTimes(1);
+      expect(harness.updatePropertyVisibility).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(500);
+      expect(harness.updatePropertyVisibility).toHaveBeenCalledTimes(1);
+    });
+
+    it('writes nothing when restoring a name already at the default', () => {
+      const harness = buildHarness('');
+      const { restoreButton, textField } = renderPropertyNameRow(harness);
+
+      restoreButton.click();
+
+      expect(textField.setValue).toHaveBeenLastCalledWith('');
+      expect(harness.requestSaveSettings).not.toHaveBeenCalled();
+      expect(harness.saveSettings).not.toHaveBeenCalled();
+      expect(harness.updatePropertyVisibility).not.toHaveBeenCalled();
     });
 
     it('is named "First line property"', () => {

@@ -11,16 +11,18 @@ import { Menu, MenuItem } from 'obsidian';
  * - Self-documenting menu definitions
  */
 
-export interface MenuItemConfig {
-  id: string;
-  title: string | ((context: unknown) => string);
+/** One menu item, typed on the context its menu is rendered with, so a predicate or action cannot read the wrong context. */
+export interface MenuItemConfig<TContext = unknown> {
+  /** Read by no renderer; kept optional for configs that label their items. */
+  id?: string;
+  title: string | ((context: TContext) => string);
   icon: string;
-  visible: (context: unknown) => boolean;
-  onClick: (context: unknown) => void | Promise<void>;
+  visible: (context: TContext) => boolean;
+  onClick: (context: TContext) => void | Promise<void>;
 }
 
-export interface MenuConfig {
-  items: MenuItemConfig[];
+export interface MenuConfig<TContext = unknown> {
+  items: MenuItemConfig<TContext>[];
 }
 
 /**
@@ -39,7 +41,11 @@ export class MenuRenderer {
    * @param config Menu configuration
    * @param context Context object passed to visibility/onClick functions
    */
-  render(menu: Menu, config: MenuConfig, context: unknown): void {
+  render<TContext>(
+    menu: Menu,
+    config: MenuConfig<TContext>,
+    context: TContext
+  ): void {
     this.renderItems(
       (cb) => {
         menu.addItem(cb);
@@ -53,25 +59,25 @@ export class MenuRenderer {
    * Render menu items via a bare addItem callback (e.g. a third-party plugin's
    * menu API that doesn't expose the full Obsidian Menu, only addItem).
    */
-  renderToAddItem(
+  renderToAddItem<TContext>(
     addItem: (cb: (item: MenuItem) => void) => void,
-    config: MenuConfig,
-    context: unknown
+    config: MenuConfig<TContext>,
+    context: TContext
   ): void {
     this.renderItems(addItem, this.getVisibleItems(config, context), context);
   }
 
-  private getVisibleItems(
-    config: MenuConfig,
-    context: unknown
-  ): MenuItemConfig[] {
+  private getVisibleItems<TContext>(
+    config: MenuConfig<TContext>,
+    context: TContext
+  ): MenuItemConfig<TContext>[] {
     return config.items.filter((item) => item.visible(context));
   }
 
-  private renderItems(
+  private renderItems<TContext>(
     addItem: (cb: (item: MenuItem) => void) => void,
-    visibleItems: MenuItemConfig[],
-    context: unknown
+    visibleItems: MenuItemConfig<TContext>[],
+    context: TContext
   ): void {
     for (const itemConfig of visibleItems) {
       addItem((item) => {
@@ -84,7 +90,11 @@ export class MenuRenderer {
           .setTitle(title)
           .setIcon(itemConfig.icon)
           .onClick(async () => {
-            await itemConfig.onClick(context);
+            try {
+              await itemConfig.onClick(context);
+            } catch (error) {
+              console.error('FLIT: menu action failed', error);
+            }
           });
       });
     }

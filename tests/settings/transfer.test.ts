@@ -13,6 +13,7 @@ import {
   createSettingsTransfer,
   createSettingsTransferFilename,
   createSettingsTransferJson,
+  mergeSettingsOverDefaults,
   SettingsTransfer,
 } from '../../src/settings/transfer';
 import {
@@ -109,10 +110,19 @@ describe('createSettingsTransfer', () => {
       'dataSchemaVersion' in createSettingsTransfer(settings).settings
     ).toBe(false);
   });
+
+  it('exports no osPreset, which nothing reads any more', () => {
+    const settings = createTestSettings();
+    (
+      settings.characterReplacements as unknown as Record<string, unknown>
+    ).osPreset = 'Windows';
+
+    expect(createSettingsTransfer(settings).settings).toEqual({});
+  });
 });
 
 describe('createSettingsTransferJson', () => {
-  it('serialises the envelope as parseable JSON', () => {
+  it('serializes the envelope as parseable JSON', () => {
     const json = createSettingsTransferJson(
       createTestSettings({ core: { charCount: 42 } })
     );
@@ -146,6 +156,14 @@ describe('applySettingsTransfer', () => {
     const applied = applySettingsTransfer(transferOf({}));
 
     expect(applied).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it('drops an osPreset carried by an older settings file', () => {
+    const applied = applySettingsTransfer(
+      transferOf({ characterReplacements: { osPreset: 'Windows' } })
+    );
+
+    expect('osPreset' in applied.characterReplacements).toBe(false);
   });
 
   it('keeps the default when a leaf type mismatches', () => {
@@ -202,6 +220,144 @@ describe('applySettingsTransfer', () => {
     applied.exclusions.excludedFiles.push('Templates/');
 
     expect(payload.exclusions.excludedFiles).toEqual(['Notes/']);
+  });
+});
+
+describe('applySettingsTransfer validation', () => {
+  it.each([
+    ['excludedFiles', ['Notes/', 3]],
+    ['excludedTags', ['draft', null]],
+  ])('keeps the default %s when an entry is not a string', (key, entries) => {
+    const applied = applySettingsTransfer(
+      transferOf({ exclusions: { [key]: entries } })
+    );
+
+    expect(applied.exclusions[key as 'excludedFiles' | 'excludedTags']).toEqual(
+      []
+    );
+  });
+
+  it('keeps string entries that pass', () => {
+    const applied = applySettingsTransfer(
+      transferOf({ exclusions: { excludedTags: ['draft', '#archive'] } })
+    );
+
+    expect(applied.exclusions.excludedTags).toEqual(['draft', '#archive']);
+  });
+
+  it.each([
+    ['a bare string', 'status'],
+    ['a missing value', { key: 'status' }],
+    ['a number value', { key: 'status', value: 1 }],
+  ])('keeps the default excluded properties for %s', (_, entry) => {
+    const applied = applySettingsTransfer(
+      transferOf({ exclusions: { excludedProperties: [entry] } })
+    );
+
+    expect(applied.exclusions.excludedProperties).toEqual([]);
+  });
+
+  it('keeps well-formed excluded properties', () => {
+    const properties = [{ key: 'status', value: 'done' }];
+    const applied = applySettingsTransfer(
+      transferOf({ exclusions: { excludedProperties: properties } })
+    );
+
+    expect(applied.exclusions.excludedProperties).toEqual(properties);
+  });
+
+  it.each([
+    [
+      'a missing replacement',
+      { searchText: 'a', onlyAtStart: false, onlyWholeLine: false },
+    ],
+    [
+      'a string option',
+      {
+        searchText: 'a',
+        replaceText: 'b',
+        onlyAtStart: 'no',
+        onlyWholeLine: false,
+      },
+    ],
+    ['a bare string', 'a → b'],
+  ])('keeps the default rules for a rule with %s', (_, rule) => {
+    const applied = applySettingsTransfer(
+      transferOf({ customReplacements: { rules: [rule] } })
+    );
+
+    expect(applied.customReplacements.rules).toEqual(
+      DEFAULT_SETTINGS.customReplacements.rules
+    );
+  });
+
+  it.each([
+    ['core', 'titleCase', 'Title Case'],
+    ['core', 'manualNotificationMode', 'Sometimes'],
+    ['core', 'contentReadMethod', 'Clipboard'],
+    ['exclusions', 'fileScopeStrategy', 'Only exclude'],
+    ['exclusions', 'tagScopeStrategy', 'Exclude all except…'],
+    ['exclusions', 'propertyScopeStrategy', ''],
+    ['exclusions', 'tagMatchingMode', 'In body'],
+    ['firstLineProperty', 'hideProperty', 'sometimes'],
+  ])('keeps the default %s.%s for an unknown option', (branch, key, value) => {
+    const applied = applySettingsTransfer(
+      transferOf({ [branch]: { [key]: value } })
+    ) as unknown as Record<string, Record<string, unknown>>;
+    const defaults = DEFAULT_SETTINGS as unknown as Record<
+      string,
+      Record<string, unknown>
+    >;
+
+    expect(applied[branch][key]).toBe(defaults[branch][key]);
+  });
+
+  it('keeps a known option', () => {
+    const applied = applySettingsTransfer(
+      transferOf({
+        core: { titleCase: 'uppercase' },
+        exclusions: { tagScopeStrategy: 'Exclude all except...' },
+        firstLineProperty: { hideProperty: 'when_empty' },
+      })
+    );
+
+    expect(applied.core.titleCase).toBe('uppercase');
+    expect(applied.exclusions.tagScopeStrategy).toBe('Exclude all except...');
+    expect(applied.firstLineProperty.hideProperty).toBe('when_empty');
+  });
+
+  it('falls back per key, keeping the valid siblings of a rejected leaf', () => {
+    const applied = applySettingsTransfer(
+      transferOf({
+        exclusions: { excludedTags: [1], excludedFiles: ['Notes/'] },
+      })
+    );
+
+    expect(applied.exclusions.excludedTags).toEqual([]);
+    expect(applied.exclusions.excludedFiles).toEqual(['Notes/']);
+  });
+});
+
+describe('mergeSettingsOverDefaults', () => {
+  it('drops keys the defaults lack', () => {
+    const merged = mergeSettingsOverDefaults({
+      legacyKey: true,
+      core: { charCount: 42, removedOption: 'x' },
+    }) as unknown as Record<string, Record<string, unknown>>;
+
+    expect('legacyKey' in merged).toBe(false);
+    expect('removedOption' in merged.core).toBe(false);
+    expect(merged.core.charCount).toBe(42);
+  });
+
+  it('keeps the default for a null leaf', () => {
+    const merged = mergeSettingsOverDefaults({
+      firstLineProperty: { propertyKey: null },
+    });
+
+    expect(merged.firstLineProperty.propertyKey).toBe(
+      DEFAULT_SETTINGS.firstLineProperty.propertyKey
+    );
   });
 });
 

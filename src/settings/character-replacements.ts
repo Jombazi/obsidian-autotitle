@@ -1,14 +1,15 @@
 import {
-  Notice,
   PluginSettingTab,
   SettingDefinitionPage,
   SettingDefinitionRender,
 } from 'obsidian';
+import { SettingPath } from './settings-paths';
 import {
   buildDescRow,
   buildReplacedWithSummary,
   buildSummaryRow,
   FirstLineIsTitlePlugin,
+  saveSettingsOrWarn,
 } from './settings-base';
 import { DEFAULT_SETTINGS } from '../constants';
 import { t } from '../i18n';
@@ -20,44 +21,15 @@ import {
 } from '../types/char-replacement';
 import { EntryEditModal, EntryField } from '../modals/entry-edit-modal';
 
-/**
- * Sub-key under `settings.characterReplacements.characters` holding each
- * character's display label. Two keys differ from the setting key itself.
- */
-const CHAR_LABEL_KEYS: Record<CharKey, string> = {
-  leftBracket: 'leftBracket',
-  rightBracket: 'rightBracket',
-  hash: 'hash',
-  caret: 'caret',
-  pipe: 'pipe',
-  backslash: 'backslash',
-  slash: 'forwardSlash',
-  colon: 'colon',
-  dot: 'dot',
-  asterisk: 'asterisk',
-  quote: 'quote',
-  lessThan: 'lessThan',
-  greaterThan: 'greaterThan',
-  question: 'questionMark',
-};
-
 /** Characters whose dialog explains them in the Replace toggle's description. */
 const CHAR_NOTE_KEYS: Partial<Record<CharKey, string>> = {
   backslash: 'backslashNote',
   dot: 'dotNote',
 };
 
-async function persistSettings(plugin: FirstLineIsTitlePlugin): Promise<void> {
-  try {
-    await plugin.saveSettings();
-  } catch {
-    const notice = new Notice(t('settings.errors.saveFailed'));
-    notice.containerEl.addClass('mod-warning');
-  }
-}
-
+/** The character's display label, keyed in the locale files by the setting key itself. */
 function charLabel(key: CharKey): string {
-  return t(`settings.characterReplacements.characters.${CHAR_LABEL_KEYS[key]}`);
+  return t(`settings.characterReplacements.characters.${key}`);
 }
 
 /** What `processForbiddenChars` does with the character under this config, in the row's own words. */
@@ -69,17 +41,16 @@ function buildCharSummary(
     // An unreplaced dot is kept unless it leads the file name
     return key === 'dot'
       ? t('settings.characterReplacements.summary.keptExceptAtStart')
-      : t('settings.characterReplacements.summary.removed');
+      : t('settings.common.summary.removed');
   }
   // Trims apply only alongside a non-empty replacement
   if (config.replacement === '') {
-    return t('settings.characterReplacements.summary.removed');
+    return t('settings.common.summary.removed');
   }
-  const trimsLeft = config.trimLeft;
   let trims = '';
-  if (trimsLeft && config.trimRight) {
+  if (config.trimLeft && config.trimRight) {
     trims = t('settings.characterReplacements.summary.trimsBoth');
-  } else if (trimsLeft) {
+  } else if (config.trimLeft) {
     trims = t('settings.characterReplacements.summary.trimsLeft');
   } else if (config.trimRight) {
     trims = t('settings.characterReplacements.summary.trimsRight');
@@ -95,8 +66,7 @@ type CharValues = Pick<
 function openCharDialog(
   plugin: FirstLineIsTitlePlugin,
   tab: PluginSettingTab,
-  key: CharKey,
-  isWindowsAndroid: boolean
+  key: CharKey
 ): void {
   const config = plugin.settings.characterReplacements.charReplacements[key];
   const noteKey = CHAR_NOTE_KEYS[key];
@@ -113,25 +83,25 @@ function openCharDialog(
       type: 'text',
       key: 'replacement',
       name: t('settings.characterReplacements.headers.replaceWith'),
-      placeholder: t('settings.characterReplacements.emptyPlaceholder'),
+      placeholder: t('settings.common.emptyPlaceholder'),
       restoreDefault:
         DEFAULT_SETTINGS.characterReplacements.charReplacements[key]
           .replacement,
-      forbiddenChars: isWindowsAndroid ? 'windowsAndroid' : 'currentOS',
+      stripForbiddenChars: true,
+    },
+    {
+      type: 'toggle',
+      key: 'trimLeft',
+      name: t('settings.characterReplacements.headers.trimLeft'),
+      desc: t('settings.characterReplacements.dialog.trimLeftDesc'),
+    },
+    {
+      type: 'toggle',
+      key: 'trimRight',
+      name: t('settings.characterReplacements.headers.trimRight'),
+      desc: t('settings.characterReplacements.dialog.trimRightDesc'),
     },
   ];
-  fields.push({
-    type: 'toggle',
-    key: 'trimLeft',
-    name: t('settings.characterReplacements.headers.trimLeft'),
-    desc: t('settings.characterReplacements.dialog.trimLeftDesc'),
-  });
-  fields.push({
-    type: 'toggle',
-    key: 'trimRight',
-    name: t('settings.characterReplacements.headers.trimRight'),
-    desc: t('settings.characterReplacements.dialog.trimRightDesc'),
-  });
 
   new EntryEditModal<CharValues>(plugin.app, {
     title: charLabel(key),
@@ -148,7 +118,7 @@ function openCharDialog(
       config.trimLeft = values.trimLeft;
       config.trimRight = values.trimRight;
       plugin.debugLog(`charReplacements.${key}`, config);
-      await persistSettings(plugin);
+      await saveSettingsOrWarn(plugin);
       tab.update();
     },
   }).open();
@@ -158,8 +128,7 @@ function openCharDialog(
 function buildCharRows(
   plugin: FirstLineIsTitlePlugin,
   tab: PluginSettingTab,
-  chars: CharKey[],
-  isWindowsAndroid: boolean
+  chars: CharKey[]
 ): SettingDefinitionRender[] {
   return chars.map((key) =>
     buildSummaryRow({
@@ -171,21 +140,16 @@ function buildCharRows(
           plugin.settings.characterReplacements.charReplacements[key]
         ),
       searchable: true,
-      editEntry: () => openCharDialog(plugin, tab, key, isWindowsAndroid),
+      editEntry: () => openCharDialog(plugin, tab, key),
     })
   );
 }
 
-/**
- * Character replacements sub-page.
- *
- * Each group lists its fixed characters as summary rows; a row's Edit opens a
- * dialog holding that character's switch, replacement and trims.
- */
+/** Character replacements sub-page. Each group lists its fixed characters as summary rows; a row's Edit opens a dialog holding that character's switch, replacement and trims. */
 export function buildCharacterReplacementsPage(
   plugin: FirstLineIsTitlePlugin,
   tab: PluginSettingTab
-): SettingDefinitionPage {
+): SettingDefinitionPage<SettingPath> {
   return {
     type: 'page',
     name: t('settings.sections.characterReplacements'),
@@ -198,8 +162,7 @@ export function buildCharacterReplacementsPage(
     items: [
       {
         name: t('settings.characterReplacements.name'),
-        // Deliberately not the section desc: the section summarises what the
-        // page is for, the toggle explains what each position does.
+        // Deliberately not the section desc: the section summarizes what the page is for, the toggle explains what each position does.
         desc: t('settings.characterReplacements.toggleDesc'),
         control: {
           type: 'toggle',
@@ -214,7 +177,7 @@ export function buildCharacterReplacementsPage(
           plugin.settings.characterReplacements.enableForbiddenCharReplacements,
         items: [
           buildDescRow(t('settings.characterReplacements.allOSes.desc')),
-          ...buildCharRows(plugin, tab, PRIMARY_CHAR_KEYS, false),
+          ...buildCharRows(plugin, tab, PRIMARY_CHAR_KEYS),
         ],
       },
       {
@@ -224,7 +187,7 @@ export function buildCharacterReplacementsPage(
           plugin.settings.characterReplacements.enableForbiddenCharReplacements,
         items: [
           buildDescRow(t('settings.characterReplacements.windowsAndroid.desc')),
-          ...buildCharRows(plugin, tab, WINDOWS_ANDROID_CHAR_KEYS, true),
+          ...buildCharRows(plugin, tab, WINDOWS_ANDROID_CHAR_KEYS),
         ],
       },
     ],

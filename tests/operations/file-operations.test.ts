@@ -85,7 +85,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
     });
 
     it('falls back to the cache when partial content lacks frontmatter the file has', () => {
-      // rename-engine can pass only the edited footnote definition, not the whole note
+      // Text without a properties block, as an editor holding less than the whole note would hand over
       app.metadataCache.getFileCache = vi.fn().mockReturnValue({
         frontmatter: { status: 'draft' },
       });
@@ -185,7 +185,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
     it('skips the path check but keeps properties for the creation-coordinator overrides', () => {
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, '', {
-          ignoreFiles: true,
+          ignoreExcludedFiles: true,
         })
       ).toBe(false);
 
@@ -193,7 +193,7 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
         fileOperations.isFileExcludedForCursorPositioning(
           file,
           '---\nstatus: draft\n---\n',
-          { ignoreFiles: true }
+          { ignoreExcludedFiles: true }
         )
       ).toBe(true);
     });
@@ -203,9 +203,9 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, '', {
-          ignoreFiles: true,
-          ignoreTag: true,
-          ignoreProperty: true,
+          ignoreExcludedFiles: true,
+          ignoreExcludedTags: true,
+          ignoreExcludedProperties: true,
         })
       ).toBe(false);
     });
@@ -242,6 +242,42 @@ describe('FileOperations.isFileExcludedForCursorPositioning', () => {
     it('ignores a matching value stored under a different key', () => {
       const content = '---\nstatus: true\n---\n';
       yamlFixtures.set('status: true\n', { status: true });
+
+      expect(
+        fileOperations.isFileExcludedForCursorPositioning(file, content)
+      ).toBe(false);
+    });
+
+    // The new-note path gains the fallback the rename gate has, so a note whose text the cache already indexes with the property stays excluded.
+    it('falls back to the metadata cache when the content has no properties block', () => {
+      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
+        frontmatter: { 'no rename': true },
+      });
+
+      expect(
+        fileOperations.isFileExcludedForCursorPositioning(file, 'Title\n')
+      ).toBe(true);
+    });
+
+    it('falls back to the metadata cache when the content properties are malformed', () => {
+      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
+        frontmatter: { 'no rename': true },
+      });
+
+      expect(
+        fileOperations.isFileExcludedForCursorPositioning(
+          file,
+          '---\nno rename: [unclosed\n---\n'
+        )
+      ).toBe(true);
+    });
+
+    it('lets the content switch the property off ahead of the cache', () => {
+      const content = '---\nno rename: false\n---\n';
+      yamlFixtures.set('no rename: false\n', { 'no rename': false });
+      app.metadataCache.getFileCache = vi.fn().mockReturnValue({
+        frontmatter: { 'no rename': true },
+      });
 
       expect(
         fileOperations.isFileExcludedForCursorPositioning(file, content)

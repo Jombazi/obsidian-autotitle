@@ -63,19 +63,19 @@ describe('buildSupportGroup', () => {
   it('names both rows, which is what keeps them in the settings search index', () => {
     const rows = buildSupportGroup().items as unknown as { name?: string }[];
     expect(rows.map((row) => row.name)).toEqual([
-      'settings.general.help.name',
+      'settings.general.discuss.name',
       'settings.general.sendFeedback.name',
     ]);
   });
 
-  it('opens the discussions board when the help button is clicked', () => {
+  it('opens the discussions board when the Discuss button is clicked', () => {
     const open = vi.spyOn(window, 'open').mockReturnValue(null);
     const [row] = buildSupportGroup().items as unknown as [
       { render: (s: never) => void },
     ];
 
     const button = captureButton(row.render);
-    expect(button.text).toBe('settings.general.help.button');
+    expect(button.text).toBe('settings.general.discuss.button');
 
     button.clickHandler?.();
     expect(open).toHaveBeenCalledWith(
@@ -122,7 +122,7 @@ describe('buildNewNotesGroup', () => {
 });
 
 describe('buildFooterDefinitions', () => {
-  it('no longer carries the feedback row, which moved to its own group', () => {
+  it('holds only the Rename all notes row', () => {
     const plugin = { app: {} } as never;
     const names = buildFooterDefinitions(plugin).map(
       (def) => (def as { name?: string }).name

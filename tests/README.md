@@ -14,7 +14,9 @@ tests/
 ├── locale-parity.test.ts
 ├── main.test.ts
 ├── modals.test.ts
+├── notice-copy.test.ts
 ├── readme-locale-parity.test.ts
+├── suggests.test.ts
 ├── testUtils.test.ts
 ├── utils.test.ts
 ├── version-bump.test.ts
@@ -22,6 +24,7 @@ tests/
 │   ├── cache-manager.test.ts
 │   ├── command-registrar.test.ts
 │   ├── disable-property-transition.test.ts
+│   ├── editor-lifecycle-creation-window.test.ts
 │   ├── editor-lifecycle-first-line.test.ts
 │   ├── editor-lifecycle-linked-delay.test.ts
 │   ├── editor-lifecycle-syncing-guard.test.ts
@@ -30,46 +33,64 @@ tests/
 │   ├── file-state-manager.test.ts
 │   ├── first-line-property-manager.test.ts
 │   ├── first-line-property-properties-only-skip.test.ts
+│   ├── link-manager.test.ts
 │   ├── plugin-initializer.test.ts
+│   ├── property-manager.test.ts
 │   ├── rate-limiter.test.ts
 │   ├── rename-engine.test.ts
+│   ├── templater-integration.test.ts
 │   ├── workspace-integration-creation-flow.test.ts
 │   └── workspace-integration.test.ts
+├── fixtures/                   # Frozen copies the tests compare against
+│   └── inline-markup-reference.ts
 ├── modals/                     # Dialog tests
-│   └── entry-edit-modal.test.ts
+│   ├── entry-edit-modal.test.ts
+│   ├── exclusion-entry-modal.test.ts
+│   ├── form-sheet-header.test.ts
+│   └── settings-transfer-modals.test.ts
 ├── operations/                 # Batch operation tests
 │   ├── file-operations-title-insertion.test.ts
 │   ├── file-operations.test.ts
-│   └── folder-operations.test.ts
+│   ├── folder-operations.test.ts
+│   └── tag-operations.test.ts
 ├── settings/                   # Settings tab tests
 │   ├── character-replacements.test.ts
 │   ├── custom-replacements.test.ts
 │   ├── excluded-files.test.ts
+│   ├── exclusion-list-notes.test.ts
 │   ├── exclusion-row-delete.test.ts
+│   ├── exclusion-row-edit.test.ts
 │   ├── exclusions-add-item.test.ts
 │   ├── first-line-property.test.ts
 │   ├── general.test.ts
 │   ├── import-guard.test.ts
+│   ├── other.test.ts
 │   ├── plugin-links.test.ts
 │   ├── settings-base.test.ts
 │   ├── settings-main.test.ts
 │   ├── settings-paths.test.ts
 │   └── transfer.test.ts
 ├── ui/                         # Context menu and property visibility tests
+│   ├── context-menus.test.ts
 │   ├── menu-config.test.ts
 │   ├── menu-definitions.test.ts
 │   └── property-visibility.test.ts
 └── utils/                      # Utility module tests
     ├── content-reader.test.ts
-    ├── debug.test.ts
+    ├── custom-replacement-rules.test.ts
+    ├── deep-merge.test.ts
     ├── embedded-editors.test.ts
+    ├── exclusion-pattern.test.ts
     ├── file-exclusions.test.ts
     ├── first-line-property-keys.test.ts
     ├── frontmatter-edit.test.ts
     ├── inbound-links.test.ts
+    ├── inline-markup.test.ts
     ├── property-value.test.ts
     ├── string-processing.test.ts
-    └── tag-utils.test.ts
+    ├── tag-detection.test.ts
+    ├── tag-utils.test.ts
+    └── title-source.test.ts
 ```
 
 ## Running tests
@@ -95,28 +116,25 @@ Tests run automatically on push via GitHub Actions (Node 20).
 
 | Module        | Tests | Coverage                                                                                           |
 | ------------- | ----- | -------------------------------------------------------------------------------------------------- |
-| Rename Engine | 85    | Rate limiting, frontmatter stripping, title extraction, cache management, editor change processing |
-| Cache Manager | 34    | LRU cache, path reservation, file existence cache, lock management                                 |
-| Rate Limiter  | 38    | Per-key/global limits, time windows, expiration, performance                                       |
-| i18n          | 69    | Locale switching, translations, variable replacement, English/Russian plurals                      |
+| Rename Engine | 136   | Rate limiting, title source and heading gate, title extraction, refusal reasons and their notices, manual rename notices, first line property target, editor change processing |
+| Cache Manager | 15    | Body-presence record, path reservation, rename and delete bookkeeping                              |
+| Rate Limiter  | 44    | Per-key/global limits, time windows, expiration, purging expired keys, performance                 |
+| i18n          | 74    | Locale switching, translations, variable replacement, English/Russian plurals                      |
 
 ### Utility modules
 
 | Module            | Tests | Coverage                                                                       |
 | ----------------- | ----- | ------------------------------------------------------------------------------ |
-| String Processing | 36    | Forbidden chars, replacements, safe links, maxLength                           |
-| File Exclusions   | 72    | Excluded files (paths, regular expressions), tags (frontmatter + inline), properties, strategies |
-| Tag Utilities     | 41    | Normalization, YAML parsing, frontmatter stripping, child tag matching         |
-| Content Reader    | 31    | All read strategies (Editor/Cache/File), workspace search, page preview and Canvas card lookup |
-| Core Utilities    | 410   | Logging, headings, exclusion list normalization, disable properties |
-| Debug Utilities   | 25    | Setting logs, content output, dumps                                            |
+| String Processing | 55    | Forbidden chars, replacements and their reversal, line breaks, safe links, maxLength |
+| File Exclusions   | 151   | Excluded files (paths, regular expressions), tags (frontmatter, inline and typed into the first line, regular expressions), properties (regular expression names and values), strategies |
+| Tag Utilities     | 32    | Normalization, tag and excluded-tag entry keys, duplicate tag entries, child tag matching |
+| Custom Replacement Rules | 11 | Whole-line, start-of-line and everywhere rules, literal `$&`, duplicate rule keys |
+| Content Reader    | 27    | All read strategies (Editor/Cache/File), workspace search, page preview and Canvas card lookup |
+| Core Utilities    | 583   | Logging, headings, title extraction and its Reading view parity (HTML-block lines included), exclusion list normalization, disable properties, replacement reversal |
+| Inline Markup     | 420   | Equivalence with the pre-cache tokenizer on seeded inputs, linear time on pathological 100 KB lines, link destinations, block IDs, inline tags, HTML-block lines, hidden elements resolved after rendering, elements hidden by CSS, attributes or element semantics, SVG and MathML content |
+| Title Source      | 440   | Line reads, properties boundary, title-source rules (code, fences, math, rules, comments, definitions, tables), indexed tags, Reading view parity |
 
-**Total: 1552 tests across 55 files** (`npx vitest run`)
-
-### Not yet tested
-
-- Property Manager
-- Link Manager
+**Total: 3546 tests across 74 files** (`npx vitest run`)
 
 ---
 
@@ -214,6 +232,18 @@ const app = createMockApp();
 ```typescript
 const folder = createMockFolder('Notes');
 ```
+
+### `stubEditorText(editor, text)`
+
+```typescript
+const editor = new Editor();
+stubEditorText(editor, '# Title\nBody');
+// getValue, lineCount and getLine all read the same text, as the title walk reads an editor line by line
+```
+
+### `splitFrontMatter(content)`
+
+A port of Obsidian's `getFrontMatterInfo`, and the mock's default implementation of it, so a fixture can hold raw note text with a properties block.
 
 ---
 

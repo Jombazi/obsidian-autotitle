@@ -12,6 +12,7 @@ import type {
   SettingDefinitionRender,
 } from 'obsidian';
 import {
+  AbstractInputSuggest,
   App,
   Platform,
   Setting,
@@ -30,19 +31,14 @@ vi.mock('../../src/i18n', () => ({
 }));
 
 // The base mocks declare `open`, `onOpen` and the suggester methods as instance fields, so instances are recorded here and driven through the real prototypes below
-vi.mock('../../src/modals/add-excluded-file', async () => {
-  const actual = await vi.importActual<
-    typeof import('../../src/modals/add-excluded-file')
-  >('../../src/modals/add-excluded-file');
-  class RecordingAddExcludedFileModal extends actual.AddExcludedFileModal {
-    constructor(
-      ...args: ConstructorParameters<typeof actual.AddExcludedFileModal>
-    ) {
-      super(...args);
-      openedModals.push(this);
-    }
-  }
-  return { AddExcludedFileModal: RecordingAddExcludedFileModal };
+vi.mock('../../src/modals/exclusion-entry-modal', async (importOriginal) => {
+  const { withRecordedExclusionEntryModals } = await import('../testUtils');
+  return withRecordedExclusionEntryModals(
+    await importOriginal<
+      typeof import('../../src/modals/exclusion-entry-modal')
+    >(),
+    openedModals
+  );
 });
 
 vi.mock('../../src/suggests', async () => {
@@ -60,16 +56,24 @@ vi.mock('../../src/suggests', async () => {
 });
 
 import { buildExclusionsPage } from '../../src/settings/exclusions';
-import { AddExcludedFileModal } from '../../src/modals/add-excluded-file';
+import type { ExclusionEntryModal } from '../../src/modals/exclusion-entry-modal';
 import { FolderSuggest } from '../../src/suggests';
 import type { FirstLineIsTitlePlugin } from '../../src/settings/settings-base';
 import { DEFAULT_SETTINGS } from '../../src/constants';
 import { EXCLUSION_STRATEGY } from '../../src/types';
+import {
+  clickExtraButton,
+  flush,
+  openLatestExclusionEntryDialog,
+  pressEnter,
+} from '../testUtils';
 
-/** Lets an awaited save settle. */
-async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
-}
+// The shared mock records `onSelect` without keeping the callback; Obsidian's own `selectSuggestion`, which the folder suggester runs first, calls the callback `onSelect` registered
+Object.assign(AbstractInputSuggest.prototype, {
+  selectSuggestion(this: AbstractInputSuggest, value: unknown, evt: unknown) {
+    vi.mocked(this.onSelect).mock.lastCall?.[0]?.(value, evt);
+  },
+});
 
 interface Harness {
   exclusions: typeof DEFAULT_SETTINGS.exclusions;
@@ -111,7 +115,7 @@ function buildHarness(excludedFiles: string[] = []): Harness {
 }
 
 interface OpenedDialog {
-  modal: AddExcludedFileModal;
+  modal: ExclusionEntryModal;
   inputEl: HTMLInputElement;
   buttonContainer: HTMLElement | null;
   doneButton: HTMLButtonElement;
@@ -136,37 +140,10 @@ function extraButtonIcons(setting: Setting): string[] {
   );
 }
 
-function clickExtraButton(setting: Setting, icon: string): void {
-  const button = setting.components.find(
-    (component) => component.setIcon.mock.calls[0]?.[0] === icon
-  );
-  (button.onClick.mock.calls[0][0] as () => void)();
-}
-
-/** Opens the dialog the most recent `new AddExcludedFileModal` created. */
+/** Opens the dialog the most recent `new ExclusionEntryModal` created. */
 function openLatestDialog(): OpenedDialog {
-  const modal = openedModals[openedModals.length - 1] as AddExcludedFileModal;
-  // The mock leaves the title detached, while Obsidian nests it in the header that phones add their buttons to
-  modal.modalEl.createDiv('modal-header').appendChild(modal.titleEl);
-  // Connected, with the content inside the dialog, so focus can be observed
-  document.body.appendChild(modal.modalEl);
-  modal.modalEl.appendChild(modal.contentEl);
-  AddExcludedFileModal.prototype.onOpen.call(modal);
-  const buttons = modal.modalEl.querySelectorAll<HTMLButtonElement>(
-    '.modal-button-container button'
-  );
-  return {
-    modal,
-    inputEl: modal.contentEl.querySelector('input') as HTMLInputElement,
-    buttonContainer: modal.modalEl.querySelector('.modal-button-container'),
-    doneButton: buttons[0],
-    cancelButton: buttons[1],
-    headerButtons: Array.from(
-      modal.modalEl.querySelectorAll<HTMLElement>(
-        '.modal-header .modal-header-button'
-      )
-    ),
-  };
+  const { inputs, ...dialog } = openLatestExclusionEntryDialog(openedModals);
+  return { ...dialog, inputEl: inputs[0] };
 }
 
 /** Runs the list's add affordance and opens the dialog it creates. */
@@ -179,12 +156,6 @@ function openDialog(harness: Harness): OpenedDialog {
 function openEditDialog(harness: Harness, index: number): OpenedDialog {
   clickExtraButton(renderRow(harness, index), 'lucide-pen-line');
   return openLatestDialog();
-}
-
-function pressEnter(inputEl: HTMLInputElement, isComposing = false): void {
-  inputEl.dispatchEvent(
-    new window.KeyboardEvent('keydown', { key: 'Enter', isComposing })
-  );
 }
 
 describe('Excluded files', () => {
@@ -246,6 +217,20 @@ describe('Excluded files', () => {
       );
     });
 
+    it('tags a regex entry\'s row "Regex", as Obsidian\'s own list does, and no other row', () => {
+      const harness = buildHarness(['Notes/', '/draft-/', '//']);
+
+      const flairs = [0, 1, 2].map((index) =>
+        Array.from(
+          renderRow(harness, index).nameEl.querySelectorAll('.flair.mod-flat'),
+          (flair) => flair.textContent
+        )
+      );
+
+      // `//` is too short to be a regex, as in Obsidian's own list
+      expect(flairs).toEqual([[], ['Regex'], []]);
+    });
+
     it("deletes an entry through its row's Delete and re-renders", async () => {
       const harness = buildHarness(['Notes/', '/draft-/']);
 
@@ -265,9 +250,7 @@ describe('Excluded files', () => {
 
       expect(modal.modalEl.classList.contains('mod-lg')).toBe(true);
       expect(modal.modalEl.classList.contains('mod-form-sheet')).toBe(true);
-      expect(modal.setTitle).toHaveBeenCalledWith(
-        'modals.addExcludedFile.title'
-      );
+      expect(modal.setTitle).toHaveBeenCalledWith('modals.excludedFile.title');
       const field = modal.contentEl.querySelector('p.form-field');
       expect(
         Array.from(field?.children ?? []).map((child) => child.tagName)
@@ -275,7 +258,7 @@ describe('Excluded files', () => {
       expect(inputEl.type).toBe('text');
       expect(inputEl.spellcheck).toBe(false);
       expect(field?.querySelector('.form-field-help')?.textContent).toBe(
-        'modals.addExcludedFile.help'
+        'modals.excludedFile.help'
       );
       const buttons = Array.from(buttonContainer?.children ?? []);
       expect(buttons.map((button) => button.textContent)).toEqual([
@@ -310,7 +293,8 @@ describe('Excluded files', () => {
       );
     });
 
-    it('submits on Enter', async () => {
+    // While suggestions show, Obsidian's keymap takes Enter before the field sees it; the `+ <typed>` row tests below cover that case
+    it('submits on Enter while no suggestions show', async () => {
       const harness = buildHarness();
       const { inputEl } = openDialog(harness);
 
@@ -342,14 +326,73 @@ describe('Excluded files', () => {
 
       expect(displayTooltip).toHaveBeenCalledWith(
         inputEl,
-        'modals.addExcludedFile.emptyFilter',
+        'modals.excludedFile.emptyFilter',
         { classes: ['mod-error'] }
       );
       expect(harness.exclusions.excludedFiles).toEqual([]);
       expect(modal.close).not.toHaveBeenCalled();
     });
 
-    it('does not add a case-insensitive duplicate', async () => {
+    it.each(['/', '//', ' / '])(
+      'treats %j, nothing once its leading slashes go, as an empty filter',
+      async (typed) => {
+        const harness = buildHarness();
+        const { modal, inputEl, doneButton } = openDialog(harness);
+
+        inputEl.value = typed;
+        doneButton.click();
+        await flush();
+
+        expect(displayTooltip).toHaveBeenCalledWith(
+          inputEl,
+          'modals.excludedFile.emptyFilter',
+          { classes: ['mod-error'] }
+        );
+        expect(harness.exclusions.excludedFiles).toEqual([]);
+        expect(modal.close).not.toHaveBeenCalled();
+      }
+    );
+
+    it('adds a plain path without its leading slashes', async () => {
+      const harness = buildHarness();
+      const { inputEl, doneButton } = openDialog(harness);
+
+      inputEl.value = '//Templates';
+      doneButton.click();
+      await flush();
+
+      expect(harness.exclusions.excludedFiles).toEqual(['Templates']);
+    });
+
+    it('keeps the slashes of a regex entry', async () => {
+      const harness = buildHarness();
+      const { inputEl, doneButton } = openDialog(harness);
+
+      inputEl.value = '/Templates/';
+      doneButton.click();
+      await flush();
+
+      expect(harness.exclusions.excludedFiles).toEqual(['/Templates/']);
+    });
+
+    it('checks for duplicates after stripping the leading slashes', async () => {
+      const harness = buildHarness(['Notes']);
+      const { modal, inputEl, doneButton } = openDialog(harness);
+
+      inputEl.value = '/notes';
+      doneButton.click();
+      await flush();
+
+      expect(displayTooltip).toHaveBeenCalledWith(
+        inputEl,
+        'modals.exclusionEntry.duplicate',
+        { classes: ['mod-error'] }
+      );
+      expect(harness.exclusions.excludedFiles).toEqual(['Notes']);
+      expect(modal.close).not.toHaveBeenCalled();
+    });
+
+    it('keeps the dialog open with a tooltip, adding nothing, for a case-insensitive duplicate', async () => {
       const harness = buildHarness(['Notes/']);
       const { modal, inputEl, doneButton } = openDialog(harness);
 
@@ -357,9 +400,45 @@ describe('Excluded files', () => {
       doneButton.click();
       await flush();
 
+      expect(displayTooltip).toHaveBeenCalledWith(
+        inputEl,
+        'modals.exclusionEntry.duplicate',
+        { classes: ['mod-error'] }
+      );
       expect(harness.exclusions.excludedFiles).toEqual(['Notes/']);
       expect(harness.saveSettings).not.toHaveBeenCalled();
-      expect(modal.close).toHaveBeenCalled();
+      expect(modal.close).not.toHaveBeenCalled();
+      expect(harness.update).not.toHaveBeenCalled();
+    });
+
+    it('moves focus to the new row once the list has re-rendered, as Obsidian does after its own dialog', async () => {
+      const harness = buildHarness(['Notes/']);
+      const groupEl = document.body.createDiv('setting-group');
+      const rowsEl = groupEl.createDiv('setting-items');
+      const affordanceEl = groupEl.createDiv();
+      /** A row as Obsidian's list renders one: focusable by script only. */
+      const addRow = (): HTMLElement => {
+        const rowEl = rowsEl.createDiv({
+          cls: 'setting-item',
+          attr: { tabindex: '-1' },
+        });
+        rowEl.scrollIntoView = vi.fn();
+        return rowEl;
+      };
+      addRow();
+      harness.update.mockImplementation(addRow);
+      harness.list.addItem?.action(affordanceEl);
+      const { inputEl, doneButton } = openLatestDialog();
+
+      inputEl.value = 'Archive/';
+      doneButton.click();
+      await flush();
+
+      const newRowEl = rowsEl.children[1] as HTMLElement;
+      expect(document.activeElement).toBe(newRowEl);
+      expect(newRowEl.scrollIntoView).toHaveBeenCalledWith({
+        block: 'nearest',
+      });
     });
 
     it('closes on Cancel without adding', async () => {
@@ -447,7 +526,7 @@ describe('Excluded files', () => {
 
         expect(displayTooltip).toHaveBeenCalledWith(
           inputEl,
-          'modals.addExcludedFile.emptyFilter',
+          'modals.excludedFile.emptyFilter',
           { classes: ['mod-error'] }
         );
         expect(harness.exclusions.excludedFiles).toEqual([]);
@@ -467,14 +546,15 @@ describe('Excluded files', () => {
         );
       }
 
-      it('adds the picked folder as `path/`, even though the suggester rewrites the input without the slash', async () => {
+      it('adds the picked folder as `path/`, the entry the suggester also writes into the field', async () => {
         const harness = buildHarness();
-        const { inputEl } = openDialog(harness);
+        openDialog(harness);
 
         pickFolder('Notes/Work');
         await flush();
 
-        expect(inputEl.value).toBe('Notes/Work');
+        const suggest = folderSuggests[0] as FolderSuggest;
+        expect(suggest.setValue).toHaveBeenCalledWith('Notes/Work/');
         expect(harness.exclusions.excludedFiles).toEqual(['Notes/Work/']);
       });
 
@@ -493,6 +573,57 @@ describe('Excluded files', () => {
         expect(harness.app.vault.getAllFolders).toHaveBeenCalledWith(false);
         expect(suggestions).toEqual([notes]);
       });
+
+      it('adds the typed text, as typed, through the `+ <typed>` row after the matching folders', async () => {
+        const harness = buildHarness();
+        const { inputEl } = openDialog(harness);
+        harness.app.vault.getAllFolders = vi.fn(() => [
+          new TFolder('Notes'),
+          new TFolder('Notes/Work'),
+        ]);
+        const suggest = folderSuggests[0] as FolderSuggest;
+
+        inputEl.value = 'Notes';
+        const suggestions = FolderSuggest.prototype.getSuggestions.call(
+          suggest,
+          inputEl.value
+        );
+        expect(
+          suggestions.map((folder) => (folder === null ? null : folder.path))
+        ).toEqual(['Notes', 'Notes/Work', null]);
+        FolderSuggest.prototype.selectSuggestion.call(
+          suggest,
+          suggestions[suggestions.length - 1],
+          new window.KeyboardEvent('keydown', { key: 'Enter' })
+        );
+        await flush();
+
+        expect(inputEl.value).toBe('Notes');
+        expect(harness.exclusions.excludedFiles).toEqual(['Notes']);
+        expect(harness.update).toHaveBeenCalledTimes(1);
+      });
+
+      it('shows the empty-filter error for a `+ <typed>` row holding only spaces', async () => {
+        const harness = buildHarness();
+        const { modal, inputEl } = openDialog(harness);
+        const suggest = folderSuggests[0] as FolderSuggest;
+
+        inputEl.value = '   ';
+        FolderSuggest.prototype.selectSuggestion.call(
+          suggest,
+          null,
+          new window.KeyboardEvent('keydown', { key: 'Enter' })
+        );
+        await flush();
+
+        expect(displayTooltip).toHaveBeenCalledWith(
+          inputEl,
+          'modals.excludedFile.emptyFilter',
+          { classes: ['mod-error'] }
+        );
+        expect(harness.exclusions.excludedFiles).toEqual([]);
+        expect(modal.close).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -504,7 +635,7 @@ describe('Excluded files', () => {
       );
 
       expect(modal.setTitle).toHaveBeenCalledWith(
-        'modals.addExcludedFile.editTitle'
+        'modals.excludedFile.editTitle'
       );
       expect(inputEl.value).toBe('/draft-/');
     });
@@ -527,6 +658,37 @@ describe('Excluded files', () => {
       expect(harness.update).toHaveBeenCalledTimes(1);
     });
 
+    it('saves an edited plain path without its leading slashes', async () => {
+      const harness = buildHarness(['Notes/', 'Archive/']);
+      const { inputEl, doneButton } = openEditDialog(harness, 1);
+
+      inputEl.value = '/Archive/old';
+      doneButton.click();
+      await flush();
+
+      expect(harness.exclusions.excludedFiles).toEqual([
+        'Notes/',
+        'Archive/old',
+      ]);
+    });
+
+    it('refuses an edit to a lone slash as an empty filter, keeping the original', async () => {
+      const harness = buildHarness(['Notes/', 'Archive/']);
+      const { modal, inputEl, doneButton } = openEditDialog(harness, 1);
+
+      inputEl.value = '/';
+      doneButton.click();
+      await flush();
+
+      expect(displayTooltip).toHaveBeenCalledWith(
+        inputEl,
+        'modals.excludedFile.emptyFilter',
+        { classes: ['mod-error'] }
+      );
+      expect(harness.exclusions.excludedFiles).toEqual(['Notes/', 'Archive/']);
+      expect(modal.close).not.toHaveBeenCalled();
+    });
+
     it('keeps a change of case alone, which is not a duplicate of itself', async () => {
       const harness = buildHarness(['Notes/', 'Archive/']);
       const { inputEl, doneButton } = openEditDialog(harness, 0);
@@ -538,7 +700,7 @@ describe('Excluded files', () => {
       expect(harness.exclusions.excludedFiles).toEqual(['notes/', 'Archive/']);
     });
 
-    it('drops an edit that duplicates another entry and keeps the original', async () => {
+    it('keeps the dialog open with a tooltip, and the original, for an edit that duplicates another entry', async () => {
       const harness = buildHarness(['Notes/', 'Archive/']);
       const { modal, inputEl, doneButton } = openEditDialog(harness, 1);
 
@@ -546,9 +708,14 @@ describe('Excluded files', () => {
       doneButton.click();
       await flush();
 
+      expect(displayTooltip).toHaveBeenCalledWith(
+        inputEl,
+        'modals.exclusionEntry.duplicate',
+        { classes: ['mod-error'] }
+      );
       expect(harness.exclusions.excludedFiles).toEqual(['Notes/', 'Archive/']);
       expect(harness.saveSettings).not.toHaveBeenCalled();
-      expect(modal.close).toHaveBeenCalled();
+      expect(modal.close).not.toHaveBeenCalled();
     });
 
     it('leaves the entry as it was on Cancel', async () => {

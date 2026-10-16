@@ -1,23 +1,24 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { App, TFile, Editor } from '../mockObsidian';
 import { DEFAULT_SETTINGS } from '../../src/constants';
 import { createTestSettings } from '../testUtils';
+import { reverseCharacterReplacements } from '../../src/utils/string-processing';
 
 // Mock the i18n module
 vi.mock('../../src/i18n', () => ({
   t: vi.fn((key: string) => key),
 }));
 
-// Mock the utils module; the disable-property matcher stays real so the palette cases run the canonical rule against their mocked metadata cache.
-vi.mock('../../src/utils', async () => {
-  const actual =
-    await vi.importActual<typeof import('../../src/utils')>('../../src/utils');
-  return {
-    verboseLog: vi.fn(),
-    reverseCharacterReplacements: vi.fn((str: string) => str),
-    hasDisablePropertyInFile: actual.hasDisablePropertyInFile,
-  };
-});
+// Mock the debug log and the filename reversal; the disable-property matcher stays real so the palette cases run the canonical rule against their mocked metadata cache.
+vi.mock('../../src/utils', () => ({
+  verboseLog: vi.fn(),
+}));
+vi.mock('../../src/utils/string-processing', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../../src/utils/string-processing')
+  >()),
+  reverseCharacterReplacements: vi.fn((str: string) => str),
+}));
 
 // Mock the modals module.
 // In vitest v4, mockImplementation for a class mock must use a regular function
@@ -44,13 +45,14 @@ describe('CommandRegistrar', () => {
       renameEngine: {
         processFile: vi.fn().mockResolvedValue(undefined),
       },
-      addSafeInternalLink: vi.fn(),
-      addSafeInternalLinkWithDisplayText: vi.fn(),
-      addInternalLinkWithDisplayTextAndCustomTarget: vi.fn(),
+      linkManager: {
+        addSafeInternalLink: vi.fn(),
+        addSafeInternalLinkWithDisplayText: vi.fn(),
+        addInternalLinkWithDisplayTextAndCustomTarget: vi.fn(),
+      },
       saveSettings: vi.fn().mockResolvedValue(undefined),
       refreshSettingsTab: vi.fn(),
-      disableRenamingForNote: vi.fn().mockResolvedValue(undefined),
-      enableRenamingForNote: vi.fn().mockResolvedValue(undefined),
+      setRenamingDisabledForNote: vi.fn().mockResolvedValue(undefined),
     };
   });
 
@@ -167,7 +169,7 @@ describe('CommandRegistrar', () => {
       expect(command[0].icon).toBe('link');
     });
 
-    it('should call plugin.addSafeInternalLink when link command executed', async () => {
+    it('should hand the command editor to addSafeInternalLink', async () => {
       const { CommandRegistrar } =
         await import('../../src/core/command-registrar');
       const registrar = new CommandRegistrar(mockPlugin);
@@ -178,13 +180,15 @@ describe('CommandRegistrar', () => {
         (call: any[]) => call[0].id === 'add-safe-internal-link'
       );
 
-      // Execute the editorCallback
-      command[0].editorCallback({}, {});
+      const editor = new Editor();
+      command[0].editorCallback(editor, {});
 
-      expect(mockPlugin.addSafeInternalLink).toHaveBeenCalled();
+      expect(mockPlugin.linkManager.addSafeInternalLink).toHaveBeenCalledWith(
+        editor
+      );
     });
 
-    it('should call plugin.addSafeInternalLinkWithDisplayText when command executed', async () => {
+    it('should hand the command editor to addSafeInternalLinkWithDisplayText', async () => {
       const { CommandRegistrar } =
         await import('../../src/core/command-registrar');
       const registrar = new CommandRegistrar(mockPlugin);
@@ -196,12 +200,15 @@ describe('CommandRegistrar', () => {
           call[0].id === 'add-safe-internal-link-with-display-text'
       );
 
-      command[0].editorCallback({}, {});
+      const editor = new Editor();
+      command[0].editorCallback(editor, {});
 
-      expect(mockPlugin.addSafeInternalLinkWithDisplayText).toHaveBeenCalled();
+      expect(
+        mockPlugin.linkManager.addSafeInternalLinkWithDisplayText
+      ).toHaveBeenCalledWith(editor);
     });
 
-    it('should call plugin.addInternalLinkWithDisplayTextAndCustomTarget when command executed', async () => {
+    it('should hand the command editor to addInternalLinkWithDisplayTextAndCustomTarget', async () => {
       const { CommandRegistrar } =
         await import('../../src/core/command-registrar');
       const registrar = new CommandRegistrar(mockPlugin);
@@ -213,11 +220,12 @@ describe('CommandRegistrar', () => {
           call[0].id === 'add-internal-link-with-display-text-and-custom-target'
       );
 
-      command[0].editorCallback({}, {});
+      const editor = new Editor();
+      command[0].editorCallback(editor, {});
 
       expect(
-        mockPlugin.addInternalLinkWithDisplayTextAndCustomTarget
-      ).toHaveBeenCalled();
+        mockPlugin.linkManager.addInternalLinkWithDisplayTextAndCustomTarget
+      ).toHaveBeenCalledWith(editor);
     });
   });
 
@@ -269,12 +277,65 @@ describe('CommandRegistrar', () => {
 
       expect(mockPlugin.renameEngine.processFile).toHaveBeenCalledWith(
         mockFile,
-        true,
-        true,
-        undefined,
-        false,
-        { ignoreFiles: true, ignoreTag: true, ignoreProperty: true },
-        true,
+        {
+          isManualCommand: true,
+          exclusionOverrides: {
+            ignoreExcludedFiles: true,
+            ignoreExcludedTags: true,
+            ignoreExcludedProperties: true,
+          },
+          hasActiveEditor: true,
+          editor: mockEditor,
+        }
+      );
+    });
+
+    // A focused footnote preview is a section embed whose editor holds the footnote alone, which would rename the note after it.
+    it('should pass no editor when the active editor shows one section of the note', async () => {
+      const { CommandRegistrar } =
+        await import('../../src/core/command-registrar');
+      const registrar = new CommandRegistrar(mockPlugin);
+
+      const mockFile = new TFile('test.md');
+      (mockApp.workspace as any).activeEditor = {
+        file: mockFile,
+        editor: new Editor(),
+        subpath: '#[^1]',
+      };
+
+      await registrar.executeRenameCurrentFile();
+
+      expect(mockPlugin.renameEngine.processFile).toHaveBeenCalledWith(
+        mockFile,
+        {
+          isManualCommand: true,
+          exclusionOverrides: {
+            ignoreExcludedFiles: true,
+            ignoreExcludedTags: true,
+            ignoreExcludedProperties: true,
+          },
+          hasActiveEditor: true,
+          editor: undefined,
+        }
+      );
+    });
+
+    it('should pass the editor of an embed showing the whole note', async () => {
+      const { CommandRegistrar } =
+        await import('../../src/core/command-registrar');
+      const registrar = new CommandRegistrar(mockPlugin);
+
+      const mockFile = new TFile('test.md');
+      const mockEditor = new Editor();
+      (mockApp.workspace as any).activeEditor = {
+        file: mockFile,
+        editor: mockEditor,
+        subpath: '',
+      };
+
+      await registrar.executeRenameCurrentFile();
+
+      expect(mockPlugin.renameEngine.processFile.mock.calls[0][1].editor).toBe(
         mockEditor
       );
     });
@@ -314,14 +375,30 @@ describe('CommandRegistrar', () => {
 
       expect(mockPlugin.renameEngine.processFile).toHaveBeenCalledWith(
         mockFile,
-        true,
-        true,
-        undefined,
-        false,
-        undefined,
-        true,
-        mockEditor
+        {
+          isManualCommand: true,
+          hasActiveEditor: true,
+          editor: mockEditor,
+        }
       );
+    });
+
+    it('should pass no editor when the active editor shows one section of the note', async () => {
+      const { CommandRegistrar } =
+        await import('../../src/core/command-registrar');
+      const registrar = new CommandRegistrar(mockPlugin);
+
+      (mockApp.workspace as any).activeEditor = {
+        file: new TFile('test.md'),
+        editor: new Editor(),
+        subpath: '#Heading',
+      };
+
+      await registrar.executeRenameUnlessExcluded();
+
+      expect(
+        mockPlugin.renameEngine.processFile.mock.calls[0][1].editor
+      ).toBeUndefined();
     });
 
     it('should not call processFile when no active file', async () => {
@@ -563,8 +640,92 @@ describe('CommandRegistrar', () => {
       // Execute (not just check)
       command[0].checkCallback(false);
 
-      expect(mockPlugin.disableRenamingForNote).toHaveBeenCalled();
+      expect(mockPlugin.setRenamingDisabledForNote).toHaveBeenCalledWith(
+        mockFile,
+        true
+      );
     });
+
+    it.each(['rename-current-file', 'rename-current-file-unless-excluded'])(
+      '%s passes no editor when the active editor shows one section of the note',
+      async (commandId) => {
+        const { CommandRegistrar } =
+          await import('../../src/core/command-registrar');
+        const registrar = new CommandRegistrar(mockPlugin);
+        (mockApp.workspace as any).activeEditor = {
+          file: new TFile('test.md'),
+          editor: new Editor(),
+          subpath: '#[^1]',
+        };
+
+        registrar.registerCommands();
+        const command = mockPlugin.addCommand.mock.calls.find(
+          (call: any[]) => call[0].id === commandId
+        );
+        command[0].checkCallback(false);
+
+        expect(
+          mockPlugin.renameEngine.processFile.mock.calls[0][1].editor
+        ).toBeUndefined();
+      }
+    );
+
+    it.each(['rename-current-file', 'rename-current-file-unless-excluded'])(
+      '%s is hidden from the palette while no Markdown note is active',
+      async (commandId) => {
+        const { CommandRegistrar } =
+          await import('../../src/core/command-registrar');
+        const registrar = new CommandRegistrar(mockPlugin);
+        (mockApp.workspace as any).activeEditor = {
+          file: new TFile('board.canvas'),
+          editor: new Editor(),
+        };
+
+        registrar.registerCommands();
+        const command = mockPlugin.addCommand.mock.calls.find(
+          (call: any[]) => call[0].id === commandId
+        );
+
+        expect(command[0].checkCallback(true)).toBe(false);
+        expect(command[0].checkCallback(false)).toBe(false);
+        expect(mockPlugin.renameEngine.processFile).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each([
+      [
+        'rename-current-file',
+        {
+          ignoreExcludedFiles: true,
+          ignoreExcludedTags: true,
+          ignoreExcludedProperties: true,
+        },
+      ],
+      ['rename-current-file-unless-excluded', undefined],
+    ])(
+      '%s run from the palette renames the active note with the same exclusions as its ribbon twin',
+      async (commandId, exclusionOverrides) => {
+        const { CommandRegistrar } =
+          await import('../../src/core/command-registrar');
+        const registrar = new CommandRegistrar(mockPlugin);
+        const file = new TFile('test.md');
+        (mockApp.workspace as any).activeEditor = {
+          file,
+          editor: new Editor(),
+        };
+
+        registrar.registerCommands();
+        const command = mockPlugin.addCommand.mock.calls.find(
+          (call: any[]) => call[0].id === commandId
+        );
+        command[0].checkCallback(false);
+
+        const [renamedFile, options] =
+          mockPlugin.renameEngine.processFile.mock.calls[0];
+        expect(renamedFile).toBe(file);
+        expect(options.exclusionOverrides).toEqual(exclusionOverrides);
+      }
+    );
 
     it('enable-renaming command should call plugin method when executed', async () => {
       const { CommandRegistrar } =
@@ -587,7 +748,10 @@ describe('CommandRegistrar', () => {
 
       command[0].checkCallback(false);
 
-      expect(mockPlugin.enableRenamingForNote).toHaveBeenCalled();
+      expect(mockPlugin.setRenamingDisabledForNote).toHaveBeenCalledWith(
+        mockFile,
+        false
+      );
     });
   });
 
@@ -670,6 +834,53 @@ describe('CommandRegistrar', () => {
 
       command[0].editorCheckCallback(false, mockEditor, mockView);
       expect(mockEditor.replaceSelection).toHaveBeenCalled();
+    });
+
+    describe('replacement character conversion', () => {
+      beforeEach(async () => {
+        // The real reversal, so the inserted text shows what a user would get
+        const actual = await vi.importActual<
+          typeof import('../../src/utils/string-processing')
+        >('../../src/utils/string-processing');
+        vi.mocked(reverseCharacterReplacements).mockImplementation(
+          actual.reverseCharacterReplacements
+        );
+      });
+
+      afterEach(() => {
+        // Back to the pass-through the other cases rely on
+        vi.mocked(reverseCharacterReplacements).mockReset();
+      });
+
+      const runInsertFilename = async () => {
+        const { CommandRegistrar } =
+          await import('../../src/core/command-registrar');
+        const registrar = new CommandRegistrar(mockPlugin);
+        const mockEditor = new Editor();
+        const mockView = { file: new TFile('a⧵b․c.md') };
+
+        registrar.registerCommands();
+        const command = mockPlugin.addCommand.mock.calls.find(
+          (call: any[]) => call[0].id === 'insert-filename'
+        );
+        command[0].editorCheckCallback(false, mockEditor, mockView);
+        return mockEditor.replaceSelection;
+      };
+
+      // Title conversion governs title insertion only
+      it('converts with Character replacements on, even with title conversion off', async () => {
+        mockPlugin.settings.characterReplacements.enableForbiddenCharReplacements = true;
+        mockPlugin.settings.core.convertReplacementChars = false;
+
+        expect(await runInsertFilename()).toHaveBeenCalledWith('a\\b.c');
+      });
+
+      it('does not convert with Character replacements off', async () => {
+        mockPlugin.settings.characterReplacements.enableForbiddenCharReplacements = false;
+        mockPlugin.settings.core.convertReplacementChars = true;
+
+        expect(await runInsertFilename()).toHaveBeenCalledWith('a⧵b․c');
+      });
     });
   });
 });

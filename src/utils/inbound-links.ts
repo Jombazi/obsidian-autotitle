@@ -9,7 +9,7 @@ import { App, TFile } from 'obsidian';
 export function isLinkedFromAnyFile(app: App, file: TFile): boolean {
   // The public `resolvedLinks` map rather than `getBacklinksForFile`: a yes-or-no answer needs no link resolution or ordering.
   const { resolvedLinks } = app.metadataCache;
-  // One pass over every source's link map (about 0.2 ms at 3,000 sources), asked whenever no timer is pending for the note, which at Check interval 0 means every keystroke of an unlinked note.
+  // One pass over every source's link map (about 0.2 ms at 3,000 sources); the editor lifecycle caches an unlinked answer until the next metadata `resolve`, so an unlinked note walks about once per autosave rather than per keystroke.
   for (const sourcePath in resolvedLinks) {
     if (resolvedLinks[sourcePath]?.[file.path] !== undefined) {
       return true;

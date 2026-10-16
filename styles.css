@@ -2,8 +2,6 @@
 
 /* ── Modals ── */
 
-/* Modal dialog layout and spacing. */
-
 .flit-link-input-full {
   width: 100%;
   box-sizing: border-box;
@@ -44,11 +42,11 @@
   cursor: not-allowed;
 }
 
-/* Settings import/export: a JSON editor plus a button row. */
+/* ── Settings import and export ── */
 
-/* Wider than the 560px dialog default, which wraps a settings payload into */
-/* noise. Obsidian's own --dialog-max-width still caps this, so the mobile */
-/* safe-area calc it carries there keeps applying. */
+/* Import and export behavior and styles are ported from Notebook Navigator and aim to match it as closely as possible, so users of both plugins get the same familiar experience. */
+
+/* Wider than the 560px dialog default, which wraps a settings payload into noise. Obsidian's own --dialog-max-width still caps this, so the mobile safe-area calc it carries there keeps applying. */
 .flit-settings-transfer {
   width: var(--modal-max-width-narrow, 800px);
 }
@@ -56,87 +54,21 @@
 .flit-settings-transfer-editor {
   width: 100%;
   box-sizing: border-box;
-  /* Roughly twelve lines: enough to read a payload without scrolling, and the */
-  /* handle is there when it is not. */
+  /* Roughly twelve lines: enough to read a payload without scrolling, and the handle is there when it is not. */
   min-height: 16em;
   resize: vertical;
   font-family: var(--font-monospace, monospace);
   font-size: var(--font-ui-smaller, 12px);
 }
 
-/* Raised by the adjacent button instead, so the picker belongs to the modal's */
-/* own document rather than the main window's. */
+/* Raised by the adjacent button instead, so the picker belongs to the modal's own document rather than the main window's. */
 .flit-settings-transfer-file-input {
   display: none;
 }
 
-/* ── Exclusions settings ── */
-
-/* Exclusion list rows. */
-
-/* Qualified with .setting-item so `align-items` outranks Obsidian's
-   `.setting-item { align-items: flex-start }` (0,1,0) outright rather than
-   tying it and depending on stylesheet order. */
-.setting-item.flit-exclusion-item-setting {
-  display: flex;
-  align-items: center;
-}
-
-.flit-exclusion-item-setting .setting-item-info {
-  display: none;
-}
-
-/* `width: 100%` is deliberately absent: Obsidian already sets it at (0,3,0)
-   via `.setting-item:not(:is(.mod-toggle, …)) .setting-item-control`.
-
-   REQUIRES !important on `flex`: phones collapse the control to content width
-   via `.is-phone .modal .setting-group.mod-list .setting-items
-   .setting-item-control` at (0,6,0), stranding ~100px to the right of the
-   delete button. That is right for ordinary list rows (label + chevron) but
-   wrong for ours, which pair a text input with a delete button. Outranking it
-   means chaining five Obsidian classes, which would fail silently if any were
-   renamed. `flex-basis: 0%` also makes the competing `width: auto` moot. */
-.flit-exclusion-item-setting .setting-item-control {
-  flex: 1 !important;
-  max-width: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.flit-exclusion-item-setting .setting-item-control input {
-  flex: 1;
-  min-width: 0;
-  margin: 2px;
-}
-
-.flit-exclusion-item-setting .setting-item-control .clickable-icon {
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-}
-
 /* ── Hidden first line property ── */
 
-/* Property key/value input layout and hidden-property visibility classes. */
-
-.flit-property-container {
-  flex: 1;
-  min-width: 0;
-  width: auto;
-}
-
-/* Qualified with the element type so these outrank Obsidian's
-   `input[type='text']` (0,1,1) rules without needing !important. */
-input.flit-property-key-input,
-input.flit-property-value-input {
-  flex: 1;
-  min-width: 60px;
-}
-
-/* Scoped to the element the class is actually applied to, so it outranks
-   `.metadata-property { display: flex }` (0,1,0) outright rather than relying
-   on stylesheet order — which a theme could otherwise win. */
+/* Scoped to the element the class is actually applied to, so it outranks `.metadata-property { display: flex }` (0,1,0) outright rather than relying on stylesheet order — which a theme could otherwise win. */
 .metadata-property.flit-property-hidden {
   display: none;
 }
@@ -145,11 +77,7 @@ input.flit-property-value-input {
   display: none;
 }
 
-/* REQUIRES !important: Obsidian shows the editor's property container via
-   `.markdown-source-view.is-live-preview.show-properties .metadata-container:not(.mod-error)`,
-   which is (0,5,0). Beating that by specificity means chaining Obsidian's own
-   state classes, so the override would silently fail — leaving the alias
-   property visible — the moment any of them is renamed. */
+/* REQUIRES !important: Obsidian shows the editor's property container via `.markdown-source-view.is-live-preview.show-properties .metadata-container:not(.mod-error)`, which is (0,5,0). Beating that by specificity means chaining Obsidian's own state classes, so the override would silently fail — leaving the first line property visible — the moment any of them is renamed. */
 .metadata-container.flit-container-hidden {
   display: none !important;
 }
@@ -187,29 +115,24 @@ input.flit-property-value-input {
   max-width: 100%;
 }
 
-/* ── Setting icons ── */
-
-/* Colon separator styling. */
-
-.flit-colon-separator {
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
 /* ── Rule summaries ── */
-
-/* Custom replacement rule summaries. */
 
 /* A setting name or description collapses runs of spaces, so a rule such as `a  b` would read as `a b` */
 .flit-rule-text {
   white-space: pre;
 }
 
-/* A list note (the custom replacements rule order, the exclusion lists' caveats) is generated content on the rows container, not a row; see `withListNote` */
-/* The attribute outlives the last row because the container is reused for the empty state, so the note is skipped while that state shows */
-/* Spacing, color and type copy a description-only row in a list box, such as the one on the Character replacements page; a multi-line note breaks at its newlines */
+/* ── Notes ── */
+
+/* A note at the top of a box is generated content on the rows container, not a row: a list note (the custom replacements rule order, the exclusion lists' caveats; see `withListNote`) or a description-only row's note (see `buildDescRow`), whose row hides so keyboard navigation skips it */
+/* The attribute outlives a list's last row because the container is reused for the empty state, so a list note is skipped while that state shows */
+/* A `visible` predicate hides a description-only row with an inline `display: none`, and its note goes with it */
+/* Spacing, color and type copy a row's description, with the row padding of the box it sits in; a multi-line note breaks at its newlines */
 .flit-list-note
-  > .setting-items[data-flit-note]:not(:has(> .mod-empty-state))::before {
+  > .setting-items[data-flit-note]:not(:has(> .mod-empty-state))::before,
+.setting-items[data-flit-note]:has(
+    > .flit-desc-row:not([style*='display: none'])
+  )::before {
   content: attr(data-flit-note);
   display: block;
   white-space: pre-line;
@@ -227,42 +150,36 @@ input.flit-property-value-input {
   content: '';
 }
 
+/* Settings' keyboard navigation steps through shown rows only */
+.setting-item.flit-desc-row {
+  display: none;
+}
+
+/* Outside a list, a row's text stops short of the row's end padding by its info column's end margin */
+.setting-group:not(.mod-list)
+  > .setting-items[data-flit-note]:has(> .flit-desc-row)::before {
+  padding-inline-end: calc(
+    var(--setting-items-padding-x, 20px) + var(--size-4-4)
+  );
+}
+
+/* Obsidian drops that margin in a narrow pane, under the same container query */
+@container (max-width: 400px) {
+  .setting-group:not(.mod-list)
+    > .setting-items[data-flit-note]:has(> .flit-desc-row)::before {
+    padding-inline-end: var(--setting-items-padding-x, 20px);
+  }
+}
+
 /* A regular group spaced vertically like a list box, so its note and rows sit like the list notes and rows beside it; the sides keep the group's own inset */
 .flit-list-spacing > .setting-items > .setting-item {
   padding-top: var(--size-4-2);
   padding-bottom: var(--size-4-2);
 }
 
-/* A note row at the top takes a list note's extra top space */
-.flit-list-spacing > .setting-items > .setting-item:first-child {
-  padding-top: var(--size-4-3);
-}
-
-/* ── Utilities ── */
-
-/* Generic display/gap/margin/padding/width utility classes. */
-
-/* Display utilities */
-.flit-display-flex {
-  display: flex;
-}
-
-/* Gap utilities */
-.flit-gap-10 {
-  gap: 10px;
-}
-
-/* Width utilities */
-.flit-width-100 {
-  width: 100%;
-}
-
-/* Margin utilities */
-.flit-margin-bottom-0 {
-  margin-bottom: 0;
-}
-
-/* Alignment utilities */
-.flit-align-items-center {
-  align-items: center;
+/* Its note sits where a top row's description would: the rows' top space plus a list note's extra, then the description's own top padding */
+.setting-group.flit-list-spacing
+  > .setting-items[data-flit-note]:has(> .flit-desc-row)::before {
+  padding-top: calc(var(--size-4-2) + var(--size-4-1) + var(--size-4-1));
+  padding-bottom: var(--size-4-2);
 }

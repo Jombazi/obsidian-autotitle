@@ -9,33 +9,27 @@ import type {
   SettingDefinitionGroup,
   SettingDefinitionRender,
 } from 'obsidian';
+import type { SettingPath } from '../../src/settings/settings-paths';
 import { App, Setting } from '../mockObsidian';
 
 const { openedModals } = vi.hoisted(() => ({
   openedModals: [] as unknown[],
 }));
 
-// The base Modal mock declares `onOpen` as an instance field, so instances are recorded here and opened through the real prototype
-vi.mock('../../src/modals/entry-edit-modal', async () => {
-  const actual = await vi.importActual<
-    typeof import('../../src/modals/entry-edit-modal')
-  >('../../src/modals/entry-edit-modal');
-  class RecordingEntryEditModal<
-    V extends Record<string, string | boolean>,
-  > extends actual.EntryEditModal<V> {
-    constructor(
-      ...args: ConstructorParameters<typeof actual.EntryEditModal<V>>
-    ) {
-      super(...args);
-      openedModals.push(this);
-    }
-  }
-  return { ...actual, EntryEditModal: RecordingEntryEditModal };
+vi.mock('../../src/modals/entry-edit-modal', async (importOriginal) => {
+  const { withRecordedEntryEditModals } = await import('../testUtils');
+  return withRecordedEntryEditModals(
+    await importOriginal<typeof import('../../src/modals/entry-edit-modal')>(),
+    openedModals
+  );
 });
 
 import { buildCharacterReplacementsPage } from '../../src/settings/character-replacements';
 import { EntryEditModal } from '../../src/modals/entry-edit-modal';
-import type { FirstLineIsTitlePlugin } from '../../src/settings/settings-base';
+import {
+  LIST_NOTE_ATTRIBUTE,
+  type FirstLineIsTitlePlugin,
+} from '../../src/settings/settings-base';
 import { DEFAULT_SETTINGS } from '../../src/constants';
 import type { PluginSettings } from '../../src/types';
 import {
@@ -43,18 +37,14 @@ import {
   PRIMARY_CHAR_KEYS,
   WINDOWS_ANDROID_CHAR_KEYS,
 } from '../../src/types/char-replacement';
-
-/** Lets an awaited save settle. */
-async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
-}
+import { flush } from '../testUtils';
 
 interface Harness {
   settings: PluginSettings;
   update: ReturnType<typeof vi.fn>;
   saveSettings: ReturnType<typeof vi.fn>;
-  allOSes: SettingDefinitionGroup;
-  windowsAndroid: SettingDefinitionGroup;
+  allOSes: SettingDefinitionGroup<SettingPath>;
+  windowsAndroid: SettingDefinitionGroup<SettingPath>;
 }
 
 function buildHarness(): Harness {
@@ -72,7 +62,7 @@ function buildHarness(): Harness {
     update,
   } as unknown as PluginSettingTab);
   const groups = (page.items ?? []).filter(
-    (item): item is SettingDefinitionGroup =>
+    (item): item is SettingDefinitionGroup<SettingPath> =>
       (item as { type?: string }).type === 'list'
   );
   return {
@@ -85,7 +75,9 @@ function buildHarness(): Harness {
 }
 
 /** A group's character rows, past its description row. */
-function charRows(group: SettingDefinitionGroup): SettingDefinitionRender[] {
+function charRows(
+  group: SettingDefinitionGroup<SettingPath>
+): SettingDefinitionRender[] {
   return (group.items ?? []).slice(1) as SettingDefinitionRender[];
 }
 
@@ -154,7 +146,10 @@ describe('Character replacements page', () => {
       const { allOSes, windowsAndroid } = buildHarness();
 
       expect(allOSes.heading).toBe('All OSes');
-      expect(allOSes.items?.[0].desc).toBe(
+      const noteRow = renderRow(allOSes.items?.[0] as SettingDefinitionRender);
+      expect(
+        noteRow.settingEl.parentElement?.getAttribute(LIST_NOTE_ATTRIBUTE)
+      ).toBe(
         'These characters are forbidden in Obsidian file names on every operating system.'
       );
       expect(charRows(allOSes).map((row) => row.name)).toEqual([
@@ -262,9 +257,9 @@ describe('Character replacements page', () => {
       );
     });
 
-    it('reads the stored config even before the section was first enabled', () => {
+    it('reads the stored config even while the section is off', () => {
       const harness = buildHarness();
-      harness.settings.core.hasEnabledForbiddenChars = false;
+      harness.settings.characterReplacements.enableForbiddenCharReplacements = false;
       harness.settings.characterReplacements.charReplacements.colon.enabled = true;
 
       expect(summaryOf(harness, 'colon')).toMatch(/^Replaced with/);
@@ -335,6 +330,21 @@ describe('Character replacements page', () => {
         DEFAULT_SETTINGS.characterReplacements.charReplacements.colon
           .replacement
       );
+    });
+
+    it('strips the Windows and Android set from a replacement in the every-OS group, on this OS too', () => {
+      // The guard re-dispatches `input` through the global Event, which jsdom only delivers when it is jsdom's own
+      vi.stubGlobal('Event', window.Event);
+      try {
+        const dialog = openEditDialog(buildHarness(), 'colon');
+
+        dialog.input.value = 'a?b*c';
+        dialog.input.dispatchEvent(new window.Event('input'));
+
+        expect(dialog.input.value).toBe('abc');
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     it('writes the switch, replacement and trims on Save, then persists and re-renders', async () => {

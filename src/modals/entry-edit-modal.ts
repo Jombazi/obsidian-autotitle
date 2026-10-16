@@ -1,17 +1,18 @@
 import {
   App,
-  ButtonComponent,
   ConfirmationModal,
-  ExtraButtonComponent,
-  Platform,
   Setting,
   TextComponent,
   ToggleComponent,
+  displayTooltip,
 } from 'obsidian';
 import { t } from '../i18n';
-import { addForbiddenCharProtection } from '../settings/settings-base';
+import {
+  addForbiddenCharProtection,
+  addRestoreDefaultButton,
+} from '../settings/settings-base';
 import { addFlitModalClass } from './flit-modal-class';
-import { addFormSheetHeaderButtons } from './form-sheet-header';
+import { FormSheetActions, addFormSheetActions } from './form-sheet-header';
 
 export type EntryFieldValue = string | boolean;
 
@@ -34,8 +35,8 @@ export interface EntryTextField<
   placeholder?: string;
   /** Adds a restore button that writes this value, dimmed while the field already holds it. */
   restoreDefault?: string;
-  /** Strips characters a file name cannot hold as they are typed; `windowsAndroid` forbids that platform's set on every OS. */
-  forbiddenChars?: 'currentOS' | 'windowsAndroid';
+  /** Strips both forbidden character sets as they are typed, on every OS: the engine's policy for titles. Left off a search text, which can match characters a rule sees before forbidden characters are processed. */
+  stripForbiddenChars?: true;
   /** Save stays disabled while this field is empty. */
   required?: boolean;
   onChange?: (value: string, setOther: SetOtherEntryField<K>) => void;
@@ -58,6 +59,8 @@ export interface EntryEditModalOptions<
   fields: EntryField<Extract<keyof V, string>>[];
   /** Prefills the fields; a key with no field reaches `onSave` unchanged. */
   initialValues: V;
+  /** Runs on Save before `onSave`; a message keeps the dialog open and shows as an error tooltip on the first text field. */
+  findError?: (values: V) => string | null;
   /** Runs on Save, or the header's submit button on phones, with every value; Cancel and closing the dialog never call it. */
   onSave: (values: V) => Promise<void>;
   /** On mobile, focuses the first text field as the dialog opens, raising the on-screen keyboard. */
@@ -74,10 +77,11 @@ export class EntryEditModal<
     string,
     (value: EntryFieldValue) => void
   >();
-  private saveButton: ButtonComponent | null = null;
-  /** The header's submit button, which replaces Save and Cancel on phones. */
-  private headerSaveEl: HTMLElement | null = null;
+  /** Disables Save, or on phones the header's submit button that replaces Save and Cancel; set as the dialog opens. */
+  private formSheetActions: FormSheetActions | null = null;
   private hasSaved = false;
+  /** Where a `findError` message shows; set as the dialog opens. */
+  private firstTextInputEl: HTMLInputElement | null = null;
 
   constructor(app: App, options: EntryEditModalOptions<V>) {
     super(app);
@@ -102,34 +106,18 @@ export class EntryEditModal<
       }
     }
 
-    this.headerSaveEl = Platform.isPhone
-      ? addFormSheetHeaderButtons(this, () => {
-          this.save();
-        })
-      : null;
-    if (this.headerSaveEl === null) {
-      this.addButton((btn) => {
-        this.saveButton = btn
-          .setCta()
-          .setButtonText(t('modals.buttons.save'))
-          .onClick(() => this.save());
-      });
-      this.addCancelButton(t('modals.buttons.cancel'));
-    } else {
-      // ConfirmationModal builds the row in its constructor; left empty, it would still leave a margin under the fields
-      this.buttonContainerEl.remove();
-    }
+    const firstTextInputEl = textInputEls[0];
+    this.firstTextInputEl = firstTextInputEl ?? null;
+    this.formSheetActions = addFormSheetActions(this, {
+      submitText: t('modals.buttons.save'),
+      submit: () => this.save(),
+      submitOnEnterEls: textInputEls,
+      mobileFocusEl: this.options.focusFirstTextFieldOnMobile
+        ? firstTextInputEl
+        : undefined,
+    });
     this.syncSaveButton();
 
-    const firstTextInputEl = textInputEls[0];
-    if (
-      firstTextInputEl &&
-      this.options.focusFirstTextFieldOnMobile &&
-      Platform.isMobile
-    ) {
-      // Synchronous because the dialog usually opens from a tap, and only a focus inside that tap's handling lets the on-screen keyboard come up
-      firstTextInputEl.focus({ preventScroll: true });
-    }
     if (firstTextInputEl) {
       // Deferred because Modal.open() focuses the first focusable element (in the character dialog, a toggle where Enter flips the switch) after onOpen; only when focus already landed inside, which Obsidian does only with a physical keyboard, so no on-screen keyboard pops; on the dialog's own window, because a hidden main window throttles its timers
       this.modalEl.win.setTimeout(() => {
@@ -148,23 +136,22 @@ export class EntryEditModal<
     setting: Setting,
     field: EntryTextField<Extract<keyof V, string>>
   ): HTMLInputElement {
-    // Created before the input so it sits to the input's left, as FLIT's other restore buttons do
-    const restoreButton =
-      field.restoreDefault === undefined
+    const { restoreDefault } = field;
+    // Before the input, so the button sits to its left
+    const setRestoreDimmed =
+      restoreDefault === undefined
         ? null
-        : new ExtraButtonComponent(setting.controlEl)
-            .setIcon('rotate-ccw')
-            .setTooltip(t('settings.common.restoreDefault'));
+        : addRestoreDefaultButton(setting.controlEl, () => {
+            text.setValue(restoreDefault);
+            applyValue(restoreDefault);
+            field.onChange?.(restoreDefault, this.setOtherField);
+          });
     const text = new TextComponent(setting.controlEl);
     if (field.placeholder !== undefined) text.setPlaceholder(field.placeholder);
     text.setValue(String(this.values[field.key] ?? ''));
 
-    // Mirrors Obsidian's own restore controls: `aria-disabled` dims the button while the value is already the default, and it stays clickable because restoring then changes nothing
     const syncRestoreButton = () => {
-      restoreButton?.extraSettingsEl.setAttribute(
-        'aria-disabled',
-        String(this.values[field.key] === field.restoreDefault)
-      );
+      setRestoreDimmed?.(this.values[field.key] === restoreDefault);
     };
     const applyValue = (value: string) => {
       this.values[field.key] = value;
@@ -176,30 +163,15 @@ export class EntryEditModal<
       applyValue(value);
       field.onChange?.(value, this.setOtherField);
     });
-    restoreButton?.onClick(() => {
-      const defaultValue = field.restoreDefault ?? '';
-      text.setValue(defaultValue);
-      applyValue(defaultValue);
-      field.onChange?.(defaultValue, this.setOtherField);
-    });
     this.fieldSetters.set(field.key, (value) => {
       text.setValue(String(value));
       applyValue(String(value));
     });
     syncRestoreButton();
 
-    if (field.forbiddenChars !== undefined) {
-      addForbiddenCharProtection(
-        text.inputEl,
-        field.forbiddenChars === 'windowsAndroid'
-      );
+    if (field.stripForbiddenChars) {
+      addForbiddenCharProtection(text.inputEl);
     }
-
-    text.inputEl.addEventListener('keydown', (event: KeyboardEvent) => {
-      if (event.isComposing || event.key !== 'Enter') return;
-      event.preventDefault();
-      this.save();
-    });
     return text.inputEl;
   }
 
@@ -238,20 +210,27 @@ export class EntryEditModal<
   }
 
   private syncSaveButton(): void {
-    const cannotSave = !this.canSave();
-    this.saveButton?.setDisabled(cannotSave);
-    // Obsidian's own form sheets mark a disabled header button with `is-disabled` alone; `aria-disabled` tells assistive tech too
-    this.headerSaveEl?.toggleClass('is-disabled', cannotSave);
-    this.headerSaveEl?.setAttribute('aria-disabled', String(cannotSave));
+    this.formSheetActions?.setSubmitDisabled(!this.canSave());
   }
 
-  /** Returns true to keep the dialog open, the ConfirmationButton contract, when a required field is empty. */
+  /** Returns true to keep the dialog open, the ConfirmationButton contract, when a required field is empty or `findError` reports a message. */
   private save(): true | undefined {
     if (!this.canSave()) return true;
     // A second Enter while the dialog animates closed would otherwise save the entry twice
     if (this.hasSaved) return;
+    const values = { ...this.values } as V;
+    // After the `hasSaved` guard: on Add, `onSave` records the entry at once, so a second Enter while the dialog animates closed would find it and show the error on a closing dialog
+    const error = this.options.findError?.(values) ?? null;
+    if (error !== null) {
+      if (this.firstTextInputEl) {
+        displayTooltip(this.firstTextInputEl, error, {
+          classes: ['mod-error'],
+        });
+      }
+      return true;
+    }
     this.hasSaved = true;
-    void this.options.onSave({ ...this.values } as V);
+    void this.options.onSave(values);
     this.close();
   }
 }

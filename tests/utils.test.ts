@@ -1,18 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { getFrontMatterInfo, parseYaml } from 'obsidian';
+import { verboseLog } from '../src/utils';
 import {
-  verboseLog,
-  isValidHeading,
-  detectOS,
   canModifyFile,
   hasDisablePropertyInFile,
   frontmatterHasDisableProperty,
   disablePropertyIsOff,
+} from '../src/utils/disable-property';
+import {
+  isValidHeading,
   extractTitle,
-  normalizeExclusionLists,
+  isUntitledName,
+} from '../src/utils/title-extraction';
+import { normalizeExclusionLists } from '../src/utils/exclusion-lists';
+import {
   processForbiddenChars,
   reverseCharacterReplacements,
-} from '../src/utils';
+} from '../src/utils/string-processing';
+import { isOnlyFrontmatterChanged } from '../src/utils/editor-checks';
 import {
   createTestSettings,
   createMockFile,
@@ -21,7 +26,7 @@ import {
 } from './testUtils';
 import { PluginSettings } from '../src/types';
 import { CharKey, CharReplacementConfig } from '../src/types/char-replacement';
-import { TFile, App, Platform } from './mockObsidian';
+import { TFile, App } from './mockObsidian';
 
 describe('utils', () => {
   let settings: PluginSettings;
@@ -114,52 +119,91 @@ describe('utils', () => {
     it('should handle headings with numbers', () => {
       expect(isValidHeading('# 123 Numbers')).toBe(true);
     });
+
+    // Reading view renders `#` alone as an empty heading, and skips any spaces and tabs before the marker.
+    it.each(['#', ' # x', '   # Title', ' \t# x', '#\tx'])(
+      'should return true for %j, which Reading view renders as a heading',
+      (line) => {
+        expect(isValidHeading(line)).toBe(true);
+      }
+    );
+
+    it.each(['    # x', '\t# x'])(
+      'should return false for %j, which is indented code',
+      (line) => {
+        expect(isValidHeading(line)).toBe(false);
+      }
+    );
   });
 
-  describe('detectOS', () => {
-    it('should detect macOS', () => {
-      Platform.isMacOS = true;
-      Platform.isWin = false;
-
-      expect(detectOS()).toBe('macOS');
+  describe('isOnlyFrontmatterChanged', () => {
+    beforeEach(() => {
+      vi.mocked(getFrontMatterInfo).mockImplementation(
+        splitFrontMatter as unknown as typeof getFrontMatterInfo
+      );
     });
 
-    it('should detect iOS', () => {
-      Platform.isMacOS = false;
-      Platform.isIosApp = true;
-      Platform.isWin = false;
-
-      expect(detectOS()).toBe('macOS');
+    afterEach(() => {
+      vi.mocked(getFrontMatterInfo).mockReset();
     });
 
-    it('should detect Windows', () => {
-      Platform.isMacOS = false;
-      Platform.isIosApp = false;
-      Platform.isWin = true;
-
-      expect(detectOS()).toBe('Windows');
+    it('should report a change confined to the properties block', () => {
+      expect(
+        isOnlyFrontmatterChanged(
+          '---\nstatus: done\n---\nTitle\nBody',
+          '---\nstatus: draft\n---\nTitle\nBody'
+        )
+      ).toBe(true);
     });
 
-    it('should default to Linux', () => {
-      Platform.isMacOS = false;
-      Platform.isIosApp = false;
-      Platform.isWin = false;
-      Platform.isLinux = true;
-
-      expect(detectOS()).toBe('Linux');
+    it('should report a body change as more than the properties', () => {
+      expect(
+        isOnlyFrontmatterChanged(
+          '---\nstatus: draft\n---\nNew title\nBody',
+          '---\nstatus: draft\n---\nTitle\nBody'
+        )
+      ).toBe(false);
     });
 
-    it('should detect Android as Linux', () => {
-      Platform.isMacOS = false;
-      Platform.isIosApp = false;
-      Platform.isWin = false;
-      Platform.isAndroidApp = true;
+    it('should report a properties block added above an unchanged body', () => {
+      expect(
+        isOnlyFrontmatterChanged('---\nstatus: draft\n---\nTitle', 'Title')
+      ).toBe(true);
+    });
 
-      expect(detectOS()).toBe('Linux');
+    it('should compare whole notes without a properties block', () => {
+      expect(isOnlyFrontmatterChanged('Title', 'Title')).toBe(true);
+      expect(isOnlyFrontmatterChanged('Title 2', 'Title')).toBe(false);
+    });
+  });
+
+  describe('isUntitledName', () => {
+    it.each(['Untitled', 'Untitled 2', 'Untitled 10', 'Untitled  2'])(
+      'should count %j as untitled',
+      (name) => {
+        expect(isUntitledName(name)).toBe(true);
+      }
+    );
+
+    it.each([
+      'Untitled 0',
+      'Untitled 01',
+      'Untitled2',
+      'Untitled note',
+      'My note',
+    ])('should not count %j as untitled', (name) => {
+      expect(isUntitledName(name)).toBe(false);
     });
   });
 
   describe('hasDisablePropertyInFile', () => {
+    const disableSettings = (key: string, value: string): PluginSettings => {
+      const keyedSettings = createTestSettings();
+      keyedSettings.exclusions.disableRenamingKey = key;
+      keyedSettings.exclusions.disableRenamingValue = value;
+      return keyedSettings;
+    };
+
     it('should return true when file has matching disable property', async () => {
       const file = createMockFile('test.md');
       app.metadataCache.getFileCache = vi.fn().mockReturnValue({
@@ -169,8 +213,7 @@ describe('utils', () => {
       const result = await hasDisablePropertyInFile(
         file,
         app,
-        'no rename',
-        'true'
+        disableSettings('no rename', 'true')
       );
       expect(result).toBe(true);
     });
@@ -184,8 +227,7 @@ describe('utils', () => {
       const result = await hasDisablePropertyInFile(
         file,
         app,
-        'no rename',
-        'true'
+        disableSettings('no rename', 'true')
       );
       expect(result).toBe(false);
     });
@@ -197,8 +239,7 @@ describe('utils', () => {
       const result = await hasDisablePropertyInFile(
         file,
         app,
-        'no rename',
-        'true'
+        disableSettings('no rename', 'true')
       );
       expect(result).toBe(false);
     });
@@ -212,8 +253,7 @@ describe('utils', () => {
       const result = await hasDisablePropertyInFile(
         file,
         app,
-        'no rename',
-        'true'
+        disableSettings('no rename', 'true')
       );
       expect(result).toBe(false);
     });
@@ -224,7 +264,11 @@ describe('utils', () => {
         frontmatter: { tags: ['important', 'draft'] },
       });
 
-      const result = await hasDisablePropertyInFile(file, app, 'tags', 'draft');
+      const result = await hasDisablePropertyInFile(
+        file,
+        app,
+        disableSettings('tags', 'draft')
+      );
       expect(result).toBe(true);
     });
 
@@ -237,8 +281,7 @@ describe('utils', () => {
       const result = await hasDisablePropertyInFile(
         file,
         app,
-        'status',
-        'disabled'
+        disableSettings('status', 'disabled')
       );
       expect(result).toBe(true);
     });
@@ -252,8 +295,7 @@ describe('utils', () => {
       const result = await hasDisablePropertyInFile(
         file,
         app,
-        'disabled',
-        'true'
+        disableSettings('disabled', 'true')
       );
       expect(result).toBe(true);
     });
@@ -264,7 +306,11 @@ describe('utils', () => {
         frontmatter: { count: 5 },
       });
 
-      const result = await hasDisablePropertyInFile(file, app, 'count', '5');
+      const result = await hasDisablePropertyInFile(
+        file,
+        app,
+        disableSettings('count', '5')
+      );
       expect(result).toBe(true);
     });
 
@@ -277,8 +323,7 @@ describe('utils', () => {
       const result = await hasDisablePropertyInFile(
         file,
         app,
-        'status',
-        'published'
+        disableSettings('status', 'published')
       );
       expect(result).toBe(false);
     });
@@ -292,8 +337,7 @@ describe('utils', () => {
       const result = await hasDisablePropertyInFile(
         file,
         app,
-        'no rename',
-        'true'
+        disableSettings('no rename', 'true')
       );
       expect(result).toBe(false);
     });
@@ -468,10 +512,11 @@ describe('utils', () => {
     });
 
     it('should allow modification for valid file with manual command', async () => {
-      const result = await canModifyFile(file, app, 'no rename', 'true', true);
+      const result = await canModifyFile(file, app, settings, {
+        isManualCommand: true,
+      });
 
-      expect(result.canModify).toBe(true);
-      expect(result.reason).toBeUndefined();
+      expect(result).toEqual({ canModify: true });
     });
 
     it('should block modification when disable property is present', async () => {
@@ -479,19 +524,26 @@ describe('utils', () => {
         frontmatter: { 'no rename': 'true' },
       });
 
-      const result = await canModifyFile(file, app, 'no rename', 'true', true);
+      const result = await canModifyFile(file, app, settings, {
+        isManualCommand: true,
+      });
 
       expect(result.canModify).toBe(false);
-      expect(result.reason).toBe('disable property present');
+      expect(result).toEqual({ canModify: false, reason: 'disable-property' });
     });
 
     it('should block automatic modification when file not open in editor', async () => {
       app.workspace.getLeavesOfType = vi.fn().mockReturnValue([]);
 
-      const result = await canModifyFile(file, app, 'no rename', 'true', false);
+      const result = await canModifyFile(file, app, settings, {
+        isManualCommand: false,
+      });
 
       expect(result.canModify).toBe(false);
-      expect(result.reason).toBe('file not open in editor');
+      expect(result).toEqual({
+        canModify: false,
+        reason: 'not-open-in-editor',
+      });
     });
 
     it('should allow automatic modification when file is open in editor', async () => {
@@ -502,42 +554,41 @@ describe('utils', () => {
       };
       app.workspace.getLeavesOfType = vi.fn().mockReturnValue([mockLeaf]);
 
-      const result = await canModifyFile(file, app, 'no rename', 'true', false);
+      const result = await canModifyFile(file, app, settings, {
+        isManualCommand: false,
+      });
 
       expect(result.canModify).toBe(true);
     });
 
     it('should respect hasActiveEditor parameter when provided', async () => {
-      const result = await canModifyFile(
-        file,
-        app,
-        'no rename',
-        'true',
-        false,
-        true // hasActiveEditor = true
-      );
+      const result = await canModifyFile(file, app, settings, {
+        isManualCommand: false,
+        hasActiveEditor: true,
+      });
 
       expect(result.canModify).toBe(true);
     });
 
     it('should block when hasActiveEditor is false', async () => {
-      const result = await canModifyFile(
-        file,
-        app,
-        'no rename',
-        'true',
-        false,
-        false // hasActiveEditor = false
-      );
+      const result = await canModifyFile(file, app, settings, {
+        isManualCommand: false,
+        hasActiveEditor: false,
+      });
 
       expect(result.canModify).toBe(false);
-      expect(result.reason).toBe('file not open in editor');
+      expect(result).toEqual({
+        canModify: false,
+        reason: 'not-open-in-editor',
+      });
     });
 
     it('should allow manual command even when file not open', async () => {
       app.workspace.getLeavesOfType = vi.fn().mockReturnValue([]);
 
-      const result = await canModifyFile(file, app, 'no rename', 'true', true);
+      const result = await canModifyFile(file, app, settings, {
+        isManualCommand: true,
+      });
 
       expect(result.canModify).toBe(true);
     });
@@ -548,7 +599,7 @@ describe('utils', () => {
       let yamlFixtures: Map<string, unknown>;
 
       const checkWithContent = (content?: string) =>
-        canModifyFile(file, app, 'no rename', 'true', true, undefined, content);
+        canModifyFile(file, app, settings, { isManualCommand: true, content });
 
       const mockCachedDisableValue = (value: boolean) => {
         app.metadataCache.getFileCache = vi.fn().mockReturnValue({
@@ -583,7 +634,10 @@ describe('utils', () => {
         const result = checkWithContent('---\nno rename: true\n---\nTitle');
 
         expect(result.canModify).toBe(false);
-        expect(result.reason).toBe('disable property present');
+        expect(result).toEqual({
+          canModify: false,
+          reason: 'disable-property',
+        });
       });
 
       it('should allow when the content turns the property off before the cache does', () => {
@@ -595,13 +649,16 @@ describe('utils', () => {
       });
 
       it('should fall back to the cache when the content has no frontmatter', () => {
-        // rename-engine passes only the footnote text when a footnote definition is edited
+        // Text with no properties block says nothing about the property, so the cache decides
         mockCachedDisableValue(true);
 
         const result = checkWithContent('[^1]: A footnote definition');
 
         expect(result.canModify).toBe(false);
-        expect(result.reason).toBe('disable property present');
+        expect(result).toEqual({
+          canModify: false,
+          reason: 'disable-property',
+        });
       });
 
       it('should fall back to the cache when the content frontmatter is malformed', () => {
@@ -610,7 +667,10 @@ describe('utils', () => {
         const result = checkWithContent('---\nno rename: [tru\n---\nTitle');
 
         expect(result.canModify).toBe(false);
-        expect(result.reason).toBe('disable property present');
+        expect(result).toEqual({
+          canModify: false,
+          reason: 'disable-property',
+        });
       });
 
       it('should let the cache decide when no content is passed', () => {
@@ -638,16 +698,17 @@ describe('utils', () => {
         expect(extractTitle('> [!note] My Title', settings)).toBe('My Title');
       });
 
-      it('should handle folded callout with no title', () => {
-        expect(extractTitle('> [!note]-', settings)).toBe('Untitled');
+      // A callout with no title shows Obsidian's default title, made from its type (app.js 1.14.4, measured); fold markers do not change it.
+      it('should give a folded callout with no title its default title', () => {
+        expect(extractTitle('> [!note]-', settings)).toBe('Note');
       });
 
-      it('should handle expanded callout with no title', () => {
-        expect(extractTitle('> [!note]+', settings)).toBe('Untitled');
+      it('should give an expanded callout with no title its default title', () => {
+        expect(extractTitle('> [!note]+', settings)).toBe('Note');
       });
 
-      it('should handle callout with trailing space only', () => {
-        expect(extractTitle('> [!note]+ ', settings)).toBe('Untitled');
+      it('should give a callout with trailing space only its default title', () => {
+        expect(extractTitle('> [!note]+ ', settings)).toBe('Note');
       });
 
       it('should handle folded callout with title', () => {
@@ -667,8 +728,36 @@ describe('utils', () => {
         expect(extractTitle('> [!note] + hello', settings)).toBe('hello');
       });
 
-      it('should handle callout with no fold indicator and no title', () => {
-        expect(extractTitle('> [!warning]', settings)).toBe('Untitled');
+      it('should give a callout with no fold indicator and no title its default title', () => {
+        expect(extractTitle('> [!warning]', settings)).toBe('Warning');
+      });
+
+      it.each([
+        { line: '> [!NOTE]', title: 'Note' },
+        { line: '> [!my-type]', title: 'My type' },
+        { line: '> [!my_type]', title: 'My_type' },
+        { line: '> [!note|meta]', title: 'Note' },
+        { line: '> [!my  type]', title: 'My type' },
+        { line: '>[!note]', title: 'Note' },
+      ])('should title $line after its type: $title', ({ line, title }) => {
+        expect(extractTitle(line, settings)).toBe(title);
+      });
+
+      it('should keep the default title as typed, reading no markup in it', () => {
+        expect(extractTitle('> [!a*b*]', settings)).toBe('A*b*');
+      });
+
+      it('should apply title case to the default title', () => {
+        settings.core.titleCase = 'uppercase';
+        expect(extractTitle('> [!note]', settings)).toBe('NOTE');
+      });
+
+      it('should read a marker two spaces after > as a plain quote', () => {
+        expect(extractTitle('>  [!note] t', settings)).toBe('[!note] t');
+      });
+
+      it('should read an empty type as a plain quote', () => {
+        expect(extractTitle('> [!]', settings)).toBe('[!]');
       });
     });
 
@@ -811,9 +900,9 @@ describe('utils', () => {
         expect(extractTitle('\t- item', settings)).toBe('- item');
       });
 
-      it('should treat space+tab indent as code block (no strip)', () => {
-        // Space (col 1) + tab (expands to col 4) = 4 visual spaces = code block
-        expect(extractTitle(' \t- item', settings)).toBe('- item');
+      // Remark's indented code counts only an exact leading tab or four spaces, not tab stops, and the list tokenizer skips any spaces and tabs before its marker.
+      it('should treat space+tab indent as a list item', () => {
+        expect(extractTitle(' \t- item', settings)).toBe('item');
       });
 
       it('should treat tab-indented task list as code block (no strip)', () => {
@@ -1385,11 +1474,275 @@ describe('utils', () => {
         { line: 'x <b>a &amp; b</b>', readingView: 'x a & b' },
       ])('inline HTML: $line renders $readingView', expectReadingView);
 
-      // Open divergences: link destinations are not ported and unpaired HTML tags are not unwrapped, so these still render differently; a passing row here means the port caught up.
-      it.fails.each([
+      it.each([
         { line: '[a](x*y) *z*', readingView: 'a z' },
+        {
+          line: '[Foo (bar)](Foo%20(bar).md) tail',
+          readingView: 'Foo (bar) tail',
+        },
+        { line: '[a](<Foo (bar).md>) tail', readingView: 'a tail' },
+        { line: '[a [b] c](x) tail', readingView: 'a [b] c tail' },
+        { line: '[a]() tail', readingView: 'a tail' },
+        { line: '[](x) tail', readingView: 'tail' },
+        { line: '[a](<b>)', readingView: 'a' },
+        { line: '[a](b "t")', readingView: 'a' },
+        { line: '[a](b\\ c) tail', readingView: 'a tail' },
+        { line: '[a](<b\\>c>) tail', readingView: '[a](<b>c>) tail' },
+        { line: '[a] (x) tail', readingView: '[a] (x) tail' },
+        {
+          line: '[a [b] https://x.com/__a__]',
+          readingView: '[a [b] https://x.com/__a__]',
+        },
+      ])('links: $line renders $readingView', expectReadingView);
+
+      it.each([
         { line: '<foo bar>', readingView: '' },
-      ])('not yet: $line renders $readingView', expectReadingView);
+        { line: '<foo bar> text', readingView: 'text' },
+        { line: 'a<br>b', readingView: 'ab' },
+        { line: '<B>x</b>', readingView: 'x' },
+        { line: 'a <script>x</script> y', readingView: 'a  y' },
+        { line: '<script>x</script> y', readingView: 'y' },
+        { line: 'a <style>x</style> y', readingView: 'a  y' },
+        { line: 'a <template>x</template> y', readingView: 'a  y' },
+        { line: '<kbd>x</kbd> y', readingView: 'x y' },
+      ])(
+        'unpaired and hiding HTML: $line renders $readingView',
+        expectReadingView
+      );
+
+      // A line that opens an HTML block reaches the browser as typed, so no Markdown is parsed on it and only its HTML and character references are read
+      it.each([
+        { line: '<div>**a** `b` [c](d) e', readingView: '**a** `b` [c](d) e' },
+        {
+          line: '<div>[[Note A]] #tag ==hi== ~~s~~ *i* e',
+          readingView: '[[Note A]] #tag ==hi== ~~s~~ *i* e',
+        },
+        {
+          line: '<div>\\*x\\* &amp; &lt;y&gt; z',
+          readingView: '\\*x\\* & <y> z',
+        },
+        { line: '<div>a %%c%% b', readingView: 'a %%c%% b' },
+        { line: '<div>$x^2$ after', readingView: '$x^2$ after' },
+        { line: '<div>a ^[fn] b [^1] c', readingView: 'a ^[fn] b [^1] c' },
+        { line: '<div>![[pic.png]] after', readingView: '![[pic.png]] after' },
+        { line: '<div>text ^abc', readingView: 'text ^abc' },
+        { line: '<div><b>bold</b> <span>s</span> t', readingView: 'bold s t' },
+        { line: '<div>a &#42;b&#42; c', readingView: 'a *b* c' },
+        { line: '<div>a &ampx@y.com', readingView: 'a &x@y.com' },
+        { line: '<div>a<script>h</script> b', readingView: 'a b' },
+        { line: '<DIV>**a** b', readingView: '**a** b' },
+        { line: '</div>**a** b', readingView: '**a** b' },
+        { line: '<!-- c -->**a** b', readingView: '**a** b' },
+        { line: '- <div>**a** b ^id', readingView: '**a** b ^id' },
+        { line: '> <div>**a** b', readingView: '**a** b' },
+        { line: '1. <div>**a** b', readingView: '**a** b' },
+        { line: '> [!note] <div>**a** b', readingView: '**a** b' },
+        { line: '# <div>**a** b', readingView: 'a b' },
+        { line: '<span>**a** b', readingView: 'a b' },
+        { line: '<b>**a**</b> c', readingView: 'a c' },
+      ])('HTML blocks: $line renders $readingView', expectReadingView);
+
+      // A line that opens an HTML block reaches the browser as typed, so a hidden element ends at its first close tag; in a paragraph or heading Reading view renders the Markdown first and the browser then hides from the open tag to the first close tag in the HTML that reached it, so one inside a code span, which remark escapes, ends nothing and the element runs on to the next one
+      it.each([
+        { line: '<script>a `</script>` b</script> c', readingView: '` b c' },
+        { line: '<SCRIPT>a `</SCRIPT>` b</SCRIPT> c', readingView: '` b c' },
+        { line: '- <script>a `</script>` b</script> c', readingView: '` b c' },
+        { line: '1. <script>a `</script>` b</script> c', readingView: '` b c' },
+        {
+          line: '- [ ] <script>a `</script>` b</script> c',
+          readingView: '` b c',
+        },
+        { line: '> <script>a `</script>` b</script> c', readingView: '` b c' },
+        {
+          line: '> - <script>a `</script>` b</script> c',
+          readingView: '` b c',
+        },
+        {
+          line: '> [!note] <script>a `</script>` b</script> c',
+          readingView: '` b c',
+        },
+        {
+          line: '<div><template>a `</template>` b</template> c',
+          readingView: '` b c',
+        },
+        { line: '<p><script>a `</script>` b</script> c', readingView: '` b c' },
+        { line: '# <script>a `</script>` b</script> c', readingView: 'c' },
+        { line: '- # <script>a `</script>` b</script> c', readingView: 'c' },
+        { line: 'x <script>a `</script>` b</script> c', readingView: 'x c' },
+        {
+          line: '> [!note] x <script>a `</script>` b</script> c',
+          readingView: 'x c',
+        },
+        { line: '<span><script>a `</script>` b</script> c', readingView: 'c' },
+        { line: '<template>a `</template>` b</template> c', readingView: 'c' },
+        { line: '<xmp>a `</xmp>` b</xmp> c', readingView: 'c' },
+        { line: '<noscript>a `</noscript>` b</noscript> c', readingView: 'c' },
+        { line: 'x <script>a \\</script> b</script> c', readingView: 'x c' },
+        { line: 'x <script>a $</script>$ b</script> c', readingView: 'x c' },
+        {
+          line: 'x <script>a **</script>** b</script> c',
+          readingView: 'x b c',
+        },
+        { line: 'x <script>a *</script>* b</script> c', readingView: 'x b c' },
+        {
+          line: 'x <script>a ==</script>== b</script> c',
+          readingView: 'x b c',
+        },
+        {
+          line: 'x <script>a ~~</script>~~ b</script> c',
+          readingView: 'x b c',
+        },
+        {
+          line: 'x <script>a [</script>](u) b</script> c',
+          readingView: 'x b c',
+        },
+        { line: 'x <style>a **</style>** b</style> c', readingView: 'x b c' },
+        {
+          line: 'x <script>a **b</script> c** d</script> e',
+          readingView: 'x c d e',
+        },
+        {
+          line: 'x <script>a [</script>] b</script> c',
+          readingView: 'x ] b c',
+        },
+        { line: 'x <script>a [l](</script>) b</script> c', readingView: 'x c' },
+        {
+          line: 'x <script>a <https://e.com/</script>> b</script> c',
+          readingView: 'x c',
+        },
+        { line: 'x <script>a %%</script>%% b</script> c', readingView: 'x c' },
+        {
+          line: 'x <script>a <a href="</script>">l</a> b</script> c',
+          readingView: 'x ">l b c',
+        },
+        {
+          line: 'x <script>a <!-- </script> --> b</script> c',
+          readingView: 'x --> b c',
+        },
+        {
+          line: 'x <script>a ![</script>](p.png) b</script> c',
+          readingView: 'x "> b c',
+        },
+        {
+          line: 'x <style>a <!-- </script> </style> --> b</style> c',
+          readingView: 'x --> b c',
+        },
+        {
+          line: 'x <style>a ![</script></style>](p.png) b</style> c',
+          readingView: 'x "> b c',
+        },
+        {
+          line: 'x <script>a ![&lt;/script>](p.png) b</script> c',
+          readingView: 'x "> b c',
+        },
+        {
+          line: 'x <script>a ![</script>a&amp;b](p.png) b</script> c',
+          readingView: 'x a&b"> b c',
+        },
+        { line: 'x <a href="</script>">l</a> y', readingView: 'x l y' },
+        { line: 'x <!-- </script> --> y', readingView: 'x y' },
+        { line: 'x <iframe>a</iframe> b', readingView: 'x b' },
+        { line: 'x <noembed>a</noembed> b', readingView: 'x b' },
+        { line: 'x <noframes>a</noframes> b', readingView: 'x b' },
+        { line: '<iframe src="x">a</iframe> b', readingView: 'b' },
+        { line: 'x <plaintext>a b', readingView: 'x' },
+        { line: 'x <plaintext>a</plaintext> b', readingView: 'x' },
+        { line: '<plaintext>a b', readingView: 'Untitled' },
+        {
+          line: 'x <script>a <!-- </script> <style> --> b</script> c',
+          readingView: 'x',
+        },
+        {
+          line: 'x <script>a <!-- </script> <span hidden> --> b</span> c',
+          readingView: 'x c',
+        },
+        { line: 'x <video>a</video> b', readingView: 'x b' },
+        { line: 'x <span hidden>a</span> b', readingView: 'x b' },
+        { line: 'x <details>a</details> b', readingView: 'x b' },
+        {
+          line: 'x <svg><text><foreignObject>a</foreignObject></text></svg> b',
+          readingView: 'x b',
+        },
+        { line: 'x <svg><desc>a</svg> b', readingView: 'x b' },
+        { line: 'x <text>a</text> b', readingView: 'x b' },
+        { line: 'x <span style="display:none">a</span> b', readingView: 'x b' },
+        { line: 'Plan <span hidden>draft</span> v2', readingView: 'Plan v2' },
+        {
+          line: 'Plan <details><summary>Summary</summary>body</details> end',
+          readingView: 'Plan Summary end',
+        },
+        { line: 'x **a <video>b** c</video> d', readingView: 'x a c d' },
+        {
+          line: '# x ~~a <span hidden>b <div>c~~ d</div> e</span> f',
+          readingView: 'x a f',
+        },
+        {
+          line: '# x ==a <span hidden>b <div>c== d</div> e</span> f',
+          readingView: 'x a f',
+        },
+        { line: '# x <video>a</video> b', readingView: 'x b' },
+        { line: '- x <span hidden>a</span> b', readingView: 'x b' },
+        { line: '> [!note] t <video>a</video> b', readingView: 't b' },
+        { line: '<video>a</video> b', readingView: 'b' },
+        { line: '<details>a</details> b', readingView: 'b' },
+        { line: '<div hidden>a</div> b', readingView: 'b' },
+        { line: '<span hidden>a</span> b', readingView: 'b' },
+        { line: '<details open>a</details> b', readingView: 'a b' },
+      ])(
+        'hidden HTML elements: $line renders $readingView',
+        ({ line, readingView }) => {
+          expect(extractTitle(line, defaults).replace(/\s+/g, ' ').trim()).toBe(
+            readingView
+          );
+        }
+      );
+
+      it.each([
+        { line: 'text[^1]', readingView: 'text' },
+        { line: 'a [^1]: b', readingView: 'a : b' },
+        { line: '^[note] text', readingView: ' text' },
+        { line: '[^a b] text', readingView: '[^a b] text' },
+      ])('footnotes: $line renders $readingView', expectReadingView);
+
+      it.each([
+        { line: '#tag', readingView: '#tag' },
+        { line: '#123', readingView: '#123' },
+        { line: '#a_b_ text', readingView: '#a_b_ text' },
+        { line: 'x #a_b_', readingView: 'x #a_b_' },
+        { line: 'a#b_c_', readingView: 'a#bc' },
+        { line: '*a*#b_c_', readingView: 'a#b_c_' },
+        { line: '#тег_a_', readingView: '#тег_a_' },
+        { line: '#a-b_c_', readingView: '#a-b_c_' },
+        { line: '#a*b*c', readingView: '#abc' },
+        { line: '#a.b_c_', readingView: '#a.bc' },
+        { line: '(#b_c_)', readingView: '(#bc)' },
+        { line: 'x #123_a_', readingView: 'x #123_a_' },
+        { line: '`x` #a_b_', readingView: 'x #a_b_' },
+      ])('tags: $line renders $readingView', expectReadingView);
+
+      // Reading view shows a missing embed's error text and a present one's picture, so an embed is titled after its alt text or target, as FLIT titles every embed; Obsidian itself reads a size alias as no alt text.
+      it.each([
+        { line: '![alt](img.png) tail', title: 'alt tail' },
+        { line: '![[photo.jpg|400]]', title: 'photo.jpg' },
+        { line: '![[note|300x200]]', title: 'note' },
+        { line: '[[note|400]]', title: '400' },
+      ])('embeds: $line is titled $title', ({ line, title }) => {
+        expect(extractTitle(line, defaults)).toBe(title);
+      });
+
+      describe('with Markdown link stripping off', () => {
+        const linksKept = createTestSettings();
+        linksKept.markupStripping.stripMarkupSettings.markdownLinks = false;
+
+        it.each([
+          { line: '[a](x*y*z)', title: '[a](x*y*z)' },
+          { line: '[*a*](x)', title: '[*a*](x)' },
+          { line: '[](x) tail', title: '[](x) tail' },
+          { line: '[](x)', title: '[](x)' },
+        ])('$line keeps the link as typed', ({ line, title }) => {
+          expect(extractTitle(line, linksKept)).toBe(title);
+        });
+      });
     });
   });
 
@@ -1514,6 +1867,51 @@ describe('utils', () => {
         expect(settings.exclusions.excludedTags).toEqual(['work', 'project']);
       });
 
+      it('should treat a tag written with and without its "#" as one entry', () => {
+        settings.exclusions.excludedTags = ['#project', 'work', 'Project'];
+
+        expect(normalizeExclusionLists(settings)).toBe(true);
+        expect(settings.exclusions.excludedTags).toEqual(['work', 'Project']);
+      });
+
+      it('should drop a bare "#" tag entry, which matches no tag', () => {
+        settings.exclusions.excludedTags = ['#', 'work'];
+
+        expect(normalizeExclusionLists(settings)).toBe(true);
+        expect(settings.exclusions.excludedTags).toEqual(['work']);
+      });
+
+      it('should keep tag patterns that differ only by case, since case changes their meaning', () => {
+        settings.exclusions.excludedTags = ['/\\d/', '/\\D/', '/\\d/'];
+
+        expect(normalizeExclusionLists(settings)).toBe(true);
+        expect(settings.exclusions.excludedTags).toEqual(['/\\D/', '/\\d/']);
+      });
+
+      // Obsidian accepts a tag written `#/x/`, which the tag menu can add beside the pattern `/x/`
+      it('should keep a tag pattern beside a tag written like it', () => {
+        settings.exclusions.excludedTags = ['/x/', '#/x/'];
+
+        expect(normalizeExclusionLists(settings)).toBe(false);
+        expect(settings.exclusions.excludedTags).toEqual(['/x/', '#/x/']);
+      });
+
+      it('should fold case on a plain property side but not on a pattern side', () => {
+        settings.exclusions.excludedProperties = [
+          { key: '/A/', value: 'x' },
+          { key: '/a/', value: 'x' },
+          { key: 'status', value: '/Draft/' },
+          { key: 'Status', value: '/Draft/' },
+        ];
+
+        expect(normalizeExclusionLists(settings)).toBe(true);
+        expect(settings.exclusions.excludedProperties).toEqual([
+          { key: '/A/', value: 'x' },
+          { key: '/a/', value: 'x' },
+          { key: 'Status', value: '/Draft/' },
+        ]);
+      });
+
       it('should deduplicate properties only when key and value both match', () => {
         settings.exclusions.excludedProperties = [
           { key: 'status', value: 'draft' },
@@ -1550,6 +1948,10 @@ describe('utils', () => {
   });
 
   describe('reverseCharacterReplacements', () => {
+    beforeEach(() => {
+      settings.characterReplacements.enableForbiddenCharReplacements = true;
+    });
+
     const enableChar = (
       key: CharKey,
       overrides: Partial<CharReplacementConfig> = {}
@@ -1611,11 +2013,27 @@ describe('utils', () => {
         );
       });
 
-      it('leaves text untouched when title conversion is off', () => {
-        settings.core.convertReplacementChars = false;
-        enableChar('slash');
+      // Nothing tells which character a shared string stood for
+      it('leaves a replacement shared by two characters as it is', () => {
+        enableChar('slash', { replacement: '-' });
+        enableChar('colon', { replacement: '-' });
 
-        expect(reverseCharacterReplacements('a ∕ b', settings)).toBe('a ∕ b');
+        expect(reverseCharacterReplacements('a-b', settings)).toBe('a-b');
+      });
+
+      // Title conversion governs title insertion only, and that caller checks it itself
+      it('reverses while Character replacements is on, even with title conversion off', () => {
+        settings.core.convertReplacementChars = false;
+
+        expect(reverseCharacterReplacements('a⧵b․c', settings)).toBe('a\\b.c');
+      });
+
+      // With Character replacements off FLIT made no replacements, so there is nothing to reverse
+      it('leaves text untouched while Character replacements is off, even with title conversion on', () => {
+        settings.characterReplacements.enableForbiddenCharReplacements = false;
+        settings.core.convertReplacementChars = true;
+
+        expect(reverseCharacterReplacements('a⧵b․c', settings)).toBe('a⧵b․c');
       });
 
       // Guards the insert-filename command, which echoes a filename verbatim
@@ -1663,11 +2081,53 @@ describe('utils', () => {
         expect(respace('Really？! Yes')).toBe('Really?! Yes');
       });
 
-      it('restores spaces on both sides of bracket replacements', () => {
+      // An opening bracket binds to the text after it and a closing one to the text before it, so each gets back only its outer space.
+      it('restores spaces only on the outer side of bracket replacements', () => {
         enableChar('leftBracket');
         enableChar('rightBracket');
 
-        expect(respace('a［b］c')).toBe('a [ b ] c');
+        expect(respace('a［b］c')).toBe('a [b] c');
+      });
+
+      it('restores a bracket pair with its default trims', () => {
+        enableChar('leftBracket');
+        enableChar('rightBracket');
+
+        // Under the default trims no first line written with ASCII brackets maps back to `［Draft］ Plan`: the forward pass drops the space after `］`, so the note takes the name `［Draft］Plan` on its next pass.
+        expect(respace('［Draft］ Plan')).toBe('[Draft] Plan');
+      });
+
+      it('restores the space between adjacent bracket pairs once', () => {
+        enableChar('leftBracket');
+        enableChar('rightBracket');
+
+        expect(respace('［a］［b］')).toBe('[a] [b]');
+      });
+
+      it('restores spaces around a bracket pair inside a word', () => {
+        enableChar('leftBracket');
+        enableChar('rightBracket');
+
+        expect(respace('foo［bar］baz')).toBe('foo [bar] baz');
+      });
+
+      it('restores the space after a mid-word question mark with its default trims', () => {
+        enableChar('question');
+
+        expect(respace('a？b')).toBe('a? b');
+      });
+
+      it('adds no space between a closing bracket and punctuation', () => {
+        enableChar('leftBracket');
+        enableChar('rightBracket');
+
+        expect(respace('［Draft］: x')).toBe('[Draft]: x');
+      });
+
+      it('adds no space at the start of the text or next to whitespace', () => {
+        enableChar('question', { trimLeft: true });
+
+        expect(respace('？ a ？')).toBe('? a ?');
       });
 
       it('inspects the character past a multi-character replacement', () => {

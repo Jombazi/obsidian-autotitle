@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { readFileContent, findEditor } from '../../src/utils/content-reader';
+import { readFileContent } from '../../src/utils/content-reader';
 import {
   createMockFile,
   createMockApp,
@@ -26,6 +26,25 @@ describe('content-reader', () => {
     const settings = createTestSettings();
     plugin = createMockPlugin(app, settings);
   });
+
+  /** A loaded Markdown view showing `viewFile`, whose editor holds `content` */
+  function markdownViewOf(viewFile: TFile, content: string): MarkdownView {
+    const view = new MarkdownView(app);
+    view.file = viewFile;
+    vi.mocked(view.editor.getValue).mockReturnValue(content);
+    return view;
+  }
+
+  const STALE_EDITOR_TEXT = '---\nx: 1\n---\nTitle\n';
+  const VIEW_TEXT = '---\nx: 1\nok: wow\n---\nTitle\n';
+
+  /** A Reading view showing `viewFile` after a property was added there: its hidden editor still holds the text it loaded */
+  function readingViewOf(viewFile: TFile): MarkdownView {
+    const view = markdownViewOf(viewFile, STALE_EDITOR_TEXT);
+    vi.mocked(view.getMode).mockReturnValue('preview');
+    vi.mocked(view.getViewData).mockReturnValue(VIEW_TEXT);
+    return view;
+  }
 
   describe('readFileContent', () => {
     it('should use provided content when available', async () => {
@@ -57,12 +76,7 @@ describe('content-reader', () => {
 
     it('should search workspace for editor when searchWorkspace is true', async () => {
       const editorContent = 'Workspace editor content';
-      const mockView = {
-        file: file,
-        editor: {
-          getValue: vi.fn().mockReturnValue(editorContent),
-        },
-      };
+      const mockView = markdownViewOf(file, editorContent);
 
       app.workspace.getLeavesOfType = vi
         .fn()
@@ -144,14 +158,9 @@ describe('content-reader', () => {
       const editor = new Editor();
       editor.getValue = vi.fn().mockReturnValue(editorContent);
 
-      app.workspace.getLeavesOfType = vi.fn().mockReturnValue([
-        {
-          view: {
-            file,
-            editor: { getValue: vi.fn().mockReturnValue('Workspace') },
-          },
-        },
-      ]);
+      app.workspace.getLeavesOfType = vi
+        .fn()
+        .mockReturnValue([{ view: markdownViewOf(file, 'Workspace') }]);
 
       const result = await readFileContent(plugin, file, {
         providedEditor: editor,
@@ -185,110 +194,6 @@ describe('content-reader', () => {
       await readFileContent(plugin, file);
 
       expect(consoleSpy).not.toHaveBeenCalled();
-    });
-
-    it('should handle unknown contentReadMethod with cached read', async () => {
-      plugin.settings.core.contentReadMethod = 'Unknown' as any;
-      app.vault.cachedRead = vi.fn().mockResolvedValue('Cached content');
-
-      const result = await readFileContent(plugin, file);
-
-      expect(result).toBe('Cached content');
-      expect(app.vault.cachedRead).toHaveBeenCalledWith(file);
-    });
-
-    it('should handle unknown contentReadMethod with fresh read when preferFresh', async () => {
-      plugin.settings.core.contentReadMethod = 'Unknown' as any;
-      app.vault.read = vi.fn().mockResolvedValue('Fresh content');
-
-      const result = await readFileContent(plugin, file, { preferFresh: true });
-
-      expect(result).toBe('Fresh content');
-      expect(app.vault.read).toHaveBeenCalledWith(file);
-    });
-  });
-
-  describe('findEditor', () => {
-    it('should find editor for matching file', () => {
-      const editor = new Editor();
-      const mockView = {
-        file: file,
-        editor: editor,
-      };
-
-      app.workspace.getLeavesOfType = vi
-        .fn()
-        .mockReturnValue([{ view: mockView }]);
-
-      const result = findEditor(app, file);
-
-      expect(result).toBe(editor);
-    });
-
-    it('should return null when no matching file found', () => {
-      const otherFile = createMockFile('other.md');
-      const mockView = {
-        file: otherFile,
-        editor: new Editor(),
-      };
-
-      app.workspace.getLeavesOfType = vi
-        .fn()
-        .mockReturnValue([{ view: mockView }]);
-
-      const result = findEditor(app, file);
-
-      expect(result).toBeNull();
-    });
-
-    it('should return null when no Markdown leaves exist', () => {
-      app.workspace.getLeavesOfType = vi.fn().mockReturnValue([]);
-
-      const result = findEditor(app, file);
-
-      expect(result).toBeNull();
-    });
-
-    it('should return null when view has no editor', () => {
-      const mockView = {
-        file: file,
-        editor: null,
-      };
-
-      app.workspace.getLeavesOfType = vi
-        .fn()
-        .mockReturnValue([{ view: mockView }]);
-
-      const result = findEditor(app, file);
-
-      expect(result).toBeNull();
-    });
-
-    it('should find editor among multiple leaves', () => {
-      const targetEditor = new Editor();
-      const otherFile = createMockFile('other.md');
-
-      app.workspace.getLeavesOfType = vi.fn().mockReturnValue([
-        { view: { file: otherFile, editor: new Editor() } },
-        { view: { file: file, editor: targetEditor } },
-        {
-          view: { file: createMockFile('another.md'), editor: new Editor() },
-        },
-      ]);
-
-      const result = findEditor(app, file);
-
-      expect(result).toBe(targetEditor);
-    });
-
-    it('should handle view without file property', () => {
-      app.workspace.getLeavesOfType = vi
-        .fn()
-        .mockReturnValue([{ view: { editor: new Editor() } }]);
-
-      const result = findEditor(app, file);
-
-      expect(result).toBeNull();
     });
   });
 
@@ -440,12 +345,7 @@ describe('content-reader', () => {
 
     it('should check main workspace leaves as final fallback', async () => {
       const leafContent = 'Main workspace content';
-      const mockView = {
-        file: file,
-        editor: {
-          getValue: vi.fn().mockReturnValue(leafContent),
-        },
-      };
+      const mockView = markdownViewOf(file, leafContent);
 
       app.workspace.getLeavesOfType = vi
         .fn()
@@ -460,12 +360,7 @@ describe('content-reader', () => {
     });
 
     it('should not use workspace leaf with empty content', async () => {
-      const mockView = {
-        file: file,
-        editor: {
-          getValue: vi.fn().mockReturnValue(''),
-        },
-      };
+      const mockView = markdownViewOf(file, '');
 
       app.workspace.getLeavesOfType = vi
         .fn()
@@ -477,6 +372,64 @@ describe('content-reader', () => {
       });
 
       expect(result).toBe('Fallback content');
+    });
+
+    // A not-yet-loaded tab's view is no Markdown view
+    it('should skip a workspace leaf whose view is not a Markdown view', async () => {
+      app.workspace.getLeavesOfType = vi.fn().mockReturnValue([
+        {
+          view: {
+            file,
+            editor: { getValue: vi.fn().mockReturnValue('Not a view') },
+          },
+        },
+      ]);
+      app.workspace.getActiveViewOfType = vi.fn().mockReturnValue(null);
+      app.vault.cachedRead = vi.fn().mockResolvedValue('Fallback content');
+
+      const result = await readFileContent(plugin, file, {
+        searchWorkspace: true,
+      });
+
+      expect(result).toBe('Fallback content');
+    });
+  });
+
+  describe('a Reading view whose editor is stale', () => {
+    it("reads the view's text through the editor a manual command passes", async () => {
+      const view = readingViewOf(file);
+      app.workspace.getLeavesOfType = vi.fn().mockReturnValue([{ view }]);
+
+      const result = await readFileContent(plugin, file, {
+        providedEditor: view.editor,
+      });
+
+      expect(result).toBe(VIEW_TEXT);
+    });
+
+    it("reads the active view's text", async () => {
+      const view = readingViewOf(file);
+      app.workspace.getLeavesOfType = vi.fn().mockReturnValue([]);
+      app.workspace.getActiveViewOfType = vi.fn().mockReturnValue(view);
+
+      const result = await readFileContent(plugin, file, {
+        searchWorkspace: true,
+      });
+
+      expect(result).toBe(VIEW_TEXT);
+    });
+
+    it("reads an open tab's text", async () => {
+      app.workspace.getLeavesOfType = vi
+        .fn()
+        .mockReturnValue([{ view: readingViewOf(file) }]);
+      app.workspace.getActiveViewOfType = vi.fn().mockReturnValue(null);
+
+      const result = await readFileContent(plugin, file, {
+        searchWorkspace: true,
+      });
+
+      expect(result).toBe(VIEW_TEXT);
     });
   });
 });
