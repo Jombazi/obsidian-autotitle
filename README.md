@@ -4,7 +4,7 @@ Automatically set the first line as note title, just like in Apple Notes. Forget
 
 ![](https://github.com/user-attachments/assets/eed638e0-f695-4fdd-a0a6-2ace66585d58)
 
-> **TIP:** The plugin is best used with the tab title bar enabled in Obsidian settings → Interface.
+> **Tip:** The plugin is best used with the tab title bar enabled in Obsidian settings → Interface.
 
 ## Features
 
