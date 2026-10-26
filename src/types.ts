@@ -51,6 +51,7 @@ export interface CoreSettings {
   renameOnFocus: boolean;
   renameOnSave: boolean;
   onlyRenameIfHeading: boolean;
+  onlyRenameUntitled: boolean;
   manualNotificationMode: NotificationMode;
   preserveModificationDate: boolean;
   charCount: number;

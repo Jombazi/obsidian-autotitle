@@ -214,6 +214,10 @@
         "name": "Переименовывать при фокусе",
         "desc": "Также обрабатывать заметки, когда они становятся активными в редакторе."
       },
+      "onlyRenameUntitled": {
+        "name": "Only auto-rename Untitled notes",
+        "desc": "Rename automatically only while writing in a note that was named Untitled when opened. Notes you name yourself, and notes already named, are never renamed automatically. Commands still work."
+      },
       "onlyRenameIfHeading": {
         "name": "Переименовывать только если первая строка — заголовок",
         "desc": "Не переименовывать заметки, если первая строка не является заголовком."

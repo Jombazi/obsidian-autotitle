@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     renameOnFocus: false,
     renameOnSave: false,
     onlyRenameIfHeading: false,
+    onlyRenameUntitled: true,
     manualNotificationMode: 'Always',
     preserveModificationDate: true,
     charCount: 100,

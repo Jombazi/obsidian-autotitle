@@ -84,6 +84,26 @@ export class GeneralTab extends SettingsTabBase {
               })
           );
       })
+      // AutoTitle: only auto-rename Untitled notes
+      .addSetting((s) => {
+        s.setName(t('settings.general.onlyRenameUntitled.name'))
+          .setDesc(t('settings.general.onlyRenameUntitled.desc'))
+          .addToggle((toggle) =>
+            toggle
+              .setValue(this.plugin.settings.core.onlyRenameUntitled)
+              .onChange((value) => {
+                void (async () => {
+                  this.plugin.settings.core.onlyRenameUntitled = value;
+                  this.plugin.debugLog('onlyRenameUntitled', value);
+                  try {
+                    await this.plugin.saveSettings();
+                  } catch {
+                    new Notice(t('settings.errors.saveFailed'));
+                  }
+                })();
+              })
+          );
+      })
       // 2. Only rename if heading
       .addSetting((s) => {
         s.setName(t('settings.general.onlyRenameIfHeading.name'))
