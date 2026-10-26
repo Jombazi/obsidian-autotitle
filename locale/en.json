@@ -197,6 +197,10 @@
         "name": "Rename on focus",
         "desc": "Also process notes when they become active in the editor."
       },
+      "onlyRenameUntitled": {
+        "name": "Only auto-rename Untitled notes",
+        "desc": "Rename automatically only while writing in a note that was named Untitled when opened. Notes you name yourself, and notes already named, are never renamed automatically. Commands still work."
+      },
       "onlyRenameIfHeading": {
         "name": "Only rename if first line is heading",
         "desc": "Don't rename notes if the first line is not a heading."

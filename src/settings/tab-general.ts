@@ -65,6 +65,20 @@ export class GeneralTab extends SettingsTabBase {
     // Set initial visibility
     updateAutomaticRenameVisibility();
 
+    // AutoTitle: only auto-rename Untitled notes
+    new Setting(this.containerEl)
+      .setName(t("settings.general.onlyRenameUntitled.name"))
+      .setDesc(t("settings.general.onlyRenameUntitled.desc"))
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.core.onlyRenameUntitled)
+          .onChange(async (value) => {
+            this.plugin.settings.core.onlyRenameUntitled = value;
+            this.plugin.debugLog("onlyRenameUntitled", value);
+            await this.plugin.saveSettings();
+          }),
+      );
+
     // Only rename if heading
     new Setting(this.containerEl)
       .setName(t("settings.general.onlyRenameIfHeading.name"))

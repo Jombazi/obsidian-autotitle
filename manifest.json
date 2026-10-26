@@ -1,9 +1,10 @@
 {
-	"id": "first-line-is-title",
-	"name": "First Line is Title",
+	"id": "autotitle",
+	"name": "AutoTitle",
 	"minAppVersion": "1.8.0",
-	"description": "Automatically set the first line as note title.",
-	"author": "greetclammy",
+	"description": "Name new Untitled notes from their first line. Notes you name yourself are never renamed automatically.",
+	"author": "Jombazi (fork of First Line is Title by greetclammy)",
 	"isDesktopOnly": false,
-	"version": "3.10.4"
+	"version": "1.0.1",
+	"authorUrl": "https://github.com/Jombazi/obsidian-autotitle"
 }

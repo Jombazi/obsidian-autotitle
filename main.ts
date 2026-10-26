@@ -29,6 +29,7 @@ import { CommandRegistrar } from "./src/core/command-registrar";
 import { TitleInsertion } from "./src/core/title-insertion";
 import { LinkManager } from "./src/core/link-manager";
 import { EventHandlerManager } from "./src/core/event-handler-manager";
+import { UntitledSession } from "./src/core/untitled-session";
 import { FileStateManager } from "./src/core/file-state-manager";
 
 // Build-time constant injected by esbuild
@@ -53,6 +54,7 @@ export default class FirstLineIsTitle extends Plugin {
   propertyManager: PropertyManager;
   titleInsertion: TitleInsertion;
   eventHandlerManager: EventHandlerManager;
+  untitledSession = new UntitledSession();
 
   private _folderOperations?: FolderOperations;
   private _tagOperations?: TagOperations;
@@ -601,6 +603,15 @@ export default class FirstLineIsTitle extends Plugin {
 
     // Register all event handlers
     this.eventHandlerManager.registerAllHandlers();
+
+    // AutoTitle: track which note was opened as "Untitled"
+    this.registerEvent(
+      this.app.workspace.on("file-open", (file) => {
+        this.untitledSession.onFileOpen(file, (tracked) =>
+          this.fileStateManager.hasThrottleTimer(tracked.path),
+        );
+      }),
+    );
 
     // Setup notification suppression to hide external modification notices
     this.propertyManager.setupNotificationSuppression();

@@ -1,64 +1,24 @@
-English • [Русский](https://github.com/greetclammy/first-line-is-title/blob/main/README_RU.md)
+# AutoTitle
 
-# First Line is Title
+Built on the official 3.10.4 release.
 
-Automatically set the first line as note title, just like in Apple Notes! Forget about manual filename entry or nondescript timestamps.
+A fork of [First Line is Title](https://github.com/greetclammy/first-line-is-title) by greetclammy (now churnish), licensed under GPL-3.0.
 
-![](https://github.com/user-attachments/assets/eed638e0-f695-4fdd-a0a6-2ace66585d58)
+**What's different:** the new setting **Only auto-rename Untitled notes** is on by default.
 
-> [!TIP]
-> The plugin is best used with the tab title bar enabled in Obsidian settings > Appearance > Interface.
+- A note opened as `Untitled` gets its name from its first line while you write in it.
+- Once you open another note, the name stays fixed. Editing that note later won't rename it.
+- Notes you name yourself are never renamed automatically.
+- Rename commands still work on any note.
 
-## ⚡ Features
+## Install (iOS, Android, desktop)
 
-- Rename notes automatically or manually.
-- Move cursor to first line on note creation.
-- Put any first line content in title or headings only.
-- Replace characters forbidden in filenames with safe alternatives, or omit them entirely.
-- Strip Markdown syntax from filenames.
-- Add custom replacement rules.
-- Automatically populate first line alias property — make forbidden characters searchable in Quick switcher or [Omnisearch](https://obsidian.md/plugins?id=omnisearch), or set as note title in [Notebook Navigator](https://obsidian.md/plugins?id=notebook-navigator) or [Front Matter Title](https://obsidian.md/plugins?id=obsidian-front-matter-title-plugin).
-- Commands to batch rename all notes in folder, all notes with tag, all search results, or entire vault.
-- Insert filename in first line on note creation.
-- Exclude select notes, folders, tags, properties or filenames from renaming, or only enable renaming in some.
-- Convert selection containing characters forbidden in filenames into valid internal link. Preserve original text in link caption.
+1. In Obsidian, open **Settings → Community plugins → Browse**, then install and enable **BRAT**.
+2. Open **Settings → BRAT → Add beta plugin**.
+3. Paste `https://github.com/Jombazi/obsidian-autotitle`, choose the latest version, then select **Add plugin**.
+4. Turn off **First Line is Title** if it's installed, then enable **AutoTitle** under Community plugins.
 
-## 🔏 File integrity
+BRAT installs future updates automatically. Settings from First Line is Title aren't copied over, so re-add any exclusions you need.
 
-- Only notes that are currently open in the editor are processed, along with any notes you explicitly select for batch operations (like renaming all notes in a folder).
-- By default, note modification time is preserved on rename.
-- Multiple safeguards are in place to prevent unintended changes but **regular [backups](https://help.obsidian.md/backup) remain your ultimate safety net**.
+---
 
-## ✅ Install
-
-Untill _First Line is Title_ is [made availiable](https://github.com/obsidianmd/obsidian-releases/pull/7429) in the plugin directory, follow the steps below to install it.
-
-### BRAT (recommended)
-
-1. Download and enable the community plugin [BRAT](https://obsidian.md/plugins?id=obsidian42-brat).
-2. Open _BRAT_ settings.
-3. Press _Add Beta Plugin_.
-4. Paste https://github.com/greetclammy/first-line-is-title in the text field.
-5. Select _Latest version_.
-6. Check _Enable after installing the plugin_.
-7. Press _Add Plugin_.
-
-### Install manually
-
-Note: to get updates for _First Line is Title_, you will have to check for and install them manually.
-
-1. Download `first-line-is-title.zip` in the `Assets` of the [latest release](https://github.com/greetclammy/first-line-is-title/releases).
-2. Unzip the folder and place it in the `.obsidian/plugins` folder (hidden on most OSes) at the root of your vault.
-3. Reload plugins or app.
-4. Enable _First Line is Title_ in Obsidian settings > Community plugins > Installed plugins.
-
-## ⭐️ Support
-
-- [Report bugs](https://github.com/greetclammy/first-line-is-title/issues)
-- [Request features](https://github.com/greetclammy/first-line-is-title/issues)
-- [Contribute improvements](https://github.com/greetclammy/first-line-is-title/pulls)
-- Discuss on:
-  - [Obsidian Forum](https://forum.obsidian.md/t/plugin-to-automatically-copy-first-line-in-note-to-note-title/103558)
-  - [GitHub discussions](https://github.com/greetclammy/first-line-is-title/discussions)
-  - [r/ObsidianMD](https://www.reddit.com/r/ObsidianMD/comments/1nwmq0x/comment/nhm2x61/)
-  - [Discord](https://discord.com/channels/686053708261228577/707816848615407697) • [Join](https://discord.com/invite/obsidianmd)

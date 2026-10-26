@@ -6,6 +6,7 @@ import {
   createTestSettings,
 } from "../testUtils";
 import { TFile, Editor, App } from "../mockObsidian";
+import { UntitledSession } from "../../src/core/untitled-session";
 
 // Mock plugin for RenameEngine
 function createMockPlugin() {
@@ -16,6 +17,7 @@ function createMockPlugin() {
     app,
     settings,
     trackUsage: vi.fn(),
+    untitledSession: new UntitledSession(),
     cacheManager: {
       isLocked: vi.fn().mockReturnValue(false),
       acquireLock: vi.fn().mockReturnValue(true),
@@ -416,6 +418,66 @@ describe("RenameEngine", () => {
 
       // Should not read from vault when content is provided
       expect(plugin.app.vault.read).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("only auto-rename Untitled notes", () => {
+    let named: TFile;
+    let untitled: TFile;
+
+    beforeEach(() => {
+      named = createMockFile("A/Shopping list.md");
+      untitled = createMockFile("Untitled.md");
+      plugin.app.vault.getAbstractFileByPath = vi
+        .fn()
+        .mockImplementation((path: string) =>
+          path === named.path
+            ? named
+            : path === untitled.path
+              ? untitled
+              : null,
+        );
+      plugin.app.vault.read = vi.fn().mockResolvedValue("# New title\nBody");
+    });
+
+    it("blocks an automatic rename of a note you named yourself", async () => {
+      plugin.app.workspace.getActiveFile = vi.fn().mockReturnValue(named);
+      const result = await renameEngine.processFile(named, true);
+      expect(result.reason).toBe("not-untitled");
+      expect(plugin.app.fileManager.renameFile).not.toHaveBeenCalled();
+    });
+
+    it("lets the manual command rename a named note", async () => {
+      plugin.app.workspace.getActiveFile = vi.fn().mockReturnValue(named);
+      const result = await renameEngine.processFile(named, true, true);
+      expect(result.reason).not.toBe("not-untitled");
+    });
+
+    it("lets batch commands rename named notes", async () => {
+      const result = await renameEngine.processFile(
+        named,
+        true,
+        false,
+        undefined,
+        true,
+      );
+      expect(result.reason).not.toBe("not-untitled");
+    });
+
+    it("lets an automatic rename run on the open Untitled note", async () => {
+      plugin.app.workspace.getActiveFile = vi.fn().mockReturnValue(untitled);
+      const result = await renameEngine.processFile(untitled, true);
+      expect(result.reason).not.toBe("not-untitled");
+    });
+
+    it("behaves like the original plugin when the setting is off", async () => {
+      plugin.settings = {
+        ...plugin.settings,
+        core: { ...plugin.settings.core, onlyRenameUntitled: false },
+      };
+      plugin.app.workspace.getActiveFile = vi.fn().mockReturnValue(named);
+      const result = await renameEngine.processFile(named, true);
+      expect(result.reason).not.toBe("not-untitled");
     });
   });
 

@@ -467,6 +467,24 @@ export class RenameEngine {
     hasActiveEditor?: boolean,
     editor?: Editor,
   ): Promise<{ success: boolean; reason?: string }> {
+    // AutoTitle: automatic renames only touch notes opened as "Untitled".
+    // Commands and batch operations (showNotices / isBatchOperation) are unaffected.
+    const isAutomatic = !showNotices && !isBatchOperation;
+    if (
+      isAutomatic &&
+      this.plugin.settings.core.onlyRenameUntitled &&
+      !this.plugin.untitledSession.canAutoRename(
+        file,
+        this.plugin.app.workspace.getActiveFile(),
+      )
+    ) {
+      verboseLog(
+        this.plugin,
+        `Skipping automatic rename - note was not opened as Untitled: ${file.path}`,
+      );
+      return { success: false, reason: "not-untitled" };
+    }
+
     // Central gate: check policy requirements and always-on safeguards
     const { canModify, reason } = canModifyFile(
       file,
